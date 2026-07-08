@@ -1,114 +1,92 @@
 # Forge
 
-A lightweight Go CLI that manages persistent remote **Claude Code** workspaces
-over SSH.
+Persistent remote **Claude Code** workspaces over SSH.
 
-One powerful VPS behind a firewall (only SSH is open). On it, several isolated
-workspaces — each a normal Linux user with its own home, git config, SSH keys,
-and one persistent Claude session running inside **tmux** so it never dies on
-disconnect. Forge is the thin client that drives all of it from your laptop (and,
-because the session lives on the server, you can reattach from anywhere — even a
-phone with an SSH app).
+Run Claude Code on a powerful server that never sleeps, in isolated workspaces
+you reach from your laptop — or your phone. Each workspace keeps its Claude
+session running in the background (in tmux), so it survives SSH disconnects, a
+closed laptop lid, even your machine rebooting. Reattach and Claude is exactly
+where you left it.
 
-It leans on standard Linux primitives instead of reinventing them:
+Forge is a single small binary. On the server it uses nothing exotic — plain
+Linux users for isolation, tmux for sessions, SSH tunnels for dev servers — so
+there's little to trust or maintain.
 
-- **tmux** for persistent sessions (not a custom session manager)
-- **SSH** for transport (not a custom protocol or an internet-facing daemon)
-- **Linux users** for isolation (not containers)
-- **SSH tunnels** for exposing dev servers (not a reverse proxy)
+> **Status: early.** The laptop side works and is tested. Server provisioning
+> (`host prepare`) and workspace management make real system changes and haven't
+> been run end to end on a live host yet — **try it on a throwaway server first.**
 
-Zero external dependencies — standard library only.
+---
 
-> **Status: early.** Config, command routing, SSH/tmux composition, the
-> forwarding supervisor, and `show ports` work and are tested locally. The
-> server-side agent (`useradd`/`tmux`/filesystem) and `host prepare` are
-> implemented but need a real Linux host to exercise end to end.
+## Install
+
+macOS and Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Marb-AI/forge/main/install.sh | sh
+```
+
+That drops the right binary for your machine into `~/.forge/bin` and links it onto
+your PATH. Re-run any time to upgrade.
+
+By hand, or on Windows: download the binary for your OS/arch from the
+[latest release](https://github.com/Marb-AI/forge/releases/latest) and put it on
+your PATH (`forge-windows-amd64.exe` on Windows).
+
+---
+
+## Quick start
+
+Point Forge at a **bare** server — connect as **root** or a passwordless-sudo
+user, and it provisions everything, no cloud-console clicking:
+
+```sh
+forge host prepare root@1.2.3.4 --alias=myserver
+```
+
+`prepare` is idempotent and:
+
+- installs git, tmux, and **docker + compose** (Debian/Ubuntu and Fedora/RHEL),
+- locks the firewall to **SSH-only** — nothing else reachable from the internet,
+  including Docker's published ports,
+- disables SSH password auth (keys only), guarded so it can't lock you out.
+
+Opt out of those last two with `--no-firewall` / `--no-ssh-harden`.
+
+> It makes real system changes (packages, iptables, sshd) — test on a throwaway
+> host first.
+
+Then create a workspace and open its persistent Claude session:
+
+```sh
+forge workspace create crm myserver     # an isolated workspace "crm"
+forge workspace crm claude              # open Claude — survives disconnects
+forge workspace crm ssh                 # a plain shell inside the workspace
+```
+
+Reattach any time, from your laptop or a phone with an SSH app, and Claude is
+right where you left it.
 
 ---
 
 ## Concepts
 
-| Thing | Is |
+| | |
 | --- | --- |
-| **Host** | a registered server, reached only over SSH |
-| **Workspace** | a Linux user on a host (`crm` → home `/home/workspaces/crm`), with its own keys, git config, and one Claude session |
-| **Claude session** | a tmux session named `claude` owned by the workspace user; survives disconnects |
-| **Forwarding** | a background supervisor on your laptop that keeps `ssh -L` tunnels alive, reconnecting on any blip |
-
-Two binaries from one module:
-
-- **`forge`** — the local CLI (laptop).
-- **`forge-agent`** — a privileged helper on the server, invoked over SSH per
-  operation (never a daemon). Only used for workspace lifecycle (create / delete
-  / list / status); everything else is direct SSH as the workspace user.
-
----
-
-## Build
-
-```sh
-make build          # bin/forge and bin/forge-agent
-make agent-linux    # cross-compile the agent for the server (linux amd64/arm64)
-```
-
-## Quick start
-
-Build, then point `forge host prepare` at a **bare** server — connect as **root**
-or a passwordless-sudo user and it provisions everything, no clicking around a
-cloud console:
-
-```sh
-make build agent-linux
-forge host prepare root@1.2.3.4 --alias=myserver
-```
-
-`prepare` is **idempotent** (already-present tools are reported, not
-reinstalled). It:
-
-- installs `git`, `tmux`, `iproute2` (`ss`), and **docker + compose** (via the
-  official get.docker.com script — Debian/Ubuntu and Fedora/RHEL),
-- installs `forge-agent` and, for a non-root admin, a passwordless sudoers rule,
-- **locks the firewall to SSH-only** (iptables): drops all other inbound,
-  including Docker's published ports which otherwise bypass the INPUT chain,
-  and persists across reboot,
-- **disables SSH password auth** (keys only) — but only if an `authorized_keys`
-  already exists, so it can't lock you out.
-
-Opt out of the aggressive bits with `--no-firewall` / `--no-ssh-harden`.
-
-> Not yet exercised end to end — it drives real system changes (packages,
-> iptables, sshd). **Test on a throwaway host first.**
-
-Then create a workspace and open its persistent Claude session:
-
-```sh
-forge workspace create crm myserver             # a Linux user "crm" on myserver
-forge workspace crm claude                      # persistent Claude session (attach-or-create)
-forge workspace crm ssh                          # a plain shell in the workspace
-```
-
-Forge installs your SSH **public key** (`~/.ssh/*.pub`, or `FORGE_PUBKEY`) into
-each workspace user's `authorized_keys`, so you SSH in as the workspace user
-directly.
-
-To make forwarding survive laptop reboots without any OS integration, drop one
-line in your shell rc — `spawn` is idempotent, so every later shell is a fast
-no-op:
-
-```sh
-forge spawn >/dev/null 2>&1
-```
+| **Host** | a server you registered, reached only over SSH |
+| **Workspace** | an isolated Linux user on a host (`crm`), with its own home, git config, keys, and one Claude session |
+| **Claude session** | a background tmux session that keeps Claude alive across disconnects |
+| **Forwarding** | keeps your dev servers tunnelled to `localhost`, auto-reconnecting through blips and reboots |
 
 ---
 
 ## Add a new project
 
-Forge gives you the environment; it does **not** clone for you (automatic git
-clone is a future idea). Because a fresh workspace has no git credentials, decide
-how it authenticates first. A full first run:
+Forge gives you the environment; you clone into it. A fresh workspace has no git
+credentials, so pick how it authenticates first. A full first run:
 
 ```sh
-forge workspace create shop myserver             # new Linux user "shop"
+forge workspace create shop myserver             # new workspace "shop"
 
 # --- git auth: pick one ---------------------------------------------------
 # (a) `ssh` forwards your SSH agent by default, so the clone just uses your keys:
@@ -121,7 +99,7 @@ forge workspace shop ssh
 #     cat ~/.ssh/id_ed25519.pub        # add as a deploy key on the repo, then clone
 # --------------------------------------------------------------------------
 
-# In the workspace shell, set your commit identity and bring it up:
+# In the workspace shell, set your commit identity and bring the project up:
 #     cd shop
 #     git config user.name  "You"
 #     git config user.email "you@example.com"
@@ -130,25 +108,29 @@ forge show ports myserver                         # paste the taken ports to Cla
 #     make dev            # or `docker compose up`, whatever the project uses
 
 # Tunnel the dev servers and open the session:
-forge forwarding start shop                        # scan the project's docker ports, tunnel them
-forge spawn                                         # ensure the tunnel supervisor runs
+forge forwarding start shop                        # find the project's ports, tunnel them
+forge spawn                                         # keep tunnels alive in the background
 forge forwarding status                             # per-tunnel state
-forge workspace shop claude                         # persistent Claude session
+forge workspace shop claude                         # open Claude
+```
+
+To keep tunnels alive across laptop reboots, add one line to your shell rc
+(`spawn` is idempotent — every later shell is a fast no-op):
+
+```sh
+forge spawn >/dev/null 2>&1
 ```
 
 > **Agent forwarding vs the Claude session.** `forge workspace <name> ssh`
-> forwards your agent by default — great for an interactive shell (clone, push,
-> pull just work), and fine for your own single-user box, which the model already
-> trusts. Disable it with `--no-agent`. But it does **not** reach the persistent
-> Claude tmux session reliably: tmux outlives the SSH connection, so the
-> forwarded agent socket goes stale on reattach. If **Claude itself** needs to
-> push/pull, give the workspace a **deploy key** (option b) — it lives in
-> `~/.ssh` and works regardless of how you connect.
+> forwards your SSH agent by default — great for an interactive shell (clone,
+> push, pull just work). But it does **not** reach the persistent Claude session
+> reliably: tmux outlives the SSH connection, so the forwarded agent goes stale on
+> reattach. If **Claude itself** needs to push/pull, give the workspace a **deploy
+> key** (option b) — it works regardless of how you connect.
 
-For running the **same** repo in several parallel workspaces, or a
-**backend + frontend** across two repos, see *Workflows & best practices* below.
+---
 
-## Command reference
+## Commands
 
 ```
 Hosts
@@ -163,110 +145,79 @@ Workspaces
   forge workspace delete <name>
   forge workspace list                            NAME  HOST  STATUS
 
-  forge workspace <name> ssh [--no-agent]         shell as the workspace user (SSH agent forwarded by default)
-  forge workspace <name> claude                   attach-or-create the Claude session
-  forge workspace <name> claude renew             kill + fresh session (reset context/tokens)
-  forge workspace <name> claude stop              kill the session
-  forge workspace <name> expose <port>            one-off ssh -L, foreground (Ctrl-C stops)
+  forge workspace <name> ssh [--no-agent]         shell as the workspace user (agent forwarded by default)
+  forge workspace <name> claude                   open the Claude session (attach-or-create)
+  forge workspace <name> claude renew             fresh session (reset context / save tokens)
+  forge workspace <name> claude stop              stop the session
+  forge workspace <name> expose <port>            tunnel one port, foreground (Ctrl-C stops)
 
 Forwarding
-  forge forwarding start [name]                   scan docker ports, save, (re)spawn supervisor
+  forge forwarding start [name]                   find the project's ports, save, keep them tunnelled
   forge forwarding stop
   forge forwarding status
-  forge spawn                                      ensure the tunnel supervisor is up (idempotent)
+  forge spawn                                      keep tunnels alive in the background (idempotent)
 
 Info
-  forge show ports [host]                          listening + forwarded ports (paste to Claude)
+  forge show ports [host]                          ports in use on the server (paste to Claude)
 ```
 
-`claude renew` = `stop` + fresh start; use it to clear a bloated context window.
-Your login to Claude persists in the workspace's `~/.claude`, so `renew`/`stop`
-never touch authentication.
+`claude renew` = stop + fresh start; use it to clear a bloated context window.
+Your login to Claude persists in the workspace, so `renew`/`stop` never touch it.
 
 ---
 
-## How it works (the parts worth knowing)
+## How it works
 
-**Persistent sessions.** `forge workspace crm claude` runs
-`tmux new -A -s claude claude` as the `crm` user — attach if it exists, else
-create. The client SSH connection can die; tmux keeps Claude alive server-side,
-you just reattach.
+**Sessions never die.** `forge workspace crm claude` runs Claude inside a tmux
+session on the server. Your SSH connection can drop; Claude keeps running. You
+just reattach.
 
-**Forwarding is supervised.** A bare `ssh -L` neither waits for a down server nor
-reconnects. Forge runs **one supervised `ssh -L` per port**, each with a
-1-second retry, so a blip or a server reboot self-heals within a second. A port
-whose service is *down* is fine — `-L` binds locally regardless and returns
-connection-refused until the service is up, then just works. An **auth failure**
-is terminal (retrying a bad key never helps): that tunnel stops and is reported
-in `forge forwarding status`.
+**Tunnels heal themselves.** A plain SSH tunnel dies on any hiccup and stays
+dead. Forge supervises one tunnel per port and reconnects within a second of a
+blip or a server reboot — a service that's momentarily down is fine, it just
+starts working once it's up. A wrong SSH key is reported instead of retried
+forever.
 
-**Ports are reported, not allocated.** Claude sets the ports on the project
-(editing `.env` / compose). Forge just tells you what's taken — `forge show
-ports` prints the union of what's actually listening (`ss`) and what Forge is
-forwarding. Paste it to Claude: *"pick host ports that avoid these."*
+**Ports: reported, not assigned.** Claude sets the ports on your project. Forge
+just tells you what's already taken — `forge show ports` lists everything
+listening on the server plus what it's forwarding. Paste it to Claude: *"pick
+ports that avoid these."*
 
-**Per-workspace env.** At create, Forge writes `~/.forge/env` in the workspace
-(sourced from `.bashrc` and from Forge's launch commands, so it applies to
-interactive shells, scripts, and `make` targets alike). It sets:
-
-```
-COMPOSE_PROJECT_NAME=<workspace>
-```
-
-so `docker compose` scopes its project (and, in tooling that names its network
-off `COMPOSE_PROJECT_NAME`, the network too) to the workspace — parallel clones
-stay isolated automatically. Add your own entries to this file if you like.
+**Parallel work stays isolated.** Each workspace scopes `docker compose` to its
+own project name automatically, so the same repo cloned into several workspaces
+(for parallel Claude sessions) doesn't collide.
 
 ---
 
-## Workflows & best practices
+## Workflows
 
-**One project per workspace.** Keep the model simple: a workspace maps to one
-Claude session on one project. Name the workspace after the project.
+**One project per workspace.** Simplest model: a workspace is one Claude session
+on one project. Name the workspace after the project.
 
-**Multisession dev (clones of one repo).** Create several workspaces from the
-same repo (`crm`, `crm-2`, `crm-feature`). Each gets its own
-`COMPOSE_PROJECT_NAME`, so compose projects/networks don't collide. Host ports
-still need to differ — parameterize them in each repo's `.env`
-(`${API_HOST_PORT:-8000}` style) and let Claude pick free values from
-`forge show ports`. Then `forge forwarding start <name>` tunnels each clone's
-ports independently.
+**Parallel sessions on one repo.** Create several workspaces from the same repo
+(`crm`, `crm-2`, `crm-feature`). Compose projects/networks won't collide; give
+each a different host port (parameterize it in the repo's `.env` and let Claude
+pick free ones from `forge show ports`), then `forge forwarding start` tunnels
+each independently.
 
-**Backend + frontend across two repos.** Two repos, each with its own
-Makefile/compose, run as **separate projects** — don't force them under one
-name. How they talk depends on where the frontend runs:
+**Backend + frontend across two repos.** Run them as separate projects. If the
+frontend is a container, put it on the backend's docker network and reach it by
+service name — no host port for the API. If the frontend runs on your host (a
+Metro/Expo/Vite dev server), publish the API on a host port, tunnel it, and point
+the frontend's API URL at that `localhost:<port>`.
 
-- **FE is a container** → put it on the same docker network as the backend
-  (e.g. an `external` network both attach to) and reach the backend by service
-  name. The backend API needs **no** host port.
-- **FE runs on the host** (a Metro/Expo/Vite dev server, etc.) → it reaches the
-  backend over HTTP, so the backend API **must** be published on a host port and
-  tunnelled with `forge forwarding`; point the FE's API URL at that
-  `localhost:<port>`.
-
-Backend-internal services (db, gRPC, …) always talk by service name over the
-docker network and never need publishing.
-
-**Let the project own its lifecycle.** `make dev`, `make logs`, `make migrate`,
-restarts, backups — those live in the repo, not in Forge. Forge only provides
-*access* to the environment.
-
-**Guardrail.** Running `claude` directly in a workspace shell prints a hint to
-use `forge workspace <name> claude` instead — a bare launch would die on
-disconnect. (A power user can still bypass with `command claude`.)
+**The project owns its lifecycle.** `make dev`, `make logs`, `make migrate`,
+restarts, backups — those live in the repo. Forge only gives you access to the
+environment.
 
 ---
-
-## Layout
-
-```
-cmd/forge         local CLI (laptop)
-cmd/forge-agent   privileged helper (server, invoked over SSH)
-internal/         config, sshx, supervisor, agent, proc, command handlers
-```
 
 ## Non-goals
 
 Forge does not manage Docker/Compose lifecycle, Kubernetes, deployments, logs,
-restarts, backups, snapshots, CI/CD, or build pipelines. Those belong to each
-project's own tooling.
+restarts, backups, CI/CD, or build pipelines. Those belong to each project.
+
+---
+
+<sub>Hacking on Forge itself? `make build` (dev) or `make release` (all
+platforms) — Go standard library only, no dependencies.</sub>
