@@ -92,6 +92,9 @@ func opCreate(args []string) int {
 	if err := seedGitconfig(home); err != nil {
 		return emitError("gitconfig: %v", err)
 	}
+	if err := seedTmuxConf(home); err != nil {
+		return emitError("tmux conf: %v", err)
+	}
 	if err := writeMetadata(home, *name); err != nil {
 		return emitError("metadata: %v", err)
 	}
@@ -247,6 +250,12 @@ func seedBashrc(home, name string) error {
 func seedGitconfig(home string) error {
 	const cfg = "[init]\n\tdefaultBranch = main\n[pull]\n\trebase = false\n"
 	return os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o644)
+}
+
+// seedTmuxConf turns off the tmux status bar so a workspace session feels like a
+// plain terminal — no green bar telling you where you are; you already know.
+func seedTmuxConf(home string) error {
+	return os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set -g status off\n"), 0o644)
 }
 
 func writeMetadata(home, name string) error {

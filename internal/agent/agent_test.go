@@ -81,6 +81,17 @@ func TestWriteMetadata(t *testing.T) {
 	}
 }
 
+func TestSeedTmuxConf(t *testing.T) {
+	home := t.TempDir()
+	if err := seedTmuxConf(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(filepath.Join(home, ".tmux.conf"))
+	if !strings.Contains(string(data), "status off") {
+		t.Errorf("tmux.conf = %q", data)
+	}
+}
+
 func TestSeedGitconfig(t *testing.T) {
 	home := t.TempDir()
 	if err := seedGitconfig(home); err != nil {
