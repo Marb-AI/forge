@@ -60,9 +60,21 @@ fi
 chmod +x "$TARGET"
 echo "forge: binary -> $TARGET"
 
+# macOS: a cross-compiled Go binary carries a linker ad-hoc signature that Apple
+# Silicon (AMFI) can reject, killing the process with "killed: 9". Re-signing it
+# locally with codesign (present on every Mac) produces a signature AMFI accepts.
+if [ "$OS" = darwin ] && command -v codesign >/dev/null 2>&1; then
+	codesign --force --sign - "$TARGET" >/dev/null 2>&1 && echo "forge: re-signed for macOS"
+fi
+
 # --- symlink onto PATH -----------------------------------------------------
 LINK="$LINK_DIR/$BIN"
-if mkdir -p "$LINK_DIR" 2>/dev/null && [ -w "$LINK_DIR" ]; then
+if [ "$LINK" = "$TARGET" ]; then
+	# Link dir is the install dir — the binary is already there, don't self-link.
+	LINK=""
+	echo "forge: add $INSTALL_DIR to your PATH:"
+	echo "         export PATH=\"$INSTALL_DIR:\$PATH\""
+elif mkdir -p "$LINK_DIR" 2>/dev/null && [ -w "$LINK_DIR" ]; then
 	ln -sf "$TARGET" "$LINK"
 	echo "forge: linked -> $LINK"
 elif command -v sudo >/dev/null 2>&1; then
