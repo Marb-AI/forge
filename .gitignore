@@ -1,0 +1,15 @@
+# Build output (root-anchored so cmd/forge/ and cmd/forge-agent/ are NOT ignored)
+/bin/
+/dist/
+/forge
+/forge-agent
+*.exe
+
+# Local runtime state (never committed)
+/.forge/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
