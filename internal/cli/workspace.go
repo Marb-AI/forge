@@ -152,6 +152,11 @@ func workspaceAction(name, action string, rest []string) int {
 	}
 }
 
+// sourceEnv sources the workspace environment file before launching, so the
+// Claude/tmux session gets COMPOSE_PROJECT_NAME et al. even though it is not an
+// interactive shell that would read .bashrc. `set -a` exports everything sourced.
+const sourceEnv = `set -a; [ -f "$HOME/.forge/env" ] && . "$HOME/.forge/env"; set +a; `
+
 func workspaceClaude(target sshx.Target, rest []string) int {
 	session := agentproto.TmuxSession
 	sub := ""
@@ -161,10 +166,12 @@ func workspaceClaude(target sshx.Target, rest []string) int {
 	switch sub {
 	case "", "attach":
 		// attach-or-create in one command; survives disconnect via tmux.
-		return runInteractive(target.TTYArgs("tmux", "new", "-A", "-s", session, "claude"))
+		remote := sourceEnv + fmt.Sprintf("tmux new -A -s %s claude", session)
+		return runInteractive(target.TTYArgs(remote))
 	case "renew":
 		// kill the existing session (reset context) then start fresh and attach.
-		remote := fmt.Sprintf("tmux kill-session -t %s 2>/dev/null; tmux new -A -s %s claude", session, session)
+		remote := fmt.Sprintf("tmux kill-session -t %s 2>/dev/null; ", session) +
+			sourceEnv + fmt.Sprintf("tmux new -A -s %s claude", session)
 		return runInteractive(target.TTYArgs(remote))
 	case "stop":
 		if err := runCapture(target.Args("tmux", "kill-session", "-t", session)); err != nil {

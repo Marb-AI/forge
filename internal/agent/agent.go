@@ -83,6 +83,9 @@ func opCreate(args []string) int {
 	if err := seedSSH(home, *name, pubkey); err != nil {
 		return emitError("ssh setup: %v", err)
 	}
+	if err := writeEnvFile(home, *name); err != nil {
+		return emitError("env file: %v", err)
+	}
 	if err := seedBashrc(home, *name); err != nil {
 		return emitError("bashrc: %v", err)
 	}
@@ -175,15 +178,38 @@ func seedSSH(home, name string, pubkey []byte) error {
 	return os.WriteFile(authKeys, data, 0o600)
 }
 
+// envRelPath is the workspace-local environment file (relative to the user's
+// home). It holds KEY=value lines and is the single source of truth for the
+// workspace's environment (COMPOSE_PROJECT_NAME today, more later). It is
+// sourced with `set -a` so every entry becomes exported.
+//
+// It exists because .bashrc alone is unreliable: .bashrc is sourced only by
+// interactive shells (and most distros' .bashrc returns early for
+// non-interactive ones), so `docker compose` run non-interactively — a script,
+// `bash -c`, a `make` target — would miss the variable. Instead we keep the
+// values in this file and source it both from .bashrc (interactive shells) and
+// from Forge's own launch commands (the Claude/tmux session), covering every
+// invocation path.
+const envRelPath = ".forge/env"
+
+// writeEnvFile creates the workspace environment file.
+func writeEnvFile(home, name string) error {
+	dir := filepath.Join(home, ".forge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	content := fmt.Sprintf("COMPOSE_PROJECT_NAME=%s\n", name)
+	return os.WriteFile(filepath.Join(home, envRelPath), []byte(content), 0o644)
+}
+
 // forgeBashrcBlock is appended to the workspace user's .bashrc. %[1]s is the
-// workspace name. It (a) makes `docker compose`'s project name unique per
-// workspace automatically — so it never collides across workspaces or clones,
-// and it enforces the project==workspace convention the port scan relies on —
-// and (b) shadows the `claude` binary for interactive shells so a stray launch
-// (which would die on disconnect) is redirected to the managed flow.
+// workspace name. It (a) sources the workspace environment file so interactive
+// shells get COMPOSE_PROJECT_NAME et al., and (b) shadows the `claude` binary
+// for interactive shells so a stray launch (which would die on disconnect) is
+// redirected to the managed flow.
 const forgeBashrcBlock = `
 # --- forge: workspace environment ---
-export COMPOSE_PROJECT_NAME=%[1]s
+set -a; [ -f "$HOME/.forge/env" ] && . "$HOME/.forge/env"; set +a
 
 claude() {
   echo "⚠  Claude runs managed via tmux so it survives disconnects."

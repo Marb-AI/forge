@@ -284,7 +284,36 @@ user → `running` / `stopped`.
 
 ---
 
-## 8. The `claude` guard
+## 8. Workspace environment & the `claude` guard
+
+### 8.1 Environment file
+
+Each workspace gets `~/.forge/env` (written at create time), a `KEY=value` file
+that is the single source of truth for the workspace's environment. Today it
+holds:
+
+```
+COMPOSE_PROJECT_NAME=<name>
+```
+
+`COMPOSE_PROJECT_NAME` makes every `docker compose` invocation use the workspace
+name as its project name — so the same repo cloned into different workspaces
+never collides on container/network/volume names, and it enforces the
+project==workspace convention the port scan relies on.
+
+It lives in a file rather than a bare `export` in `.bashrc` because `.bashrc` is
+sourced only by *interactive* shells (and most distros' `.bashrc` returns early
+for non-interactive ones). A `docker compose` run non-interactively — a script,
+`bash -c`, a `make dev` target — would miss a `.bashrc`-only variable. So the
+file is sourced from **both** ends: `.bashrc` sources it for interactive shells,
+and Forge's own launch commands source it (`set -a; . ~/.forge/env; set +a`)
+before starting the Claude/tmux session, covering every invocation path.
+
+> Host-port de-confliction across workspaces/clones (e.g. a `FORGE_PORT_BASE`)
+> is a natural future entry in this same file, but the allocation scheme is not
+> yet settled — see §10.
+
+### 8.2 The `claude` guard
 
 Added to each workspace user's `.bashrc` at create time. Shadows the binary for
 *interactive* shells so a stray `claude` doesn't launch a session that dies on
