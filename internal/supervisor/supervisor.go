@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/internal/proc"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
@@ -137,7 +138,7 @@ func (s *Supervisor) supervise(ctx context.Context, h *config.Host, k key) {
 		}
 
 		cmd := exec.CommandContext(ctx, "ssh", args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.SysProcAttr = proc.ChildAttr()
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 

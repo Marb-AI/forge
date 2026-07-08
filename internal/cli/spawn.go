@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/internal/proc"
 	"github.com/Marb-AI/forge/internal/supervisor"
 )
 
@@ -70,7 +70,7 @@ func startSupervisorDetached(dir string) error {
 	cmd := exec.Command(self, runSupervisorArg)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from this terminal
+	cmd.SysProcAttr = proc.DetachAttr() // detach from this terminal
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func supervisorPID(dir string) (int, bool) {
 	if err != nil || pid <= 0 {
 		return 0, false
 	}
-	if err := syscall.Kill(pid, 0); err != nil {
+	if !proc.Alive(pid) {
 		return 0, false // stale
 	}
 	return pid, true
@@ -102,7 +102,7 @@ func stopSupervisor(dir string) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+	if err := proc.Terminate(pid); err != nil {
 		return false, err
 	}
 	return true, nil

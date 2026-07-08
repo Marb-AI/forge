@@ -22,14 +22,15 @@ agent-linux:
 
 # Release: embed both linux agents into the CLI (so a single `forge` carries the
 # agent for every server arch), then build the CLI for each supported OS/arch.
-# Windows is pending a shim for the daemon-detach/signal syscalls.
+# (Windows client compiles and runs; its forwarding-stop is a hard kill — see
+# internal/proc — and is not yet runtime-tested.)
 release: agent-linux
 	cp $(BIN)/forge-agent-linux-amd64 $(AGENTBIN)/forge-agent-linux-amd64
 	cp $(BIN)/forge-agent-linux-arm64 $(AGENTBIN)/forge-agent-linux-arm64
-	@for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do \
-		os=$${t%/*}; arch=$${t#*/}; \
+	@for t in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do \
+		os=$${t%/*}; arch=$${t#*/}; ext=; [ "$$os" = windows ] && ext=.exe; \
 		echo "  forge $$os/$$arch"; \
-		GOOS=$$os GOARCH=$$arch go build -tags embedagent -o $(DIST)/forge-$$os-$$arch ./cmd/forge || exit 1; \
+		GOOS=$$os GOARCH=$$arch go build -tags embedagent -o $(DIST)/forge-$$os-$$arch$$ext ./cmd/forge || exit 1; \
 	done
 	@rm -f $(AGENTBIN)/forge-agent-linux-amd64 $(AGENTBIN)/forge-agent-linux-arm64
 	@echo "release binaries in $(DIST)/"
