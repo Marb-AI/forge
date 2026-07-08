@@ -20,6 +20,10 @@ func commonOpts(port int) []string {
 		"-o", "ServerAliveInterval=5",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "BatchMode=no", // allow key passphrase prompts, but not password auth
+		// TOFU: record a new server's host key on first connect instead of
+		// refusing non-interactively (you own the servers Forge connects to).
+		// A *changed* key still fails loudly — that's a real warning.
+		"-o", "StrictHostKeyChecking=accept-new",
 	}
 	if port != 0 && port != 22 {
 		opts = append(opts, "-p", strconv.Itoa(port))
