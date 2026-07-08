@@ -16,6 +16,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Build release binaries
         run: make release   # embeds the linux agent, builds macOS/Linux/Windows (amd64+arm64)

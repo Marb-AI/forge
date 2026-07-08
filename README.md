@@ -219,5 +219,9 @@ restarts, backups, CI/CD, or build pipelines. Those belong to each project.
 
 ---
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 <sub>Hacking on Forge itself? `make build` (dev) or `make release` (all
 platforms) — Go standard library only, no dependencies.</sub>

@@ -13,6 +13,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false   # zero dependencies — nothing to cache (no go.sum)
 
       - name: gofmt
         run: |
