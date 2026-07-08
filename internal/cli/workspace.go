@@ -142,7 +142,13 @@ func workspaceAction(name, action string, rest []string) int {
 
 	switch action {
 	case "ssh":
-		return runInteractive(target.TTYArgs())
+		args := target.TTYArgs()
+		if hasBoolFlag(rest, "-A", "--agent") {
+			// Forward the local SSH agent so `git clone` of private repos uses
+			// your keys without leaving a credential on the server.
+			args = append([]string{"-A"}, args...)
+		}
+		return runInteractive(args)
 	case "claude":
 		return workspaceClaude(target, rest)
 	case "expose":

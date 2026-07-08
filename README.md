@@ -89,15 +89,7 @@ forge workspace crm claude                      # persistent Claude session (att
 forge workspace crm ssh                          # a plain shell in the workspace
 ```
 
-Inside the workspace, clone your repo, bring services up with your own tooling
-(`make dev`, `docker compose up`, …), then expose the dev servers:
-
-```sh
-forge show ports myserver                        # what host ports are already taken
-forge forwarding start crm                       # scan the project's docker ports, save, tunnel
-forge spawn                                       # ensure the tunnel supervisor is running
-forge forwarding status                          # per-tunnel state
-```
+Then add the project (see below), expose its dev servers, and start coding.
 
 To make forwarding survive laptop reboots without any OS integration, drop one
 line in your shell rc — `spawn` is idempotent, so every later shell is a fast
@@ -108,6 +100,48 @@ forge spawn >/dev/null 2>&1
 ```
 
 ---
+
+## Add a new project
+
+Forge gives you the environment; it does **not** clone for you (automatic git
+clone is a future idea). Because a fresh workspace has no git credentials, decide
+how it authenticates first. A full first run:
+
+```sh
+forge workspace create shop myserver             # new Linux user "shop"
+
+# --- git auth: pick one ---------------------------------------------------
+# (a) Forward your SSH agent for the clone — no key left on the server:
+forge workspace shop ssh -A
+#     git clone git@github.com:you/shop.git
+#
+# (b) Or give the workspace its own deploy key (tidier, no forwarding):
+forge workspace shop ssh
+#     ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
+#     cat ~/.ssh/id_ed25519.pub        # add as a deploy key on the repo, then clone
+# --------------------------------------------------------------------------
+
+# In the workspace shell, set your commit identity and bring it up:
+#     cd shop
+#     git config user.name  "You"
+#     git config user.email "you@example.com"
+forge show ports myserver                         # paste the taken ports to Claude,
+#     …Claude edits .env / compose to pick free host ports…
+#     make dev            # or `docker compose up`, whatever the project uses
+
+# Tunnel the dev servers and open the session:
+forge forwarding start shop                        # scan the project's docker ports, tunnel them
+forge spawn                                         # ensure the tunnel supervisor runs
+forge forwarding status                             # per-tunnel state
+forge workspace shop claude                         # persistent Claude session
+```
+
+> Agent forwarding (`-A`) trusts the server with your forwarded keys for the
+> duration of the session — fine for your own single-user box, which the model
+> already trusts. Prefer a per-repo deploy key if you'd rather not forward.
+
+For running the **same** repo in several parallel workspaces, or a
+**backend + frontend** across two repos, see *Workflows & best practices* below.
 
 ## Command reference
 
@@ -122,7 +156,7 @@ Workspaces
   forge workspace delete <name>
   forge workspace list                            NAME  HOST  STATUS
 
-  forge workspace <name> ssh                      shell as the workspace user
+  forge workspace <name> ssh [-A]                 shell as the workspace user (-A forwards your SSH agent)
   forge workspace <name> claude                   attach-or-create the Claude session
   forge workspace <name> claude renew             kill + fresh session (reset context/tokens)
   forge workspace <name> claude stop              kill the session

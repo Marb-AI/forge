@@ -21,7 +21,7 @@ Workspaces:
   forge workspace delete <name>
   forge workspace list
 
-  forge workspace <name> ssh                     shell as the workspace user
+  forge workspace <name> ssh [-A]                shell as the workspace user (-A forwards your SSH agent)
   forge workspace <name> claude [renew|stop]     persistent Claude session (tmux)
   forge workspace <name> expose <port>           one-off ssh -L, foreground
 
@@ -67,6 +67,18 @@ func Main(args []string) int {
 func fail(format string, a ...any) int {
 	fmt.Fprintf(os.Stderr, "forge: "+format+"\n", a...)
 	return 1
+}
+
+// hasBoolFlag reports whether any of names appears verbatim in args.
+func hasBoolFlag(args []string, names ...string) bool {
+	for _, a := range args {
+		for _, n := range names {
+			if a == n {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractFlag pulls a --name=value / --name value (or single-dash) flag out of
