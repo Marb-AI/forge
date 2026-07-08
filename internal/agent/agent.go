@@ -100,6 +100,14 @@ func opCreate(args []string) int {
 		return emitError("chown: %v: %s", err, out)
 	}
 
+	// Install Claude Code as the workspace user — a workspace exists to run it.
+	// The native installer drops the binary in ~/.local/bin (on PATH via the env
+	// file). Authentication is not handled here: the first `claude` run inside the
+	// tmux session surfaces the login prompt interactively.
+	if out, err := run("runuser", "-l", *name, "-c", "curl -fsSL https://claude.ai/install.sh | bash"); err != nil {
+		return emitError("claude install: %v: %s", err, tailLines(out, 6))
+	}
+
 	return emit(agentproto.CreateResult{Workspace: agentproto.Workspace{
 		Name: *name, Owner: *name, Status: agentproto.StatusStopped,
 	}})
@@ -200,9 +208,12 @@ func writeEnvFile(home, name string) error {
 	}
 	// COMPOSE_PROJECT_NAME scopes the compose project (and, in tooling that keys
 	// its network name off it, the docker network too) to this workspace — so
-	// parallel clones stay isolated. Repos that need a different name override it
-	// per-repo. Host ports are parameterized in each repo's own .env, not here.
-	content := fmt.Sprintf("COMPOSE_PROJECT_NAME=%s\n", name)
+	// parallel clones stay isolated. PATH includes ~/.local/bin, where the native
+	// Claude Code installer puts the `claude` binary, so the managed launch (which
+	// sources this file) finds it. Each workspace logs into Claude independently
+	// (its own ~/.claude) — no shared writable auth state, no concurrent-write
+	// races. Host ports live in each repo's own .env.
+	content := fmt.Sprintf("COMPOSE_PROJECT_NAME=%s\nPATH=$HOME/.local/bin:$PATH\n", name)
 	return os.WriteFile(filepath.Join(home, envRelPath), []byte(content), 0o644)
 }
 
@@ -258,6 +269,16 @@ func writeMetadata(home, name string) error {
 func run(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// tailLines returns the last n lines of s (verbose installer output is trimmed
+// to something readable in an error message).
+func tailLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func emit(v any) int {

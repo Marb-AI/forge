@@ -64,8 +64,10 @@ forge workspace crm claude              # open Claude — survives disconnects
 forge workspace crm ssh                 # a plain shell inside the workspace
 ```
 
-Reattach any time, from your laptop or a phone with an SSH app, and Claude is
-right where you left it.
+Each workspace gets its own Claude Code install; the first time you open it,
+Claude prompts you to log in (once per workspace — isolated, no shared state).
+After that, reattach any time, from your laptop or a phone with an SSH app, and
+Claude is right where you left it.
 
 ---
 
