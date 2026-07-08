@@ -30,6 +30,9 @@ Forwarding:
   forge forwarding stop
   forge forwarding status
   forge spawn                                     ensure the tunnel supervisor is up
+
+Info:
+  forge show ports [host]                        listening + forwarded ports (paste to Claude)
 `
 
 // Main is the CLI entrypoint. It returns a process exit code.
@@ -45,6 +48,8 @@ func Main(args []string) int {
 		return workspaceCmd(args[1:])
 	case "forwarding", "fwd":
 		return forwardingCmd(args[1:])
+	case "show":
+		return showCmd(args[1:])
 	case "spawn":
 		return spawnCmd(args[1:])
 	case runSupervisorArg: // hidden: the detached daemon re-execs itself with this
