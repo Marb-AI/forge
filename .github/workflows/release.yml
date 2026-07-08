@@ -1,6 +1,9 @@
 name: Release
 
 # Push a tag like v0.1.1 and this builds every binary and publishes the release.
+# Runs on macOS so the darwin binaries can be code-signed — an unsigned/
+# linker-signed cross-compiled binary is killed by Apple Silicon's AMFI
+# ("killed: 9"). macOS runners are free for public repos.
 on:
   push:
     tags: ['v*']
@@ -10,7 +13,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -19,7 +22,14 @@ jobs:
           cache: false
 
       - name: Build release binaries
-        run: make release   # embeds the linux agent, builds macOS/Linux/Windows (amd64+arm64)
+        run: make release   # embeds the linux agent; darwin built natively, linux/windows cross-compiled
+
+      - name: Ad-hoc sign macOS binaries
+        run: |
+          for b in dist/forge-darwin-amd64 dist/forge-darwin-arm64; do
+            codesign --force --sign - "$b"
+            codesign -dv "$b" 2>&1 | grep -i 'Signature' || true
+          done
 
       - name: Publish GitHub release
         env:
