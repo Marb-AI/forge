@@ -198,6 +198,10 @@ func writeEnvFile(home, name string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// COMPOSE_PROJECT_NAME scopes the compose project (and, in tooling that keys
+	// its network name off it, the docker network too) to this workspace — so
+	// parallel clones stay isolated. Repos that need a different name override it
+	// per-repo. Host ports are parameterized in each repo's own .env, not here.
 	content := fmt.Sprintf("COMPOSE_PROJECT_NAME=%s\n", name)
 	return os.WriteFile(filepath.Join(home, envRelPath), []byte(content), 0o644)
 }
