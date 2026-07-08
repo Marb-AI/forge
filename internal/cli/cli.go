@@ -21,7 +21,7 @@ Workspaces:
   forge workspace delete <name>
   forge workspace list
 
-  forge workspace <name> ssh [-A]                shell as the workspace user (-A forwards your SSH agent)
+  forge workspace <name> ssh [--no-agent]        shell as the workspace user (SSH agent forwarded by default)
   forge workspace <name> claude [renew|stop]     persistent Claude session (tmux)
   forge workspace <name> expose <port>           one-off ssh -L, foreground
 

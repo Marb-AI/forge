@@ -143,9 +143,10 @@ func workspaceAction(name, action string, rest []string) int {
 	switch action {
 	case "ssh":
 		args := target.TTYArgs()
-		if hasBoolFlag(rest, "-A", "--agent") {
-			// Forward the local SSH agent so `git clone` of private repos uses
-			// your keys without leaving a credential on the server.
+		// Forward the local SSH agent by default, so git operations in the
+		// workspace use your keys with no credential stored on the server.
+		// Opt out with --no-agent.
+		if !hasBoolFlag(rest, "--no-agent") {
 			args = append([]string{"-A"}, args...)
 		}
 		return runInteractive(args)

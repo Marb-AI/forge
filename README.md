@@ -111,12 +111,12 @@ how it authenticates first. A full first run:
 forge workspace create shop myserver             # new Linux user "shop"
 
 # --- git auth: pick one ---------------------------------------------------
-# (a) Forward your SSH agent for the clone — no key left on the server:
-forge workspace shop ssh -A
+# (a) `ssh` forwards your SSH agent by default, so the clone just uses your keys:
+forge workspace shop ssh
 #     git clone git@github.com:you/shop.git
 #
-# (b) Or give the workspace its own deploy key (tidier, no forwarding):
-forge workspace shop ssh
+# (b) Or give the workspace its own deploy key (survives into the Claude session,
+#     see the note below):
 #     ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
 #     cat ~/.ssh/id_ed25519.pub        # add as a deploy key on the repo, then clone
 # --------------------------------------------------------------------------
@@ -136,9 +136,14 @@ forge forwarding status                             # per-tunnel state
 forge workspace shop claude                         # persistent Claude session
 ```
 
-> Agent forwarding (`-A`) trusts the server with your forwarded keys for the
-> duration of the session — fine for your own single-user box, which the model
-> already trusts. Prefer a per-repo deploy key if you'd rather not forward.
+> **Agent forwarding vs the Claude session.** `forge workspace <name> ssh`
+> forwards your agent by default — great for an interactive shell (clone, push,
+> pull just work), and fine for your own single-user box, which the model already
+> trusts. Disable it with `--no-agent`. But it does **not** reach the persistent
+> Claude tmux session reliably: tmux outlives the SSH connection, so the
+> forwarded agent socket goes stale on reattach. If **Claude itself** needs to
+> push/pull, give the workspace a **deploy key** (option b) — it lives in
+> `~/.ssh` and works regardless of how you connect.
 
 For running the **same** repo in several parallel workspaces, or a
 **backend + frontend** across two repos, see *Workflows & best practices* below.
@@ -156,7 +161,7 @@ Workspaces
   forge workspace delete <name>
   forge workspace list                            NAME  HOST  STATUS
 
-  forge workspace <name> ssh [-A]                 shell as the workspace user (-A forwards your SSH agent)
+  forge workspace <name> ssh [--no-agent]         shell as the workspace user (SSH agent forwarded by default)
   forge workspace <name> claude                   attach-or-create the Claude session
   forge workspace <name> claude renew             kill + fresh session (reset context/tokens)
   forge workspace <name> claude stop              kill the session
