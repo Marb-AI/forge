@@ -65,9 +65,11 @@ forge workspace crm ssh                 # a plain shell inside the workspace
 ```
 
 Each workspace gets its own Claude Code install; the first time you open it,
-Claude prompts you to log in (once per workspace — isolated, no shared state).
-After that, reattach any time, from your laptop or a phone with an SSH app, and
-Claude is right where you left it.
+Claude asks you to accept the workspace and log in (once per workspace —
+isolated, no shared state). After that it launches with **Remote Control**, so
+the session also appears in the Claude mobile/web app named after the workspace
+(`marbai-01`, `marbai-02`, … cluster together) — steer it from your phone, or
+reattach over SSH from your laptop. It's always right where you left it.
 
 ---
 
