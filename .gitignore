@@ -5,6 +5,9 @@
 /forge-agent
 *.exe
 
+# Agent binaries copied in only during `make release` (embedded, never committed)
+/internal/agentbin/forge-agent-linux-*
+
 # Local runtime state (never committed)
 /.forge/
 

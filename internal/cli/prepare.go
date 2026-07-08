@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/Marb-AI/forge/internal/agentbin"
 	"github.com/Marb-AI/forge/internal/config"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
@@ -58,22 +61,18 @@ func hostPrepare(args []string) int {
 	}
 	isRoot := uid == "0"
 
-	agentPath, err := locateAgentBinary(goarch)
+	agentSrc, agentLabel, agentClose, err := agentReader(goarch)
 	if err != nil {
 		return fail("%v", err)
 	}
+	defer agentClose()
 
 	fmt.Printf("preparing %s@%s (arch %s, %s)\n", user, addr, arch, pkgMgr)
 
 	// 1) Upload the agent binary to /tmp; the provisioning script (as root)
 	//    installs it into place.
-	agentFile, err := os.Open(agentPath)
-	if err != nil {
-		return fail("%v", err)
-	}
-	defer agentFile.Close()
-	fmt.Printf("→ uploading forge-agent (%s)\n", filepath.Base(agentPath))
-	if err := sshx.RunWithInput(agentFile, target.Args("cat > /tmp/forge-agent")...); err != nil {
+	fmt.Printf("→ uploading forge-agent (%s)\n", agentLabel)
+	if err := sshx.RunWithInput(agentSrc, target.Args("cat > /tmp/forge-agent")...); err != nil {
 		return fail("upload failed: %v", err)
 	}
 
@@ -124,6 +123,24 @@ func iproutePackage(pkgMgr string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// agentReader yields the forge-agent binary for goarch: the version embedded in
+// a release build if present, otherwise a locally cross-compiled file. Returns a
+// reader, a human label, and a close func.
+func agentReader(goarch string) (io.Reader, string, func(), error) {
+	if data, err := agentbin.Get(goarch); err == nil && len(data) > 0 {
+		return bytes.NewReader(data), "embedded linux/" + goarch, func() {}, nil
+	}
+	p, err := locateAgentBinary(goarch)
+	if err != nil {
+		return nil, "", func() {}, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, "", func() {}, err
+	}
+	return f, filepath.Base(p), func() { _ = f.Close() }, nil
 }
 
 // locateAgentBinary finds the cross-compiled linux agent for goarch. Override
