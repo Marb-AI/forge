@@ -1,6 +1,5 @@
 // Package cli is the laptop-side command surface. It is a small hand-written
-// dispatcher (no external CLI framework) matching the command tree in
-// docs/IMPLEMENTATION_PLAN.md §5.
+// dispatcher (no external CLI framework); see the README for the command tree.
 package cli
 
 import (

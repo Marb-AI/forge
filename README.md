@@ -17,14 +17,12 @@ It leans on standard Linux primitives instead of reinventing them:
 - **Linux users** for isolation (not containers)
 - **SSH tunnels** for exposing dev servers (not a reverse proxy)
 
-Zero external dependencies — standard library only. See
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for the full design
-and the reasoning behind every decision.
+Zero external dependencies — standard library only.
 
-> **Status: scaffold.** Config, command routing, SSH/tmux composition, the
+> **Status: early.** Config, command routing, SSH/tmux composition, the
 > forwarding supervisor, and `show ports` work and are tested locally. The
-> server-side agent (`useradd`/`tmux`/filesystem) is implemented but needs a
-> real Linux host to exercise end to end.
+> server-side agent (`useradd`/`tmux`/filesystem) and `host prepare` are
+> implemented but need a real Linux host to exercise end to end.
 
 ---
 
@@ -53,18 +51,19 @@ make build          # bin/forge and bin/forge-agent
 make agent-linux    # cross-compile the agent for the server (linux amd64/arm64)
 ```
 
-## Server setup (once per host)
+## Quick start
 
-Point `forge host prepare` at a bare server (connect as **root** or a
-passwordless-sudo user) and it does everything — no clicking around a cloud
-console:
+Build, then point `forge host prepare` at a **bare** server — connect as **root**
+or a passwordless-sudo user and it provisions everything, no clicking around a
+cloud console:
 
 ```sh
-make agent-linux                                 # cross-compile the agent first
+make build agent-linux
 forge host prepare root@1.2.3.4 --alias=myserver
 ```
 
-It **idempotently** (already-present tools are reported, not reinstalled):
+`prepare` is **idempotent** (already-present tools are reported, not
+reinstalled). It:
 
 - installs `git`, `tmux`, `iproute2` (`ss`), and **docker + compose** (via the
   official get.docker.com script — Debian/Ubuntu and Fedora/RHEL),
@@ -75,29 +74,22 @@ It **idempotently** (already-present tools are reported, not reinstalled):
 - **disables SSH password auth** (keys only) — but only if an `authorized_keys`
   already exists, so it can't lock you out.
 
-Opt out of the aggressive bits with `--no-firewall` / `--no-ssh-harden`. If you
-provisioned the box yourself, `forge host add <ssh> --alias=<alias>` just
-registers it.
+Opt out of the aggressive bits with `--no-firewall` / `--no-ssh-harden`.
 
 > Not yet exercised end to end — it drives real system changes (packages,
 > iptables, sshd). **Test on a throwaway host first.**
 
-Forge installs your SSH **public key** (from `~/.ssh/*.pub`, or `FORGE_PUBKEY`)
-into each workspace user's `authorized_keys`, so you can SSH in as the workspace
-user directly.
-
----
-
-## Quick start
+Then create a workspace and open its persistent Claude session:
 
 ```sh
-forge host add you@1.2.3.4 --alias=myserver     # register a server
 forge workspace create crm myserver             # a Linux user "crm" on myserver
 forge workspace crm claude                      # persistent Claude session (attach-or-create)
 forge workspace crm ssh                          # a plain shell in the workspace
 ```
 
-Then add the project (see below), expose its dev servers, and start coding.
+Forge installs your SSH **public key** (`~/.ssh/*.pub`, or `FORGE_PUBKEY`) into
+each workspace user's `authorized_keys`, so you SSH in as the workspace user
+directly.
 
 To make forwarding survive laptop reboots without any OS integration, drop one
 line in your shell rc — `spawn` is idempotent, so every later shell is a fast
@@ -270,8 +262,7 @@ disconnect. (A power user can still bypass with `command claude`.)
 ```
 cmd/forge         local CLI (laptop)
 cmd/forge-agent   privileged helper (server, invoked over SSH)
-internal/         config, sshx, supervisor, agent, command handlers
-docs/             design of record
+internal/         config, sshx, supervisor, agent, proc, command handlers
 ```
 
 ## Non-goals

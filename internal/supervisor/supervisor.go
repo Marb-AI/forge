@@ -3,7 +3,7 @@
 // process that neither waits for a down server nor reconnects, so the client
 // must supervise it.
 //
-// Design (see docs/IMPLEMENTATION_PLAN.md §2.6):
+// Design:
 //   - one supervised ssh process PER PORT, so a single failure can't cascade;
 //   - 1-second fixed retry with no backoff, for sub-second recovery;
 //   - an authentication failure is terminal (retrying can't fix it), so that
