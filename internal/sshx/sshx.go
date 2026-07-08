@@ -4,6 +4,7 @@
 package sshx
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -91,4 +92,14 @@ func Capture(args ...string) ([]byte, error) {
 	cmd := exec.Command("ssh", args...)
 	cmd.Stderr = os.Stderr
 	return cmd.Output()
+}
+
+// RunWithInput runs ssh with stdin taken from r and stdout/stderr streamed to
+// the terminal. Used to pipe a provisioning script (or a binary) to the host.
+func RunWithInput(r io.Reader, args ...string) error {
+	cmd := exec.Command("ssh", args...)
+	cmd.Stdin = r
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }

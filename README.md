@@ -55,24 +55,32 @@ make agent-linux    # cross-compile the agent for the server (linux amd64/arm64)
 
 ## Server setup (once per host)
 
-The server needs standard tools: `docker` (with users in the `docker` group),
-`tmux`, `iproute2` (`ss`), and the usual `useradd`/`userdel`/`usermod`/`runuser`.
+Point `forge host prepare` at a bare server (connect as **root** or a
+passwordless-sudo user) and it does everything — no clicking around a cloud
+console:
 
-1. Put the agent on the server and let the admin SSH user run it as root without
-   a password:
+```sh
+make agent-linux                                 # cross-compile the agent first
+forge host prepare root@1.2.3.4 --alias=myserver
+```
 
-   ```sh
-   scp bin/forge-agent-linux-amd64 you@server:/usr/local/bin/forge-agent
-   ssh you@server 'sudo chmod +x /usr/local/bin/forge-agent'
-   # /etc/sudoers.d/forge:
-   #   you ALL=(root) NOPASSWD: /usr/local/bin/forge-agent
-   ```
+It **idempotently** (already-present tools are reported, not reinstalled):
 
-2. Register it from your laptop:
+- installs `git`, `tmux`, `iproute2` (`ss`), and **docker + compose** (via the
+  official get.docker.com script — Debian/Ubuntu and Fedora/RHEL),
+- installs `forge-agent` and, for a non-root admin, a passwordless sudoers rule,
+- **locks the firewall to SSH-only** (iptables): drops all other inbound,
+  including Docker's published ports which otherwise bypass the INPUT chain,
+  and persists across reboot,
+- **disables SSH password auth** (keys only) — but only if an `authorized_keys`
+  already exists, so it can't lock you out.
 
-   ```sh
-   forge host add you@server --alias=myserver
-   ```
+Opt out of the aggressive bits with `--no-firewall` / `--no-ssh-harden`. If you
+provisioned the box yourself, `forge host add <ssh> --alias=<alias>` just
+registers it.
+
+> Not yet exercised end to end — it drives real system changes (packages,
+> iptables, sshd). **Test on a throwaway host first.**
 
 Forge installs your SSH **public key** (from `~/.ssh/*.pub`, or `FORGE_PUBKEY`)
 into each workspace user's `authorized_keys`, so you can SSH in as the workspace
@@ -152,7 +160,9 @@ For running the **same** repo in several parallel workspaces, or a
 
 ```
 Hosts
-  forge host add <ssh-target> --alias=<alias>    e.g. you@1.2.3.4[:port]
+  forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden]
+                                                  provision a bare server + register it
+  forge host add <ssh-target> --alias=<alias>     register an already-prepared server
   forge host list
   forge host remove <alias>
 

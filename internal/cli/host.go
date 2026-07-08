@@ -16,6 +16,8 @@ func hostCmd(args []string) int {
 	switch args[0] {
 	case "add":
 		return hostAdd(args[1:])
+	case "prepare":
+		return hostPrepare(args[1:])
 	case "list", "ls":
 		return hostList()
 	case "remove", "rm":

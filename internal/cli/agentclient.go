@@ -14,7 +14,13 @@ import (
 // (JSON {"error": ...}) that becomes a Go error, regardless of exit status.
 func callAgent(h *config.Host, out any, op string, opArgs ...string) error {
 	target := sshx.AdminTarget(h)
-	remote := append([]string{"sudo", "forge-agent", op}, opArgs...)
+	// Root needs no sudo (and the box may not even have sudo); a non-root admin
+	// uses the passwordless sudoers rule installed by `forge host prepare`.
+	head := []string{"forge-agent", op}
+	if h.User != "root" {
+		head = append([]string{"sudo"}, head...)
+	}
+	remote := append(head, opArgs...)
 	data, runErr := sshx.Capture(target.Args(remote...)...)
 
 	// The agent prints a JSON error even when it exits non-zero; prefer it.
