@@ -111,6 +111,14 @@ func opCreate(args []string) int {
 		return emitError("claude install: %v: %s", err, tailLines(out, 6))
 	}
 
+	// Pre-configure Claude so a session starts cleanly and shows up in the app:
+	// pre-trust the workspace folder (its trust dialog otherwise reappears every
+	// launch — it doesn't persist reliably when accepted interactively) and enable
+	// Remote Control by default.
+	if err := seedClaudeConfig(home, *name); err != nil {
+		return emitError("claude config: %v", err)
+	}
+
 	return emit(agentproto.CreateResult{Workspace: agentproto.Workspace{
 		Name: *name, Owner: *name, Status: agentproto.StatusStopped,
 	}})
@@ -256,6 +264,60 @@ func seedGitconfig(home string) error {
 // plain terminal — no green bar telling you where you are; you already know.
 func seedTmuxConf(home string) error {
 	return os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set -g status off\n"), 0o644)
+}
+
+// seedClaudeConfig pre-trusts the workspace folder and enables Remote Control by
+// default, merging into Claude's own config files (created by the installer) so
+// its defaults (theme, etc.) survive. The agent runs as root, so it restores the
+// files' ownership to the workspace user afterwards.
+func seedClaudeConfig(home, name string) error {
+	claudeJSON := filepath.Join(home, ".claude.json")
+	if err := mergeJSON(claudeJSON, func(m map[string]any) {
+		childMap(childMap(m, "projects"), home)["hasTrustDialogAccepted"] = true
+	}); err != nil {
+		return err
+	}
+
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	settings := filepath.Join(dir, "settings.json")
+	if err := mergeJSON(settings, func(m map[string]any) {
+		m["remoteControlAtStartup"] = true
+	}); err != nil {
+		return err
+	}
+
+	if out, err := run("chown", name+":"+name, claudeJSON, dir, settings); err != nil {
+		return fmt.Errorf("chown claude config: %v: %s", err, out)
+	}
+	return nil
+}
+
+// mergeJSON reads a JSON object (or starts empty / on a malformed file), applies
+// fn, and writes it back pretty-printed.
+func mergeJSON(path string, fn func(map[string]any)) error {
+	m := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		_ = json.Unmarshal(data, &m) // tolerate garbage: start fresh
+	}
+	fn(m)
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// childMap returns m[key] as a map, creating it if missing or not an object.
+func childMap(m map[string]any, key string) map[string]any {
+	if child, ok := m[key].(map[string]any); ok {
+		return child
+	}
+	child := map[string]any{}
+	m[key] = child
+	return child
 }
 
 func writeMetadata(home, name string) error {

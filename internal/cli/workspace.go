@@ -167,18 +167,12 @@ const sourceEnv = `set -a; [ -f "$HOME/.forge/env" ] && . "$HOME/.forge/env"; se
 // claudeLaunch is the command run inside the tmux session. It starts Claude with
 // Remote Control so the session appears in the Claude app (named after the
 // workspace, so `marbai-01`, `marbai-02`… cluster together in the app's flat
-// list). It falls back to plain `claude` on the first run — before the workspace
-// trust dialog and login, remote-control exits with an error — so that one-time
-// onboarding happens transparently; afterwards remote-control works.
-//
-// cont adds --continue: for a normal attach it resumes the last session (no
-// duplicate app entry); `renew` omits it to start a fresh one after reset.
-func claudeLaunch(name string, cont bool) string {
-	rc := "claude remote-control --name " + name
-	if cont {
-		rc = "claude remote-control --continue --name " + name
-	}
-	return rc + " || claude"
+// list). The workspace is pre-trusted and Remote Control is enabled by default
+// at create time, so this normally starts cleanly; it falls back to plain
+// `claude` if anything is off (e.g. not logged in yet). tmux attach-or-create
+// keeps it idempotent — the command only runs when the session is created.
+func claudeLaunch(name string) string {
+	return "claude remote-control --name " + name + " || claude"
 }
 
 func workspaceClaude(target sshx.Target, name string, rest []string) int {
@@ -190,12 +184,12 @@ func workspaceClaude(target sshx.Target, name string, rest []string) int {
 	switch sub {
 	case "", "attach":
 		// attach-or-create in one command; survives disconnect via tmux.
-		remote := sourceEnv + fmt.Sprintf(`tmux new -A -s %s "%s"`, session, claudeLaunch(name, true))
+		remote := sourceEnv + fmt.Sprintf(`tmux new -A -s %s "%s"`, session, claudeLaunch(name))
 		return runInteractive(target.TTYArgs(remote))
 	case "renew":
 		// kill the existing session (reset context) then start fresh and attach.
 		remote := fmt.Sprintf("tmux kill-session -t %s 2>/dev/null; ", session) +
-			sourceEnv + fmt.Sprintf(`tmux new -A -s %s "%s"`, session, claudeLaunch(name, false))
+			sourceEnv + fmt.Sprintf(`tmux new -A -s %s "%s"`, session, claudeLaunch(name))
 		return runInteractive(target.TTYArgs(remote))
 	case "stop":
 		if err := runCapture(target.Args("tmux", "kill-session", "-t", session)); err != nil {
