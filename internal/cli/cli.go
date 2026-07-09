@@ -23,6 +23,7 @@ Workspaces:
 
   forge workspace <name> ssh [--no-agent]        shell as the workspace user (SSH agent forwarded by default)
   forge workspace <name> claude [renew|stop]     persistent Claude session (tmux)
+  forge workspace <name> claude checkpoint       save a handoff to memory, then restart from it (fresh context)
   forge workspace <name> expose <port>           one-off ssh -L, foreground
 
 Forwarding:

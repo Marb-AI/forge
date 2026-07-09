@@ -258,39 +258,49 @@ chmod 0440 /etc/sudoers.d/forge
 visudo -cf /etc/sudoers.d/forge >/dev/null && echo "[forge] sudoers configured for __USER__"
 `
 
-// firewallSection locks inbound traffic to SSH only (iptables), including
-// Docker's published ports which otherwise bypass the INPUT chain. Rules are
-// added with -C||-A so re-running is a no-op, and persisted across reboot.
-const firewallSection = `echo "[forge] configuring firewall (iptables): SSH-only inbound ..."
+// firewallSection locks inbound traffic to SSH only on BOTH IPv4 and IPv6 —
+// leaving ip6tables open (its default) would expose every service over IPv6, a
+// hole that defeats the SSH-only intent. ICMP is allowed (and ICMPv6 is
+// mandatory for IPv6 to function at all — NDP/PMTU). Docker's published ports,
+// which bypass INPUT via FORWARD, are blocked externally in DOCKER-USER. Rules
+// use -C||-A so re-running is a no-op, and both stacks are persisted.
+const firewallSection = `echo "[forge] configuring firewall: SSH-only inbound (IPv4 + IPv6) ..."
 ensure iptables iptables iptables
-iptables -P INPUT ACCEPT
-iptables -C INPUT -i lo -j ACCEPT 2>/dev/null || iptables -A INPUT -i lo -j ACCEPT
-iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -C INPUT -p tcp --dport __SSHPORT__ -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport __SSHPORT__ -j ACCEPT
-iptables -C INPUT -p icmp -j ACCEPT 2>/dev/null || iptables -A INPUT -p icmp -j ACCEPT
-iptables -P INPUT DROP
-iptables -P OUTPUT ACCEPT
-# Docker publishes on 0.0.0.0 and bypasses INPUT via FORWARD; block external
-# access to published ports in DOCKER-USER (localhost tunnels are unaffected).
-if iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-  EXTIF=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
-  if [ -n "$EXTIF" ]; then
-    iptables -C DOCKER-USER -i "$EXTIF" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null || iptables -I DOCKER-USER -i "$EXTIF" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-    iptables -C DOCKER-USER -i "$EXTIF" -j DROP 2>/dev/null || iptables -A DOCKER-USER -i "$EXTIF" -j DROP
-    echo "[forge] docker published ports firewalled on $EXTIF"
+EXTIF=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+[ -z "$EXTIF" ] && EXTIF=eth0
+
+fw_apply() { # $1 = iptables|ip6tables, $2 = icmp|ipv6-icmp
+  IPT="$1"; ICMP="$2"
+  "$IPT" -P INPUT ACCEPT
+  "$IPT" -C INPUT -i lo -j ACCEPT 2>/dev/null || "$IPT" -A INPUT -i lo -j ACCEPT
+  "$IPT" -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || "$IPT" -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  "$IPT" -C INPUT -p "$ICMP" -j ACCEPT 2>/dev/null || "$IPT" -A INPUT -p "$ICMP" -j ACCEPT
+  "$IPT" -C INPUT -p tcp --dport __SSHPORT__ -j ACCEPT 2>/dev/null || "$IPT" -A INPUT -p tcp --dport __SSHPORT__ -j ACCEPT
+  "$IPT" -P INPUT DROP
+  "$IPT" -P OUTPUT ACCEPT
+  if "$IPT" -L DOCKER-USER -n >/dev/null 2>&1; then
+    "$IPT" -C DOCKER-USER -i "$EXTIF" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null || "$IPT" -I DOCKER-USER -i "$EXTIF" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    "$IPT" -C DOCKER-USER -i "$EXTIF" -j DROP 2>/dev/null || "$IPT" -A DOCKER-USER -i "$EXTIF" -j DROP
   fi
-fi
+}
+fw_apply iptables icmp
+fw_apply ip6tables ipv6-icmp
+echo "[forge] firewall active on $EXTIF (SSH-only inbound, IPv4 + IPv6)"
+
 if [ "$PKG" = apt-get ]; then
   echo 'iptables-persistent iptables-persistent/autosave_v4 boolean true' | debconf-set-selections
   echo 'iptables-persistent iptables-persistent/autosave_v6 boolean true' | debconf-set-selections
   DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
-  mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules.v4
+  mkdir -p /etc/iptables
+  iptables-save > /etc/iptables/rules.v4
+  ip6tables-save > /etc/iptables/rules.v6
 else
   pkg_install iptables-services 2>/dev/null || true
   iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+  ip6tables-save > /etc/sysconfig/ip6tables 2>/dev/null || true
   systemctl enable iptables 2>/dev/null || true
+  systemctl enable ip6tables 2>/dev/null || true
 fi
-echo "[forge] firewall active (SSH-only inbound)"
 `
 
 // sshHardenSection disables password auth (keys only), but only if an

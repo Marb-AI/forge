@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/config"
@@ -195,9 +197,102 @@ func workspaceClaude(target sshx.Target, rest []string) int {
 		}
 		fmt.Println("claude session stopped")
 		return 0
+	case "checkpoint":
+		return workspaceCheckpoint(target, session)
 	default:
-		return fail("usage: forge workspace <name> claude [renew|stop]")
+		return fail("usage: forge workspace <name> claude [renew|stop|checkpoint]")
 	}
+}
+
+// checkpointMarker is the standalone line Claude is asked to print when the
+// handoff is written. It is matched only as a whole trimmed line, so its mention
+// inside the (echoed) prompt — mid-sentence — doesn't count.
+const checkpointMarker = "FORGE_CHECKPOINT_SAVED"
+
+// workspaceCheckpoint asks the running Claude session to write a handoff to its
+// memory, waits for it to finish, then restarts the session so it continues from
+// memory with a fresh context window. Run it from another terminal while the
+// session is idle.
+func workspaceCheckpoint(target sshx.Target, session string) int {
+	if err := runCapture(target.Args("tmux", "has-session", "-t", session)); err != nil {
+		return fail("no running claude session to checkpoint (start one with: forge workspace <name> claude)")
+	}
+	// Safe gate: only proceed when the pane is stable (no task streaming output).
+	if !claudeIdle(target, session) {
+		return fail("Claude looks busy — run checkpoint when it's idle (nothing running)")
+	}
+
+	// The marker is embedded mid-sentence (words before and after) so its echo in
+	// the typed prompt can't wrap into a standalone marker line and false-positive;
+	// Claude's own output prints it alone on a line, which is what we match.
+	prompt := "Write a concise handoff to your memory right now — what we're working on, " +
+		"the current state, and the exact next steps — so a brand-new session can continue " +
+		"seamlessly. Do not ask me anything; just do it. When the memory is fully written, " +
+		"print the token " + checkpointMarker + " alone on its own line and then stop."
+	fmt.Println("→ asking Claude to write a handoff to memory…")
+	if err := runCapture(target.Args("tmux", "send-keys", "-t", session, prompt, "Enter")); err != nil {
+		return fail("send-keys: %v", err)
+	}
+
+	if !waitForCheckpoint(target, session, 3*time.Minute) {
+		return fail("Claude didn't confirm the handoff in time — left the session running, nothing killed")
+	}
+
+	fmt.Println("→ handoff saved; restarting the session from memory…")
+	_ = runCapture(target.Args("tmux", "kill-session", "-t", session))
+	launch := sourceEnv + fmt.Sprintf("tmux new -d -s %s 'claude \"continue from memory\"'", session)
+	if err := runCapture(target.Args(launch)); err != nil {
+		return fail("restart: %v (start it manually with: forge workspace <name> claude)", err)
+	}
+	fmt.Println("done — fresh session running from memory. Reattach with: forge workspace <name> claude")
+	return 0
+}
+
+// capturePane returns the visible pane text of the tmux session.
+func capturePane(target sshx.Target, session string) (string, bool) {
+	out, err := sshx.Capture(target.Args("tmux", "capture-pane", "-t", session, "-p")...)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
+// claudeIdle reports whether the pane is stable across a short window — i.e. no
+// task is streaming output. Version-independent (no reliance on TUI wording).
+func claudeIdle(target sshx.Target, session string) bool {
+	a, ok := capturePane(target, session)
+	if !ok {
+		return false
+	}
+	time.Sleep(2 * time.Second)
+	b, ok := capturePane(target, session)
+	return ok && a == b
+}
+
+// waitForCheckpoint waits until Claude prints the marker on its own line (and has
+// actually produced a response, not just echoed the prompt), then a moment more
+// so the memory write settles.
+func waitForCheckpoint(target sshx.Target, session string, timeout time.Duration) bool {
+	time.Sleep(3 * time.Second) // let the prompt register and Claude start
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pane, ok := capturePane(target, session); ok && hasMarkerLine(pane, checkpointMarker) {
+			time.Sleep(2 * time.Second)
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
+// hasMarkerLine reports whether any whole (trimmed) line of s equals the marker.
+func hasMarkerLine(s, marker string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) == marker {
+			return true
+		}
+	}
+	return false
 }
 
 func workspaceExpose(target sshx.Target, rest []string) int {

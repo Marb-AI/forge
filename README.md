@@ -153,6 +153,7 @@ Workspaces
   forge workspace <name> claude                   open the Claude session (attach-or-create)
   forge workspace <name> claude renew             fresh session (reset context / save tokens)
   forge workspace <name> claude stop              stop the session
+  forge workspace <name> claude checkpoint        save a handoff to memory, then restart from it
   forge workspace <name> expose <port>            tunnel one port, foreground (Ctrl-C stops)
 
 Forwarding
@@ -166,6 +167,9 @@ Info
 ```
 
 `claude renew` = stop + fresh start; use it to clear a bloated context window.
+`claude checkpoint` (run from another terminal while the session is idle) asks
+Claude to write a handoff to its memory, waits for it, then restarts the session
+so it continues from memory with a fresh context — for long-running work.
 Your login to Claude persists in the workspace, so `renew`/`stop` never touch it.
 
 ---
