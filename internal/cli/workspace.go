@@ -230,8 +230,8 @@ func workspaceCheckpoint(target sshx.Target, session string) int {
 		"seamlessly. Do not ask me anything; just do it. When the memory is fully written, " +
 		"print the token " + checkpointMarker + " alone on its own line and then stop."
 	fmt.Println("→ asking Claude to write a handoff to memory…")
-	if err := runCapture(target.Args("tmux", "send-keys", "-t", session, prompt, "Enter")); err != nil {
-		return fail("send-keys: %v", err)
+	if err := sendText(target, session, prompt); err != nil {
+		return fail("send prompt: %v", err)
 	}
 
 	if !waitForCheckpoint(target, session, 3*time.Minute) {
@@ -246,6 +246,22 @@ func workspaceCheckpoint(target sshx.Target, session string) int {
 	}
 	fmt.Println("done — fresh session running from memory. Reattach with: forge workspace <name> claude")
 	return 0
+}
+
+// sendText types text into the tmux session and presses Enter. The text is piped
+// through a tmux paste buffer via stdin — never as a shell argument — so quotes,
+// apostrophes and other metacharacters in the prompt can't break remote parsing.
+func sendText(target sshx.Target, session, text string) error {
+	const buf = "forgecp"
+	if err := sshx.RunWithInput(strings.NewReader(text),
+		target.Args("tmux", "load-buffer", "-b", buf, "-")...); err != nil {
+		return err
+	}
+	if _, err := sshx.Capture(target.Args("tmux", "paste-buffer", "-d", "-b", buf, "-t", session)...); err != nil {
+		return err
+	}
+	_, err := sshx.Capture(target.Args("tmux", "send-keys", "-t", session, "Enter")...)
+	return err
 }
 
 // capturePane returns the visible pane text of the tmux session.
