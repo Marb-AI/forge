@@ -151,7 +151,7 @@ func workspaceAction(name, action string, rest []string) int {
 		}
 		return runInteractive(args)
 	case "claude":
-		return workspaceClaude(target, name, rest)
+		return workspaceClaude(target, rest)
 	case "expose":
 		return workspaceExpose(target, rest)
 	default:
@@ -164,18 +164,16 @@ func workspaceAction(name, action string, rest []string) int {
 // interactive shell that would read .bashrc. `set -a` exports everything sourced.
 const sourceEnv = `set -a; [ -f "$HOME/.forge/env" ] && . "$HOME/.forge/env"; set +a; `
 
-// claudeLaunch is the command run inside the tmux session. It starts Claude with
-// Remote Control so the session appears in the Claude app (named after the
-// workspace, so `marbai-01`, `marbai-02`… cluster together in the app's flat
-// list). The workspace is pre-trusted and Remote Control is enabled by default
-// at create time, so this normally starts cleanly; it falls back to plain
-// `claude` if anything is off (e.g. not logged in yet). tmux attach-or-create
-// keeps it idempotent — the command only runs when the session is created.
-func claudeLaunch(name string) string {
-	return "claude remote-control --name " + name + " || claude"
-}
-
-func workspaceClaude(target sshx.Target, name string, rest []string) int {
+// workspaceClaude launches plain `claude` in tmux. tmux gives the persistence:
+// detach (Ctrl-b d) keeps the session to reattach later; /exit or Ctrl-C ends
+// Claude, the command finishes, the tmux session is gone, and the next launch is
+// a clean new session — a killed session stays killed, never offered for resume.
+//
+// Remote Control is intentionally NOT auto-started here (its resume-the-last-
+// session behaviour breaks that guarantee). To surface a session in the Claude
+// app, run `/remote-control` inside it — it's named after the workspace via
+// CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX in the env.
+func workspaceClaude(target sshx.Target, rest []string) int {
 	session := agentproto.TmuxSession
 	sub := ""
 	if len(rest) > 0 {
@@ -184,12 +182,12 @@ func workspaceClaude(target sshx.Target, name string, rest []string) int {
 	switch sub {
 	case "", "attach":
 		// attach-or-create in one command; survives disconnect via tmux.
-		remote := sourceEnv + fmt.Sprintf(`tmux new -A -s %s "%s"`, session, claudeLaunch(name))
+		remote := sourceEnv + fmt.Sprintf("tmux new -A -s %s claude", session)
 		return runInteractive(target.TTYArgs(remote))
 	case "renew":
 		// kill the existing session (reset context) then start fresh and attach.
 		remote := fmt.Sprintf("tmux kill-session -t %s 2>/dev/null; ", session) +
-			sourceEnv + fmt.Sprintf(`tmux new -A -s %s "%s"`, session, claudeLaunch(name))
+			sourceEnv + fmt.Sprintf("tmux new -A -s %s claude", session)
 		return runInteractive(target.TTYArgs(remote))
 	case "stop":
 		if err := runCapture(target.Args("tmux", "kill-session", "-t", session)); err != nil {

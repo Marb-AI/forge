@@ -271,10 +271,12 @@ func seedTmuxConf(home string) error {
 	return os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set -g status off\n"), 0o644)
 }
 
-// seedClaudeConfig pre-trusts the workspace folder and enables Remote Control by
-// default, merging into Claude's own config files (created by the installer) so
-// its defaults (theme, etc.) survive. The agent runs as root, so it restores the
-// files' ownership to the workspace user afterwards.
+// seedClaudeConfig pre-trusts the workspace folder so Claude's trust dialog never
+// appears (accepted interactively it doesn't persist). It deliberately does NOT
+// auto-enable Remote Control: doing so risks Claude offering to resume a killed
+// session, and a killed session (/exit, Ctrl+C) must stay closed. Remote Control
+// is a manual `/remote-control` inside the session instead — named after the
+// workspace via CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX in the env.
 func seedClaudeConfig(home, name string) error {
 	claudeJSON := filepath.Join(home, ".claude.json")
 	if err := mergeJSON(claudeJSON, func(m map[string]any) {
@@ -282,19 +284,7 @@ func seedClaudeConfig(home, name string) error {
 	}); err != nil {
 		return err
 	}
-
-	dir := filepath.Join(home, ".claude")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	settings := filepath.Join(dir, "settings.json")
-	if err := mergeJSON(settings, func(m map[string]any) {
-		m["remoteControlAtStartup"] = true
-	}); err != nil {
-		return err
-	}
-
-	if out, err := run("chown", name+":"+name, claudeJSON, dir, settings); err != nil {
+	if out, err := run("chown", name+":"+name, claudeJSON); err != nil {
 		return fmt.Errorf("chown claude config: %v: %s", err, out)
 	}
 	return nil
