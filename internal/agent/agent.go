@@ -220,11 +220,16 @@ func writeEnvFile(home, name string) error {
 	// COMPOSE_PROJECT_NAME scopes the compose project (and, in tooling that keys
 	// its network name off it, the docker network too) to this workspace — so
 	// parallel clones stay isolated. PATH includes ~/.local/bin, where the native
-	// Claude Code installer puts the `claude` binary, so the managed launch (which
-	// sources this file) finds it. Each workspace logs into Claude independently
-	// (its own ~/.claude) — no shared writable auth state, no concurrent-write
-	// races. Host ports live in each repo's own .env.
-	content := fmt.Sprintf("COMPOSE_PROJECT_NAME=%s\nPATH=$HOME/.local/bin:$PATH\n", name)
+	// Claude Code installer puts the `claude` binary. CLAUDE_REMOTE_CONTROL_...
+	// names the Remote Control session after the workspace instead of the default
+	// hostname — it's the *prefix* that Claude shows in the app (not --name), so
+	// sessions read as `marbai-01`, `marbai-02`… rather than `hostname-random`.
+	// Host ports live in each repo's own .env.
+	content := fmt.Sprintf(
+		"COMPOSE_PROJECT_NAME=%[1]s\n"+
+			"PATH=$HOME/.local/bin:$PATH\n"+
+			"CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX=%[1]s\n",
+		name)
 	return os.WriteFile(filepath.Join(home, envRelPath), []byte(content), 0o644)
 }
 
