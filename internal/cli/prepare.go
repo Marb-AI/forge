@@ -15,9 +15,10 @@ import (
 )
 
 // hostPrepare provisions a bare server into a Forge host and registers it:
-// installs git, tmux, iproute2 (ss), docker + compose, and forge-agent; locks
-// the firewall to SSH-only; and disables SSH password auth. Everything is
-// idempotent — already-present tools are reported, not reinstalled.
+// installs git, tmux, iproute2 (ss), docker + compose, gh, and forge-agent;
+// creates the host's git identity (an SSH key); locks the firewall to SSH-only;
+// and disables SSH password auth. Everything is idempotent — already-present
+// tools are reported, not reinstalled, and an existing key is kept.
 //
 // Must connect as root or a passwordless-sudo user (it installs system packages
 // and edits sshd/iptables). This path is not exercised on the dev machine — it
@@ -59,6 +60,7 @@ func hostPrepare(args []string) int {
 	if !ok {
 		return fail("unsupported distro: no apt-get/dnf/yum found (%q)", lines[2])
 	}
+	sshClientPkg, _ := sshClientPackage(pkgMgr)
 	isRoot := uid == "0"
 
 	agentSrc, agentLabel, agentClose, err := agentReader(goarch)
@@ -77,7 +79,7 @@ func hostPrepare(args []string) int {
 	}
 
 	// 2) Run the provisioning script as root.
-	script := buildPrepareScript(pkgMgr, iproutePkg, port, user, isRoot, !noFirewall, !noHarden)
+	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, !noFirewall, !noHarden)
 	runner := "bash -s"
 	if !isRoot {
 		runner = "sudo bash -s"
@@ -87,7 +89,15 @@ func hostPrepare(args []string) int {
 		return fail("provisioning failed: %v", err)
 	}
 
-	// 3) Register the host now that it is ready.
+	// 3) Read the host's public key back, so a re-run always shows it — whether it
+	//    was just generated or has been there all along. The .pub is world-readable
+	//    (the private key is not), so this needs no sudo.
+	pubkey, err := sshx.Capture(target.Args("cat " + hostKeyPath + ".pub")...)
+	if err != nil {
+		return fail("cannot read host key %s.pub: %v", hostKeyPath, err)
+	}
+
+	// 4) Register the host now that it is ready.
 	cfg, err := config.Load()
 	if err != nil {
 		return fail("%v", err)
@@ -98,9 +108,28 @@ func hostPrepare(args []string) int {
 	}
 
 	fmt.Printf("\nhost %q ready.\n", alias)
-	fmt.Printf("  next: forge workspace create <name> %s\n", alias)
+	fmt.Printf("\n  git identity — register this key on GitHub (Settings → SSH keys) so\n")
+	fmt.Printf("  workspaces can clone and push without your laptop:\n\n")
+	fmt.Printf("    %s\n", strings.TrimSpace(string(pubkey)))
+	fmt.Printf("\n  gh is installed but not authenticated. When you first need it:\n")
+	fmt.Printf("    forge workspace <name> ssh   →   gh auth login\n")
+	fmt.Printf("\n  next: forge workspace create <name> %s\n", alias)
 	return 0
 }
+
+// hostKeyDir holds the host-wide git identity: one key per server, copied into
+// each workspace at create. Kept in sync with internal/agent.
+//
+// One key for the whole host (rather than one per workspace) matches the
+// boundary Forge actually draws. Workspace users are in the docker group, so any
+// of them can already read every other's files; a per-workspace key would buy no
+// real separation. It also keeps registration to a single step: a GitHub deploy
+// key is bound to one repo, but this key registered as an account SSH key works
+// for every repo in every workspace.
+const (
+	hostKeyDir  = "/etc/forge"
+	hostKeyPath = hostKeyDir + "/id_ed25519"
+)
 
 // unameToGoArch maps `uname -m` to a Go arch used in the agent binary name.
 func unameToGoArch(uname string) (string, error) {
@@ -120,6 +149,18 @@ func iproutePackage(pkgMgr string) (string, bool) {
 		return "iproute2", true
 	case "dnf", "yum":
 		return "iproute", true
+	default:
+		return "", false
+	}
+}
+
+// sshClientPackage names the package holding ssh-keygen / ssh-keyscan.
+func sshClientPackage(pkgMgr string) (string, bool) {
+	switch pkgMgr {
+	case "apt-get":
+		return "openssh-client", true
+	case "dnf", "yum":
+		return "openssh-clients", true
 	default:
 		return "", false
 	}
@@ -189,9 +230,11 @@ func contains(ss []string, s string) bool {
 
 // buildPrepareScript assembles the idempotent remote provisioning script. It
 // assumes it runs as root (the caller wraps it in `sudo bash -s` when needed).
-func buildPrepareScript(pkgMgr, iproutePkg string, sshPort int, user string, isRoot, firewall, harden bool) string {
+func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort int, user string, isRoot, firewall, harden bool) string {
 	var b strings.Builder
 	b.WriteString(prepareBase)
+	b.WriteString(ghSection)
+	b.WriteString(sshKeySection)
 	if !isRoot {
 		b.WriteString(sudoersSection)
 	}
@@ -206,6 +249,10 @@ func buildPrepareScript(pkgMgr, iproutePkg string, sshPort int, user string, isR
 	r := strings.NewReplacer(
 		"__PKG__", pkgMgr,
 		"__IPROUTE__", iproutePkg,
+		"__SSHCLIENT__", sshClientPkg,
+		"__GOARCH__", goarch,
+		"__KEYDIR__", hostKeyDir,
+		"__KEY__", hostKeyPath,
 		"__SSHPORT__", strconv.Itoa(sshPort),
 		"__USER__", user,
 	)
@@ -250,6 +297,103 @@ systemctl enable --now docker 2>/dev/null || true
 install -m 0755 /tmp/forge-agent /usr/local/bin/forge-agent
 rm -f /tmp/forge-agent
 echo "[forge] forge-agent installed"
+`
+
+// ghSection installs the GitHub CLI. `gh` is not in Debian's main repos and its
+// distro packages lag, so we add GitHub's own repo; if that fails (unknown
+// distro, repo unreachable) we fall back to the release tarball. gh is left
+// unauthenticated — `gh auth login` is an interactive browser/token flow, so it
+// belongs in a workspace shell, not here.
+//
+// A failure to install gh must not fail the whole prepare: everything else about
+// the host still works without it, so each step is guarded and the section ends
+// with a warning rather than a non-zero exit.
+const ghSection = `GOARCH="__GOARCH__"
+if command -v gh >/dev/null 2>&1; then
+  echo "[forge] gh already installed"
+else
+  echo "[forge] installing gh (github cli) ..."
+  {
+    case "$PKG" in
+      apt-get)
+        pkg_install ca-certificates curl gnupg
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+          -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+        chmod 0644 /etc/apt/keyrings/githubcli-archive-keyring.gpg
+        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
+          "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/github-cli.list
+        apt-get update -qq
+        pkg_install gh
+        ;;
+      dnf)
+        dnf install -y 'dnf-command(config-manager)'
+        dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+        dnf install -y gh
+        ;;
+      yum)
+        yum install -y yum-utils
+        yum-config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+        yum install -y gh
+        ;;
+    esac
+  } >/dev/null 2>&1 || true
+
+  if command -v gh >/dev/null 2>&1; then
+    echo "[forge] gh installed (package)"
+  else
+    echo "[forge] gh: package install failed, trying release tarball ..."
+    GH_VER=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest 2>/dev/null \
+      | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1) || true
+    if [ -n "$GH_VER" ]; then
+      TMP=$(mktemp -d)
+      GH_DIR="gh_${GH_VER}_linux_${GOARCH}"
+      if curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/${GH_DIR}.tar.gz" -o "$TMP/gh.tgz" \
+         && tar -xzf "$TMP/gh.tgz" -C "$TMP" \
+         && install -m 0755 "$TMP/$GH_DIR/bin/gh" /usr/local/bin/gh; then
+        echo "[forge] gh installed (tarball $GH_VER)"
+      else
+        echo "[forge] WARNING: gh install failed — install it by hand later"
+      fi
+      rm -rf "$TMP"
+    else
+      echo "[forge] WARNING: could not resolve latest gh version — skipping gh"
+    fi
+  fi
+fi
+`
+
+// sshKeySection creates the host's git identity, once. It is idempotent in the
+// strong sense: an existing private key is never regenerated (that would silently
+// break every repo it is already registered on), only its .pub is rebuilt if
+// missing. The caller reads the .pub back and prints it on every run, so a
+// re-prepare still shows you what to register.
+//
+// The key has no passphrase, deliberately: the whole point is that a Claude
+// session in tmux can push while your laptop is off, and an encrypted key would
+// need an interactive unlock that nobody is there to type.
+//
+// github.com's host keys are pre-seeded so an unattended `git clone` never stops
+// at the "authenticity of host can't be established" prompt.
+const sshKeySection = `ensure ssh-keygen openssh-client "__SSHCLIENT__"
+install -m 0755 -d __KEYDIR__
+if [ -f "__KEY__" ]; then
+  echo "[forge] git identity already present (kept)"
+else
+  echo "[forge] generating git identity (ed25519, no passphrase) ..."
+  # uname -n, not hostname(1): minimal images (Fedora) ship coreutils but not it.
+  ssh-keygen -q -t ed25519 -N '' -C "forge@$(uname -n)" -f "__KEY__"
+fi
+[ -f "__KEY__.pub" ] || ssh-keygen -y -f "__KEY__" > "__KEY__.pub"
+chmod 0600 "__KEY__"
+chmod 0644 "__KEY__.pub"
+
+if [ ! -s __KEYDIR__/known_hosts ]; then
+  ssh-keyscan -t rsa,ecdsa,ed25519 github.com > __KEYDIR__/known_hosts 2>/dev/null \
+    && echo "[forge] pre-trusted github.com host keys" \
+    || echo "[forge] WARNING: ssh-keyscan github.com failed — first clone may prompt"
+fi
+chmod 0644 __KEYDIR__/known_hosts 2>/dev/null || true
 `
 
 // sudoersSection lets a non-root admin invoke the agent without a password.

@@ -46,7 +46,10 @@ forge host prepare root@1.2.3.4 --alias=myserver
 
 `prepare` is idempotent and:
 
-- installs git, tmux, and **docker + compose** (Debian/Ubuntu and Fedora/RHEL),
+- installs git, tmux, **docker + compose**, and **gh** (Debian/Ubuntu and Fedora/RHEL),
+- creates the host's **git identity** — an ed25519 SSH key — and prints its public
+  half, so you can register it on GitHub. An existing key is kept, never
+  regenerated, and re-running `prepare` prints it again,
 - locks the firewall to **SSH-only** — nothing else reachable from the internet,
   including Docker's published ports,
 - disables SSH password auth (keys only), guarded so it can't lock you out.
@@ -86,24 +89,16 @@ reattach over SSH from your laptop. It's always right where you left it.
 
 ## Add a new project
 
-Forge gives you the environment; you clone into it. A fresh workspace has no git
-credentials, so pick how it authenticates first. A full first run:
+Forge gives you the environment; you clone into it. A workspace inherits the
+host's git identity (the key `prepare` printed), so if you registered that key on
+GitHub the clone just works. A full first run:
 
 ```sh
 forge workspace create shop myserver             # new workspace "shop"
 
-# --- git auth: pick one ---------------------------------------------------
-# (a) `ssh` forwards your SSH agent by default, so the clone just uses your keys:
+# In the workspace shell, clone, set your commit identity, bring the project up:
 forge workspace shop ssh
 #     git clone git@github.com:you/shop.git
-#
-# (b) Or give the workspace its own deploy key (survives into the Claude session,
-#     see the note below):
-#     ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
-#     cat ~/.ssh/id_ed25519.pub        # add as a deploy key on the repo, then clone
-# --------------------------------------------------------------------------
-
-# In the workspace shell, set your commit identity and bring the project up:
 #     cd shop
 #     git config user.name  "You"
 #     git config user.email "you@example.com"
@@ -125,12 +120,25 @@ To keep tunnels alive across laptop reboots, add one line to your shell rc
 forge spawn >/dev/null 2>&1
 ```
 
-> **Agent forwarding vs the Claude session.** `forge workspace <name> ssh`
-> forwards your SSH agent by default — great for an interactive shell (clone,
-> push, pull just work). But it does **not** reach the persistent Claude session
-> reliably: tmux outlives the SSH connection, so the forwarded agent goes stale on
-> reattach. If **Claude itself** needs to push/pull, give the workspace a **deploy
-> key** (option b) — it works regardless of how you connect.
+> **Why the workspace has its own key.** `forge workspace <name> ssh` also
+> forwards your local SSH agent, which is handy in an interactive shell. But a
+> forwarded agent cannot serve the Claude session: tmux outlives the SSH
+> connection that started it, so the forwarded socket is stale on reattach — and
+> gone entirely once your laptop sleeps, which is the case Forge exists for. The
+> key copied in at `workspace create` is on disk in the workspace, so Claude can
+> clone, pull and push with your laptop shut.
+
+> **One key per host, not per workspace.** Every workspace on a host shares the
+> host's identity. That matches the boundary Forge actually draws: workspaces are
+> scoped (own `$HOME`, own tmux server, own compose project), not isolated —
+> workspace users are in the `docker` group, so they can already reach each
+> other's files. It also keeps registration to one step: a GitHub *deploy key* is
+> bound to a single repo, but this key registered as an *account* SSH key works
+> for every repo in every workspace.
+
+> **`gh` is installed but not logged in.** Authenticating is an interactive
+> browser/token flow, so it can't happen during `prepare`. The first time Claude
+> needs it, it'll say so — `forge workspace <name> ssh`, then `gh auth login`.
 
 ---
 

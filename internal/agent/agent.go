@@ -83,6 +83,9 @@ func opCreate(args []string) int {
 	if err := seedSSH(home, *name, pubkey); err != nil {
 		return emitError("ssh setup: %v", err)
 	}
+	if err := seedGitKey(home, hostKeyDir); err != nil {
+		return emitError("git key: %v", err)
+	}
 	if err := writeEnvFile(home, *name); err != nil {
 		return emitError("env file: %v", err)
 	}
@@ -195,6 +198,50 @@ func seedSSH(home, name string, pubkey []byte) error {
 		data = append(data, '\n')
 	}
 	return os.WriteFile(authKeys, data, 0o600)
+}
+
+// hostKeyDir holds the host-wide git identity created by `forge host prepare`.
+// Kept in sync with internal/cli.
+const hostKeyDir = "/etc/forge"
+
+// seedGitKey copies the host's git identity into the workspace, so git works
+// with no forwarded agent. A forwarded agent cannot serve the Claude session:
+// tmux outlives the SSH connection that started it, so the forwarded socket is
+// dead by the time Claude pushes — and dead for good once the laptop is off,
+// which is the case Forge exists for.
+//
+// The key is copied, not shared through a group-readable path, so git finds it at
+// the default ~/.ssh/id_ed25519 with no GIT_SSH_COMMAND or ssh config, and
+// deleting the workspace takes its copy with it. Every workspace on the host gets
+// the same identity; that matches the boundary Forge draws (workspace users are
+// in the docker group, so they can already reach each other's files).
+//
+// A host prepared before this existed has no key: that is not an error, the
+// workspace just has no git credentials until the host is re-prepared.
+func seedGitKey(home, keyDir string) error {
+	priv, err := os.ReadFile(filepath.Join(keyDir, "id_ed25519"))
+	if os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: no git identity at %s — re-run `forge host prepare` to create one\n", keyDir)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.WriteFile(filepath.Join(sshDir, "id_ed25519"), priv, 0o600); err != nil {
+		return err
+	}
+	// The .pub and known_hosts are conveniences, not credentials: copy when present.
+	for _, f := range []string{"id_ed25519.pub", "known_hosts"} {
+		data, err := os.ReadFile(filepath.Join(keyDir, f))
+		if err != nil {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(sshDir, f), data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // envRelPath is the workspace-local environment file (relative to the user's

@@ -102,3 +102,59 @@ func TestSeedGitconfig(t *testing.T) {
 		t.Errorf("gitconfig = %q", data)
 	}
 }
+
+// TestSeedGitKey covers the two things the copy must get right: the private key
+// lands at git's default path with 0600 (ssh refuses a world-readable key), and a
+// host with no identity is a warning, not a failed workspace create.
+func TestSeedGitKey(t *testing.T) {
+	t.Run("copies key and known_hosts", func(t *testing.T) {
+		keyDir, home := t.TempDir(), t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for name, data := range map[string]string{
+			"id_ed25519":     "PRIVATE",
+			"id_ed25519.pub": "ssh-ed25519 AAAA forge@host",
+			"known_hosts":    "github.com ssh-ed25519 AAAA",
+		} {
+			if err := os.WriteFile(filepath.Join(keyDir, name), []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := seedGitKey(home, keyDir); err != nil {
+			t.Fatalf("seedGitKey: %v", err)
+		}
+
+		priv := filepath.Join(home, ".ssh", "id_ed25519")
+		got, err := os.ReadFile(priv)
+		if err != nil || string(got) != "PRIVATE" {
+			t.Fatalf("private key not copied: %q, %v", got, err)
+		}
+		fi, err := os.Stat(priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("private key mode = %o, want 600 (ssh rejects looser)", perm)
+		}
+		for _, f := range []string{"id_ed25519.pub", "known_hosts"} {
+			if _, err := os.Stat(filepath.Join(home, ".ssh", f)); err != nil {
+				t.Errorf("%s not copied: %v", f, err)
+			}
+		}
+	})
+
+	t.Run("missing host key is not an error", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedGitKey(home, filepath.Join(t.TempDir(), "absent")); err != nil {
+			t.Errorf("seedGitKey on a host with no identity: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".ssh", "id_ed25519")); !os.IsNotExist(err) {
+			t.Error("expected no key to be written")
+		}
+	})
+}
