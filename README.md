@@ -180,6 +180,17 @@ Claude to write a handoff to its memory, waits for it, then restarts the session
 so it continues from memory with a fresh context — for long-running work.
 Your login to Claude persists in the workspace, so `renew`/`stop` never touch it.
 
+It waits for two things, not one: the confirmation token, and then the pane going
+quiet. The token only means Claude *believes* it's finished — it may print it and
+carry on writing the memory index. Restarting on the token alone truncates exactly
+the handoff the checkpoint exists to preserve.
+
+**Copying text out of a session.** The workspace's tmux has `mouse on`, so
+dragging selects and copies straight to your local clipboard (over SSH, via the
+OSC 52 escape), and the wheel scrolls back through history. The trade-off is that
+your terminal's own selection now needs **Shift** (or **Option** in some
+terminals) held down, since a plain drag belongs to tmux.
+
 ---
 
 ## How it works

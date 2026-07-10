@@ -221,21 +221,40 @@ func workspaceCheckpoint(target sshx.Target, session string) int {
 	if !claudeIdle(target, session) {
 		return fail("Claude looks busy — run checkpoint when it's idle (nothing running)")
 	}
+	// A marker already on screen is a leftover from an earlier checkpoint that
+	// timed out (a successful one restarts the session, clearing it). Sending now
+	// would match that stale line instantly and kill a session mid-work.
+	if pane, ok := capturePane(target, session); ok && hasMarkerLine(pane, checkpointMarker) {
+		return fail("a marker from an earlier checkpoint is still on screen — restart the session first:\n" +
+			"  forge workspace <name> claude stop && forge workspace <name> claude")
+	}
 
 	// The marker is embedded mid-sentence (words before and after) so its echo in
 	// the typed prompt can't wrap into a standalone marker line and false-positive;
 	// Claude's own output prints it alone on a line, which is what we match.
 	prompt := "Write a concise handoff to your memory right now — what we're working on, " +
 		"the current state, and the exact next steps — so a brand-new session can continue " +
-		"seamlessly. Do not ask me anything; just do it. When the memory is fully written, " +
-		"print the token " + checkpointMarker + " alone on its own line and then stop."
+		"seamlessly. Do not ask me anything; just do it. After the memory is fully written — " +
+		"including any index or pointer file it needs — print the token " + checkpointMarker +
+		" alone on its own line, as the very last thing you output, and then stop."
 	fmt.Println("→ asking Claude to write a handoff to memory…")
 	if err := sendText(target, session, prompt); err != nil {
 		return fail("send prompt: %v", err)
 	}
 
-	if !waitForCheckpoint(target, session, 3*time.Minute) {
+	capture := func() (string, bool) { return capturePane(target, session) }
+	if !waitForMarker(capture, checkpointMarker, panePoll, 3*time.Minute) {
 		return fail("Claude didn't confirm the handoff in time — left the session running, nothing killed")
+	}
+
+	// The marker means "Claude believes it is done", not "Claude has stopped".
+	// Asked to print it last, it may still print it mid-turn and go on writing —
+	// the memory index, say. Killing on the marker alone truncates that write, and
+	// the handoff we were preserving is the thing we corrupt. So wait for the pane
+	// to actually fall quiet before killing anything.
+	fmt.Println("→ marker seen; waiting for Claude to go quiet…")
+	if !waitQuiet(capture, panePoll, paneQuietFor, 2*time.Minute) {
+		return fail("Claude kept working after the marker — left the session running, nothing killed")
 	}
 
 	fmt.Println("→ handoff saved; restarting the session from memory…")
@@ -273,30 +292,59 @@ func capturePane(target sshx.Target, session string) (string, bool) {
 	return string(out), true
 }
 
+// Pane polling: how often to sample, and how long the pane must hold still
+// before we call Claude quiet. A streaming response redraws far faster than
+// paneQuietFor, so a spinner or token stream keeps resetting the window.
+const (
+	panePoll     = 2 * time.Second
+	paneQuietFor = 8 * time.Second
+)
+
 // claudeIdle reports whether the pane is stable across a short window — i.e. no
 // task is streaming output. Version-independent (no reliance on TUI wording).
 func claudeIdle(target sshx.Target, session string) bool {
-	a, ok := capturePane(target, session)
+	return waitQuiet(func() (string, bool) { return capturePane(target, session) },
+		panePoll, panePoll, 3*panePoll)
+}
+
+// waitQuiet samples the pane until its contents stay unchanged for stableFor,
+// which is what "Claude is not doing anything" actually looks like from outside:
+// no wording to match, no version coupling. Returns false if it never settles
+// within timeout, or if the pane can't be read.
+//
+// capture and poll are injected so the timing logic is testable without tmux or a
+// server, and so the tests run in milliseconds rather than minutes.
+func waitQuiet(capture func() (string, bool), poll, stableFor, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	last, ok := capture()
 	if !ok {
 		return false
 	}
-	time.Sleep(2 * time.Second)
-	b, ok := capturePane(target, session)
-	return ok && a == b
-}
-
-// waitForCheckpoint waits until Claude prints the marker on its own line (and has
-// actually produced a response, not just echoed the prompt), then a moment more
-// so the memory write settles.
-func waitForCheckpoint(target sshx.Target, session string, timeout time.Duration) bool {
-	time.Sleep(3 * time.Second) // let the prompt register and Claude start
-	deadline := time.Now().Add(timeout)
+	stableSince := time.Now()
 	for time.Now().Before(deadline) {
-		if pane, ok := capturePane(target, session); ok && hasMarkerLine(pane, checkpointMarker) {
-			time.Sleep(2 * time.Second)
+		if time.Since(stableSince) >= stableFor {
 			return true
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(poll)
+		cur, ok := capture()
+		if !ok {
+			return false
+		}
+		if cur != last {
+			last, stableSince = cur, time.Now()
+		}
+	}
+	return time.Since(stableSince) >= stableFor
+}
+
+// waitForMarker waits until the marker appears alone on a pane line.
+func waitForMarker(capture func() (string, bool), marker string, poll, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pane, ok := capture(); ok && hasMarkerLine(pane, marker) {
+			return true
+		}
+		time.Sleep(poll)
 	}
 	return false
 }
