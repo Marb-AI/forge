@@ -114,10 +114,8 @@ func opCreate(args []string) int {
 		return emitError("claude install: %v: %s", err, tailLines(out, 6))
 	}
 
-	// Pre-configure Claude so a session starts cleanly and shows up in the app:
-	// pre-trust the workspace folder (its trust dialog otherwise reappears every
-	// launch — it doesn't persist reliably when accepted interactively) and enable
-	// Remote Control by default.
+	// Pre-configure Claude so a session starts cleanly with nobody at the keyboard:
+	// pre-trust the workspace folder and skip permission prompts.
 	if err := seedClaudeConfig(home, *name); err != nil {
 		return emitError("claude config: %v", err)
 	}
@@ -318,23 +316,50 @@ func seedTmuxConf(home string) error {
 	return os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set -g status off\n"), 0o644)
 }
 
-// seedClaudeConfig pre-trusts the workspace folder so Claude's trust dialog never
-// appears (accepted interactively it doesn't persist). It deliberately does NOT
-// auto-enable Remote Control: doing so risks Claude offering to resume a killed
-// session, and a killed session (/exit, Ctrl+C) must stay closed. Remote Control
-// is a manual `/remote-control` inside the session instead — named after the
-// workspace via CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX in the env.
+// seedClaudeConfig pre-answers the two things Claude would otherwise stop and ask
+// a human, in the two files that hold them.
+//
+// ~/.claude.json: the folder trust dialog, which does not persist reliably when
+// accepted interactively and so reappears every launch.
+//
+// ~/.claude/settings.json: bypassPermissions, so tool calls run without an
+// approval prompt. This is deliberate and it is the point of a workspace — you
+// drive it from a phone, or from nothing at all while the laptop sleeps, and
+// there is nobody there to type "yes". The blast radius is the workspace: an
+// unprivileged Linux user, on a box whose only inbound port is SSH. Note it is
+// still a real grant — Claude can run any command as that user, and the docker
+// group means that reaches the host. Do not put anything on a Forge host you
+// would not hand to Claude.
+//
+// Claude refuses bypassPermissions when running as root; workspaces are not, so
+// this holds.
 func seedClaudeConfig(home, name string) error {
+	if err := writeClaudeConfig(home); err != nil {
+		return err
+	}
 	claudeJSON := filepath.Join(home, ".claude.json")
-	if err := mergeJSON(claudeJSON, func(m map[string]any) {
+	claudeDir := filepath.Join(home, ".claude")
+	if out, err := run("chown", "-R", name+":"+name, claudeJSON, claudeDir); err != nil {
+		return fmt.Errorf("chown claude config: %v: %s", err, out)
+	}
+	return nil
+}
+
+// writeClaudeConfig writes the two files; seedClaudeConfig then owns them by the
+// workspace user. Split out so it can be tested without root.
+func writeClaudeConfig(home string) error {
+	if err := mergeJSON(filepath.Join(home, ".claude.json"), func(m map[string]any) {
 		childMap(childMap(m, "projects"), home)["hasTrustDialogAccepted"] = true
 	}); err != nil {
 		return err
 	}
-	if out, err := run("chown", name+":"+name, claudeJSON); err != nil {
-		return fmt.Errorf("chown claude config: %v: %s", err, out)
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		return err
 	}
-	return nil
+	return mergeJSON(filepath.Join(claudeDir, "settings.json"), func(m map[string]any) {
+		childMap(m, "permissions")["defaultMode"] = "bypassPermissions"
+	})
 }
 
 // mergeJSON reads a JSON object (or starts empty / on a malformed file), applies

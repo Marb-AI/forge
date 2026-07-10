@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,4 +158,75 @@ func TestSeedGitKey(t *testing.T) {
 			t.Error("expected no key to be written")
 		}
 	})
+}
+
+// TestWriteClaudeConfig pins both prompts a workspace must never show: the folder
+// trust dialog and the per-tool permission prompt. Either one stalls a session
+// that nobody is watching, which is the whole failure Forge exists to avoid.
+func TestWriteClaudeConfig(t *testing.T) {
+	home := t.TempDir()
+	if err := writeClaudeConfig(home); err != nil {
+		t.Fatalf("writeClaudeConfig: %v", err)
+	}
+
+	read := func(p string) map[string]any {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		return m
+	}
+
+	cj := read(filepath.Join(home, ".claude.json"))
+	projects, _ := cj["projects"].(map[string]any)
+	proj, _ := projects[home].(map[string]any)
+	if proj["hasTrustDialogAccepted"] != true {
+		t.Errorf("trust dialog not pre-accepted for %s: %v", home, cj)
+	}
+
+	st := read(filepath.Join(home, ".claude", "settings.json"))
+	perms, _ := st["permissions"].(map[string]any)
+	if got := perms["defaultMode"]; got != "bypassPermissions" {
+		t.Errorf("permissions.defaultMode = %v, want bypassPermissions", got)
+	}
+}
+
+// TestWriteClaudeConfigPreservesExisting: the workspace user may have edited
+// these files (logged in, added an MCP server). Re-seeding must merge, not clobber.
+func TestWriteClaudeConfigPreservesExisting(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"),
+		[]byte(`{"model":"opus","permissions":{"allow":["Bash(ls:*)"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeClaudeConfig(home); err != nil {
+		t.Fatalf("writeClaudeConfig: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["model"] != "opus" {
+		t.Errorf("unrelated key dropped: %v", m)
+	}
+	perms, _ := m["permissions"].(map[string]any)
+	if perms["defaultMode"] != "bypassPermissions" {
+		t.Errorf("defaultMode not set: %v", perms)
+	}
+	if _, ok := perms["allow"]; !ok {
+		t.Errorf("sibling key under permissions dropped: %v", perms)
+	}
 }
