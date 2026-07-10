@@ -13,6 +13,7 @@ const usage = `forge — remote Claude Code workspace manager
 Hosts:
   forge host prepare <ssh-target> --alias=<alias>  provision a bare server + register it
   forge host add <ssh-target> --alias=<alias>   register an already-prepared server
+  forge host gh-login <alias>                   authenticate gh once for the whole host
   forge host list
   forge host remove <alias>
 

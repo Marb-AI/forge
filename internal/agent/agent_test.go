@@ -268,3 +268,40 @@ func TestSeedTmuxConfWritesFile(t *testing.T) {
 		t.Errorf("written conf differs from tmuxConf")
 	}
 }
+
+// TestSeedGhAuth: the token file must land where gh looks for it, readable only
+// by the workspace user, and a host that was never logged in must not fail the
+// create — it just has no gh credential yet.
+func TestSeedGhAuth(t *testing.T) {
+	t.Run("copies hosts.yml 0600", func(t *testing.T) {
+		ghDir, home := t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(ghDir, "hosts.yml"), []byte("github.com:\n  oauth_token: gho_secret\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := seedGhAuth(home, ghDir); err != nil {
+			t.Fatalf("seedGhAuth: %v", err)
+		}
+		dst := filepath.Join(home, ".config", "gh", "hosts.yml")
+		got, err := os.ReadFile(dst)
+		if err != nil || !strings.Contains(string(got), "gho_secret") {
+			t.Fatalf("token not copied: %q, %v", got, err)
+		}
+		fi, err := os.Stat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("hosts.yml mode = %o, want 600 — it holds an OAuth token", perm)
+		}
+	})
+
+	t.Run("no host login is not an error", func(t *testing.T) {
+		home := t.TempDir()
+		if err := seedGhAuth(home, filepath.Join(t.TempDir(), "absent")); err != nil {
+			t.Errorf("seedGhAuth on a host with no gh login: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".config", "gh", "hosts.yml")); !os.IsNotExist(err) {
+			t.Error("expected no hosts.yml to be written")
+		}
+	})
+}

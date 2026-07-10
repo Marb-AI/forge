@@ -111,8 +111,8 @@ func hostPrepare(args []string) int {
 	fmt.Printf("\n  git identity — register this key on GitHub (Settings → SSH keys) so\n")
 	fmt.Printf("  workspaces can clone and push without your laptop:\n\n")
 	fmt.Printf("    %s\n", strings.TrimSpace(string(pubkey)))
-	fmt.Printf("\n  gh is installed but not authenticated. When you first need it:\n")
-	fmt.Printf("    forge workspace <name> ssh   →   gh auth login\n")
+	fmt.Printf("\n  gh is installed but not authenticated. Log in once for the whole host:\n")
+	fmt.Printf("    forge host gh-login %s\n", alias)
 	fmt.Printf("\n  next: forge workspace create <name> %s\n", alias)
 	return 0
 }
@@ -129,6 +129,9 @@ func hostPrepare(args []string) int {
 const (
 	hostKeyDir  = "/etc/forge"
 	hostKeyPath = hostKeyDir + "/id_ed25519"
+	// hostGhDir holds the host-wide gh credential, seeded by `forge host gh-login`
+	// and copied into each workspace at create. Kept in sync with internal/agent.
+	hostGhDir = hostKeyDir + "/gh"
 )
 
 // unameToGoArch maps `uname -m` to a Go arch used in the agent binary name.

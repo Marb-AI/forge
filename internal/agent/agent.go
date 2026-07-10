@@ -86,6 +86,9 @@ func opCreate(args []string) int {
 	if err := seedGitKey(home, hostKeyDir); err != nil {
 		return emitError("git key: %v", err)
 	}
+	if err := seedGhAuth(home, hostGhDir); err != nil {
+		return emitError("gh auth: %v", err)
+	}
 	if err := writeEnvFile(home, *name); err != nil {
 		return emitError("env file: %v", err)
 	}
@@ -199,8 +202,36 @@ func seedSSH(home, name string, pubkey []byte) error {
 }
 
 // hostKeyDir holds the host-wide git identity created by `forge host prepare`.
-// Kept in sync with internal/cli.
-const hostKeyDir = "/etc/forge"
+// hostGhDir holds the host-wide gh credential created by `forge host gh-login`.
+// Both are copied into each workspace at create. Kept in sync with internal/cli.
+const (
+	hostKeyDir = "/etc/forge"
+	hostGhDir  = hostKeyDir + "/gh"
+)
+
+// seedGhAuth copies the host's gh credential into the workspace, so gh works
+// there without logging in again. gh reads ~/.config/gh/hosts.yml; one login per
+// host beats one per workspace, and separate tokens would buy nothing on a box
+// where every workspace user can already read the others' files.
+//
+// hosts.yml holds an OAuth token, so it is written 0600; the caller's chown hands
+// it to the workspace user. A host with no gh login is not an error — the
+// workspace simply has no gh credential until `forge host gh-login` runs.
+func seedGhAuth(home, ghDir string) error {
+	data, err := os.ReadFile(filepath.Join(ghDir, "hosts.yml"))
+	if os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "warning: no gh login at %s — run `forge host gh-login <alias>` to add one\n", ghDir)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	dst := filepath.Join(home, ".config", "gh")
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dst, "hosts.yml"), data, 0o600)
+}
 
 // seedGitKey copies the host's git identity into the workspace, so git works
 // with no forwarded agent. A forwarded agent cannot serve the Claude session:

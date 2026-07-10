@@ -56,6 +56,17 @@ forge host prepare root@1.2.3.4 --alias=myserver
 
 Opt out of those last two with `--no-firewall` / `--no-ssh-harden`.
 
+Then authenticate `gh` once for the whole server — it's interactive, so it gets
+its own command rather than living inside `prepare`:
+
+```sh
+forge host gh-login myserver
+```
+
+Both credentials — the SSH key and the `gh` login — are host-wide and copied into
+every workspace at `create`. You register the key on GitHub once and log `gh` in
+once per server, not once per workspace.
+
 > It makes real system changes (packages, iptables, sshd) — test on a throwaway
 > host first.
 

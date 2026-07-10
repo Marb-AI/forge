@@ -7,17 +7,20 @@ import (
 	"text/tabwriter"
 
 	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/internal/sshx"
 )
 
 func hostCmd(args []string) int {
 	if len(args) == 0 {
-		return fail("usage: forge host <add|list|remove>")
+		return fail("usage: forge host <add|prepare|gh-login|list|remove>")
 	}
 	switch args[0] {
 	case "add":
 		return hostAdd(args[1:])
 	case "prepare":
 		return hostPrepare(args[1:])
+	case "gh-login":
+		return hostGhLogin(args[1:])
 	case "list", "ls":
 		return hostList()
 	case "remove", "rm":
@@ -25,6 +28,45 @@ func hostCmd(args []string) int {
 	default:
 		return fail("unknown host command %q", args[0])
 	}
+}
+
+// hostGhLogin authenticates gh once per host, into the host's own gh config
+// directory rather than the admin's home. `workspace create` then copies that
+// credential into each new workspace, so you log in once per server instead of
+// once per workspace — the same shape as the host's git identity.
+//
+// The login itself is interactive (a browser code, or a token on stdin), so it
+// cannot happen during `prepare`; it gets its own command and a TTY.
+func hostGhLogin(args []string) int {
+	if len(args) < 1 {
+		return fail("usage: forge host gh-login <alias>")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fail("%v", err)
+	}
+	host := cfg.Hosts[args[0]]
+	if host == nil {
+		return fail("no such host %q (see: forge host list)", args[0])
+	}
+
+	// GH_CONFIG_DIR puts hosts.yml under /etc/forge/gh instead of ~/.config/gh.
+	// The file holds a token, so it stays root-only; the agent copies it in as
+	// root at create time.
+	remote := "install -d -m 0755 " + hostGhDir +
+		" && GH_CONFIG_DIR=" + hostGhDir + " gh auth login" +
+		" && chmod 0600 " + hostGhDir + "/hosts.yml"
+	if host.User != "root" {
+		remote = "sudo sh -c '" + remote + "'"
+	}
+
+	fmt.Printf("logging gh in on %s (interactive)…\n", args[0])
+	if code := runInteractive(sshx.Target{User: host.User, Addr: host.Addr, Port: host.Port}.TTYArgs(remote)); code != 0 {
+		return code
+	}
+	fmt.Printf("\ngh authenticated for host %q.\n", args[0])
+	fmt.Printf("  new workspaces get it automatically; existing ones need a re-create.\n")
+	return 0
 }
 
 func hostAdd(args []string) int {
