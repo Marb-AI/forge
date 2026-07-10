@@ -310,10 +310,34 @@ func seedGitconfig(home string) error {
 	return os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(cfg), 0o644)
 }
 
-// seedTmuxConf turns off the tmux status bar so a workspace session feels like a
-// plain terminal — no green bar telling you where you are; you already know.
+// tmuxConf makes a workspace session feel like a plain terminal, and makes text
+// in it copyable from a laptop hundreds of miles away.
+//
+// No status bar: no green line telling you where you are; you already know.
+//
+// mouse on is what makes copy work. Without it tmux ignores the drag and the
+// terminal tries to select for itself — but Claude runs on tmux's alternate
+// screen, where some terminals (Warp) draw a highlight they then refuse to copy:
+// you select, and Cmd-C does nothing. With mouse on, tmux owns the drag, enters
+// copy-mode, and copy-selection-and-cancel puts the text on *your* clipboard via
+// the OSC 52 escape, which travels back over SSH. It also gives you wheel
+// scrollback, which an alternate-screen session otherwise has none of.
+//
+// The cost: the terminal's own selection now needs Shift (or Option) held down,
+// because plain drags belong to tmux.
+//
+// set-clipboard on rather than the default external: both set your clipboard on a
+// yank, but on also lets Claude itself put things there.
+const tmuxConf = `set -g status off
+set -g mouse on
+set -g set-clipboard on
+set -as terminal-features ',*:clipboard'
+bind -T copy-mode    MouseDragEnd1Pane send -X copy-selection-and-cancel
+bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-selection-and-cancel
+`
+
 func seedTmuxConf(home string) error {
-	return os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte("set -g status off\n"), 0o644)
+	return os.WriteFile(filepath.Join(home, ".tmux.conf"), []byte(tmuxConf), 0o644)
 }
 
 // seedClaudeConfig pre-answers the two things Claude would otherwise stop and ask

@@ -230,3 +230,41 @@ func TestWriteClaudeConfigPreservesExisting(t *testing.T) {
 		t.Errorf("sibling key under permissions dropped: %v", perms)
 	}
 }
+
+// TestTmuxConfEnablesCopy pins the settings a remote session needs to be usable
+// from a laptop: mouse on (so tmux owns the drag and can copy at all) and
+// set-clipboard on (so the yank travels home over OSC 52). Losing either one
+// silently makes text in the session unselectable-but-uncopyable.
+func TestTmuxConfEnablesCopy(t *testing.T) {
+	for _, want := range []string{
+		"set -g status off",
+		"set -g mouse on",
+		"set -g set-clipboard on",
+		"copy-selection-and-cancel",
+	} {
+		if !strings.Contains(tmuxConf, want) {
+			t.Errorf("tmux conf is missing %q:\n%s", want, tmuxConf)
+		}
+	}
+	// The binding must exist for whichever key table the workspace ends up in;
+	// tmux picks copy-mode-vi when the user's EDITOR looks like vi.
+	for _, table := range []string{"copy-mode ", "copy-mode-vi "} {
+		if !strings.Contains(tmuxConf, "bind -T "+table) {
+			t.Errorf("no MouseDragEnd1Pane binding for key table %q", strings.TrimSpace(table))
+		}
+	}
+}
+
+func TestSeedTmuxConfWritesFile(t *testing.T) {
+	home := t.TempDir()
+	if err := seedTmuxConf(home); err != nil {
+		t.Fatalf("seedTmuxConf: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".tmux.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != tmuxConf {
+		t.Errorf("written conf differs from tmuxConf")
+	}
+}
