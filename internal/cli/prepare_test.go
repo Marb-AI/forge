@@ -33,9 +33,12 @@ func TestPrepareScriptSyntax(t *testing.T) {
 			if c.name == "apt-root-all" && hasSudoers {
 				t.Error("did not expect sudoers setup for root")
 			}
-			// Every distro gets gh and a git identity.
+			// Every distro gets gh, make, and a git identity.
 			if !strings.Contains(c.script, "gh") {
 				t.Error("expected gh install")
+			}
+			if !strings.Contains(c.script, "ensure make make") {
+				t.Error("expected make install")
 			}
 			if !strings.Contains(c.script, hostKeyPath) {
 				t.Errorf("expected git identity at %s", hostKeyPath)

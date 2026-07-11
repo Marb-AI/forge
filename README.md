@@ -46,7 +46,7 @@ forge host prepare root@1.2.3.4 --alias=myserver
 
 `prepare` is idempotent and:
 
-- installs git, tmux, **docker + compose**, and **gh** (Debian/Ubuntu and Fedora/RHEL),
+- installs git, make, tmux, **docker + compose**, and **gh** (Debian/Ubuntu and Fedora/RHEL),
 - creates the host's **git identity** — an ed25519 SSH key — and prints its public
   half, so you can register it on GitHub. An existing key is kept, never
   regenerated, and re-running `prepare` prints it again,

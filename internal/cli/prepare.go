@@ -15,7 +15,7 @@ import (
 )
 
 // hostPrepare provisions a bare server into a Forge host and registers it:
-// installs git, tmux, iproute2 (ss), docker + compose, gh, and forge-agent;
+// installs git, make, tmux, iproute2 (ss), docker + compose, gh, and forge-agent;
 // creates the host's git identity (an SSH key); locks the firewall to SSH-only;
 // and disables SSH password auth. Everything is idempotent — already-present
 // tools are reported, not reinstalled, and an existing key is kept.
@@ -288,6 +288,7 @@ ensure git  git             git
 ensure tmux tmux            tmux
 ensure ss   "iproute2 (ss)" "__IPROUTE__"
 ensure curl curl            curl
+ensure make make            make
 
 if command -v docker >/dev/null 2>&1; then
   echo "[forge] docker already installed"
