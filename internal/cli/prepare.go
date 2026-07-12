@@ -527,6 +527,7 @@ cat > /etc/systemd/system/forge-docker-prune.timer <<'UNIT'
 Description=Forge: nightly Docker clean-up
 
 [Timer]
+# The server's 03:00, not yours — UTC on a stock VPS.
 OnCalendar=*-*-* 03:00:00
 # A server that was off at 03:00 still runs it once it is back.
 Persistent=true

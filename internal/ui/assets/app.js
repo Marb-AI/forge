@@ -872,6 +872,11 @@ async function openWizard() {
   wiz.name().value = "";
   document.getElementById("wiz-target").value = "";
   document.getElementById("wiz-alias").value = "";
+  // Reset the safety checkboxes too, not just the text. Otherwise unticking the
+  // firewall once quietly leaves it unticked for the next server you register.
+  for (const id of ["wiz-firewall", "wiz-harden", "wiz-prune"]) {
+    document.getElementById(id).checked = true;
+  }
   const log = document.getElementById("wiz-log");
   log.hidden = true;
   log.textContent = "";

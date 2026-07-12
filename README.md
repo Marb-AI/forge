@@ -59,6 +59,8 @@ forge host prepare root@1.2.3.4 --alias=myserver
 - disables SSH password auth (keys only), guarded so it can't lock you out,
 - schedules a **nightly Docker clean-up** at 03:00 (a systemd timer), because a
   build server fills its disk up and a full disk breaks every workspace at once.
+  That's 03:00 in the *server's* timezone — UTC on a stock VPS, so an hour or two
+  either side of your own small hours.
 
 Opt out of those last three with `--no-firewall` / `--no-ssh-harden` /
 `--no-docker-prune`.
@@ -76,9 +78,14 @@ eager is a workspace that has to rebuild from scratch in the morning:
 Everything is filtered to `until=24h`, so nothing built today is touched, and an
 image a running container uses is never a candidate in the first place.
 
+Check on it from the server itself — as root, or the admin user you prepared with.
+(`forge workspace <name> ssh` drops you in as the *workspace* user, which has no
+sudo, so this isn't the way in.)
+
 ```sh
-forge workspace <name> ssh -- systemctl list-timers forge-docker-prune  # when it next runs
-forge workspace <name> ssh -- sudo forge-docker-prune                   # run it now
+ssh root@<ip> systemctl list-timers forge-docker-prune   # when it next runs
+ssh root@<ip> journalctl -u forge-docker-prune -n 20     # what it reclaimed
+ssh root@<ip> forge-docker-prune                         # run it now
 ```
 
 Then authenticate `gh` once for the whole server — it's interactive, so it gets
