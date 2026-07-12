@@ -59,3 +59,18 @@ func TestTargetsFromHost(t *testing.T) {
 		t.Errorf("WorkspaceTarget = %+v", w)
 	}
 }
+
+// Without ConnectTimeout, ssh waits out the operating system's TCP timeout —
+// measured at over 45 seconds against an unreachable address — and every command
+// that touches that host waits with it, the browser UI's workspace list included.
+// ServerAlive* does not cover this: it only notices a peer that dies *after* the
+// connection is established. A host that never answers at all is this option's job.
+func TestEveryConnectionBoundsHowLongItWaitsForTheServer(t *testing.T) {
+	joined := strings.Join(commonOpts(22), " ")
+	if !strings.Contains(joined, "ConnectTimeout=") {
+		t.Fatal("no ConnectTimeout: an unreachable host would hang every command that touches it")
+	}
+	if connectTimeout <= 0 || connectTimeout > 30 {
+		t.Errorf("ConnectTimeout=%d is not a bound anyone would wait out", connectTimeout)
+	}
+}

@@ -12,11 +12,24 @@ import (
 	"github.com/Marb-AI/forge/internal/config"
 )
 
+// connectTimeout bounds how long we wait for a server to answer at all.
+//
+// Without it, ssh hangs on the operating system's TCP timeout — measured at over
+// 45 seconds against an unreachable address — and every command that touches that
+// host hangs with it, including the browser UI's workspace list. Generous enough
+// for a slow link, short enough that a dead host is reported rather than waited on.
+const connectTimeout = 10
+
 // commonOpts are applied to every connection: fail fast on a dead server rather
 // than hanging on a long TCP timeout, and never prompt interactively for a
 // password (Forge is key-only).
+//
+// ConnectTimeout is what makes the first half of that true. ServerAlive* only
+// notices a peer that dies *after* the connection is up; a host that never answers
+// at all is the connect timeout's problem, and for a long time nothing set one.
 func commonOpts(port int) []string {
 	opts := []string{
+		"-o", "ConnectTimeout=" + strconv.Itoa(connectTimeout),
 		"-o", "ServerAliveInterval=5",
 		"-o", "ServerAliveCountMax=3",
 		"-o", "BatchMode=no", // allow key passphrase prompts, but not password auth
