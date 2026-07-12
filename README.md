@@ -56,9 +56,37 @@ forge host prepare root@1.2.3.4 --alias=myserver
   regenerated, and re-running `prepare` prints it again,
 - locks the firewall to **SSH-only** — nothing else reachable from the internet,
   including Docker's published ports,
-- disables SSH password auth (keys only), guarded so it can't lock you out.
+- disables SSH password auth (keys only), guarded so it can't lock you out,
+- schedules a **nightly Docker clean-up** at 03:00 (a systemd timer), because a
+  build server fills its disk up and a full disk breaks every workspace at once.
+  That's 03:00 in the *server's* timezone — UTC on a stock VPS, so an hour or two
+  either side of your own small hours.
 
-Opt out of those last two with `--no-firewall` / `--no-ssh-harden`.
+Opt out of those last three with `--no-firewall` / `--no-ssh-harden` /
+`--no-docker-prune`.
+
+**What the clean-up removes** — deliberately little, because the cost of being too
+eager is a workspace that has to rebuild from scratch in the morning:
+
+| | |
+|---|---|
+| **Dangling images** | the layer sets a rebuild left behind. *Not* `prune -a`, which would also delete tagged images that no container happens to be running right now — i.e. the images of every workspace you aren't currently using. |
+| **Build cache** | usually the biggest win. |
+| **Stopped containers: no** | 23 MB against 3.9 GB of cache — nothing — and removing one takes its writable layer, so a stack you stopped for the night would need `up` rather than `start` in the morning. |
+| **Volumes: never** | that is where your data lives. |
+
+Everything is filtered to `until=24h`, so nothing built today is touched, and an
+image a running container uses is never a candidate in the first place.
+
+Check on it from the server itself — as root, or the admin user you prepared with.
+(`forge workspace <name> ssh` drops you in as the *workspace* user, which has no
+sudo, so this isn't the way in.)
+
+```sh
+ssh root@<ip> systemctl list-timers forge-docker-prune   # when it next runs
+ssh root@<ip> journalctl -u forge-docker-prune -n 20     # what it reclaimed
+ssh root@<ip> forge-docker-prune                         # run it now
+```
 
 Then authenticate `gh` once for the whole server — it's interactive, so it gets
 its own command rather than living inside `prepare`:
@@ -161,7 +189,7 @@ forge spawn >/dev/null 2>&1
 
 ```
 Hosts
-  forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden]
+  forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune]
                                                   provision a bare server + register it
   forge host add <ssh-target> --alias=<alias>     register an already-prepared server
   forge host list

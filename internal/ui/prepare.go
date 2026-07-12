@@ -13,11 +13,17 @@ import (
 // wizard shows the same provisioning run you'd watch in a terminal — including
 // the SSH key it prints for GitHub.
 func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
+	// Pointers, not plain bools. A missing JSON field decodes to false, which for
+	// these three would mean "no firewall, no SSH hardening, no clean-up" — the
+	// opposite of what the CLI does. A silently unhardened server is not something
+	// a forgotten field should be able to produce, so absent means the safe
+	// default: on.
 	var req struct {
-		Target   string `json:"target"`
-		Alias    string `json:"alias"`
-		Firewall bool   `json:"firewall"`
-		Harden   bool   `json:"harden"`
+		Target      string `json:"target"`
+		Alias       string `json:"alias"`
+		Firewall    *bool  `json:"firewall"`
+		Harden      *bool  `json:"harden"`
+		DockerPrune *bool  `json:"dockerPrune"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("bad request"))
@@ -34,8 +40,10 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	firewall, harden, prune := onByDefault(req.Firewall), onByDefault(req.Harden), onByDefault(req.DockerPrune)
+
 	id, err := s.startJob(func(out io.Writer) error {
-		return s.deps.PrepareHost(req.Target, req.Alias, req.Firewall, req.Harden, out)
+		return s.deps.PrepareHost(req.Target, req.Alias, firewall, harden, prune, out)
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)
@@ -43,3 +51,7 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{"id": id})
 }
+
+// onByDefault reads an optional JSON bool: absent means on. These guard a real
+// machine, so forgetting to send one must not turn it off.
+func onByDefault(b *bool) bool { return b == nil || *b }
