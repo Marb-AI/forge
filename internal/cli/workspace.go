@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/config"
@@ -83,23 +84,31 @@ func workspaceDelete(args []string) int {
 		return fail("usage: forge workspace delete <name>")
 	}
 	name := args[0]
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
-	host := cfg.HostFor(name)
-	if host == nil {
-		return fail("unknown workspace %q — not created by this client", name)
-	}
-	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
-		return fail("%v", err)
-	}
-	cfg.RemoveWorkspace(name)
-	if err := cfg.Save(); err != nil {
+	if err := deleteWorkspace(name); err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("deleted workspace %q\n", name)
 	return 0
+}
+
+// deleteWorkspace destroys a workspace on its host and forgets it locally.
+// This is irreversible: the agent runs `userdel -r`, so the workspace's Linux
+// user and its entire home — every file in it — are gone. Shared by
+// `forge workspace delete` and the UI's settings panel.
+func deleteWorkspace(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	host := cfg.HostFor(name)
+	if host == nil {
+		return fmt.Errorf("unknown workspace %q — not created by this client", name)
+	}
+	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
+		return err
+	}
+	cfg.RemoveWorkspace(name)
+	return cfg.Save()
 }
 
 func workspaceList() int {
@@ -360,14 +369,35 @@ func waitForMarker(capture func() (string, bool), marker string, poll, timeout t
 	return false
 }
 
-// hasMarkerLine reports whether any whole (trimmed) line of s equals the marker.
+// hasMarkerLine reports whether any line of s is the marker and nothing else.
+//
+// "Nothing else" is the whole trick. Claude Code decorates each of its output
+// lines with a bullet — the marker arrives as "● FORGE_CHECKPOINT_SAVED", never
+// bare — so an exact-equality check never matches, and every checkpoint runs to
+// its timeout with the handoff written but the session never restarted. Leading
+// decoration therefore has to be stripped.
+//
+// But only *decoration* may be stripped. The prompt we type mentions the token
+// mid-sentence, and the pane echoes that prompt straight back; if a substring
+// match were enough we would fire on our own prompt the instant we sent it and
+// kill the session mid-work. So: strip the leading glyphs, then demand the rest
+// of the line be exactly the marker — which the echoed sentence, with its words
+// on either side, never is.
 func hasMarkerLine(s, marker string) bool {
 	for _, line := range strings.Split(s, "\n") {
-		if strings.TrimSpace(line) == marker {
+		if strings.TrimSpace(stripDecoration(line)) == marker {
 			return true
 		}
 	}
 	return false
+}
+
+// stripDecoration drops leading whitespace and TUI glyphs (bullets, box-drawing,
+// arrows) from a pane line, leaving it starting at its first real word.
+func stripDecoration(line string) string {
+	return strings.TrimLeftFunc(line, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
 }
 
 func workspaceExpose(target sshx.Target, rest []string) int {

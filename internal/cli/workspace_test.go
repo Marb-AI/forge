@@ -17,6 +17,19 @@ func TestHasMarkerLine(t *testing.T) {
 		{"mid-sentence in the echoed prompt", "print the token " + m + " alone on its own line\n", false},
 		{"as a prefix", m + "_LATER\n", false},
 		{"absent", "still thinking\n", false},
+
+		// How the marker ACTUALLY arrives. Claude Code bullets every line it
+		// prints, so the marker is never bare — and matching on bare equality
+		// meant no checkpoint ever saw it: each one wrote the handoff, then ran
+		// out its timeout without restarting the session.
+		{"bulleted, as Claude really prints it", "● " + m + "\n", true},
+		{"bulleted and indented", "  ●  " + m + "   \n", true},
+
+		// …and the line it must still refuse: the prompt we typed, echoed back
+		// into the pane by tmux, wrapped exactly as Claude Code wraps it. Firing
+		// on this would kill the session the moment we asked it to save.
+		{"wrapped echo of our own prompt", "  including any index or pointer file it needs — print the token " + m + "\n", false},
+		{"wrapped echo, continuation", "  " + m + " alone on its own line, as the very last thing you\n", false},
 	}
 	for _, c := range cases {
 		if got := hasMarkerLine(c.pane, m); got != c.want {
