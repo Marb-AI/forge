@@ -131,15 +131,18 @@ function paintStoppedCard() {
 
   if (status === "missing") {
     title.textContent = "Not on the server";
-    text.textContent = `"${state.active}" is in your local config, but the server doesn't have it — ` +
+    text.textContent = `"${state.active}" is in your local config, but "${ws.host}" doesn't have it — ` +
       `it was most likely deleted from another machine. Remove it in Settings.`;
     start.hidden = true;
     return;
   }
   if (!isUsable(status)) {
+    // Name the server, not just the workspace: knowing it's unreachable is no use
+    // if you have to go and look up which machine to check.
+    const host = ws ? ws.host : "it";
     title.textContent = "Server unreachable";
-    text.textContent = `Can't reach the server "${state.active}" lives on, so there is no telling ` +
-      `whether Claude is running. Nothing has been changed.`;
+    text.textContent = `Can't reach "${host}", the server "${state.active}" lives on, ` +
+      `so there is no telling whether Claude is running. Nothing has been changed.`;
     start.hidden = true;
     return;
   }

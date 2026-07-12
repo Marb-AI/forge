@@ -32,7 +32,18 @@ func commonOpts(port int) []string {
 		"-o", "ConnectTimeout=" + strconv.Itoa(connectTimeout),
 		"-o", "ServerAliveInterval=5",
 		"-o", "ServerAliveCountMax=3",
-		"-o", "BatchMode=no", // allow key passphrase prompts, but not password auth
+		// Key-only, and now actually enforced. BatchMode=no is the default and does
+		// nothing to stop password auth: `ssh -G` reported passwordauthentication yes
+		// the whole time this file claimed otherwise. Turning both methods off makes a
+		// bad key fail immediately and honestly ("Permission denied (publickey)")
+		// rather than dropping into a prompt — which, in the UI daemon, is a prompt
+		// nobody is there to answer.
+		//
+		// BatchMode stays "no" so that a *local* key passphrase can still be asked for.
+		// That is a different thing from the server asking for a password.
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "BatchMode=no",
 		// TOFU: record a new server's host key on first connect instead of
 		// refusing non-interactively (you own the servers Forge connects to).
 		// A *changed* key still fails loudly — that's a real warning.

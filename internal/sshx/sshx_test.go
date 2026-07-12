@@ -74,3 +74,23 @@ func TestEveryConnectionBoundsHowLongItWaitsForTheServer(t *testing.T) {
 		t.Errorf("ConnectTimeout=%d is not a bound anyone would wait out", connectTimeout)
 	}
 }
+
+// This file has always said Forge is key-only and never prompts for a password.
+// It wasn't: BatchMode=no is the default and does nothing to stop password auth —
+// `ssh -G` reported passwordauthentication yes the entire time the comment claimed
+// otherwise. A bad key would drop into a prompt, which in the UI daemon is a prompt
+// nobody is there to answer.
+func TestKeyOnlyIsEnforcedAndNotMerelyClaimed(t *testing.T) {
+	joined := strings.Join(commonOpts(22), " ")
+
+	for _, off := range []string{"PasswordAuthentication=no", "KbdInteractiveAuthentication=no"} {
+		if !strings.Contains(joined, off) {
+			t.Errorf("key-only is claimed but not enforced: missing %s", off)
+		}
+	}
+	// …while a *local* key passphrase must still be askable. That is a different
+	// thing from the server asking for a password, and BatchMode=yes would break it.
+	if !strings.Contains(joined, "BatchMode=no") {
+		t.Error("BatchMode must stay no, or a passphrase-protected key can't be used")
+	}
+}
