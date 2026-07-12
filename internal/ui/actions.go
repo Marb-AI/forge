@@ -147,8 +147,8 @@ func (s *server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
-	// Close our terminals for it first: an attached ssh session is a process of
-	// the user being deleted, and `userdel` refuses a user that still owns one.
+	// Close our terminals for it first: an attached ssh session is a process of the
+	// user being deleted, and `userdel` refuses to remove a user that still owns one.
 	// The agent kills what remains (it has to — closing a connection here does not
 	// make the far-side sshd exit instantly), but we still shut ours down rather
 	// than making it race. The cost is that a delete which fails for some other

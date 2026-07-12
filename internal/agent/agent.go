@@ -10,6 +10,7 @@ package agent
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -156,8 +157,9 @@ func opDelete(args []string) int {
 // procRoot is the procfs mount; a variable so tests can point it at a fixture.
 var procRoot = "/proc"
 
-// reapKill is how long we give the user's processes to exit after a signal —
+// reapGrace is how long we give the user's processes to exit after a signal —
 // once after SIGTERM (so a shell or Claude can wind down), once after SIGKILL.
+// reapPoll is how often we re-read the process table while waiting.
 const (
 	reapGrace = 5 * time.Second
 	reapPoll  = 100 * time.Millisecond
@@ -171,12 +173,18 @@ const (
 // userdel looks in. Waiting for the process table, rather than for a timer, is
 // what makes the delete deterministic instead of a coin flip.
 //
-// SIGTERM first, SIGKILL for whatever ignores it. An unknown user is not an error
-// — there is nothing to reap, and userdel will say so better than we can.
+// SIGTERM first, SIGKILL for whatever ignores it. A user who does not exist is
+// not an error — there is nothing to reap, and userdel will say so better than we
+// can. A lookup that fails for any *other* reason is: swallowing it would skip the
+// reaping silently and hand the delete straight back to the bug this exists to fix.
 func reapUser(name string) error {
 	u, err := user.Lookup(name)
-	if err != nil {
+	var unknown user.UnknownUserError
+	if errors.As(err, &unknown) {
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("look up %s: %v", name, err)
 	}
 	for _, sig := range []os.Signal{syscall.SIGTERM, syscall.SIGKILL} {
 		pids, err := userPIDs(procRoot, u.Uid)

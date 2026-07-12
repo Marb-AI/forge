@@ -311,7 +311,9 @@ func TestSeedGhAuth(t *testing.T) {
 }
 
 // fakeProc builds a procfs fixture: pid -> real UID, plus the noise a real /proc
-// carries (named directories, and a pid whose status has no Uid line).
+// carries — non-process entries (a named directory, a named file) and pid 7777,
+// whose status cannot be read, standing in for a process that exits mid-scan.
+// None of the noise may show up as a pid to kill.
 func fakeProc(t *testing.T, owners map[int]string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -325,10 +327,17 @@ func fakeProc(t *testing.T, owners map[int]string) string {
 			t.Fatal(err)
 		}
 	}
-	for _, junk := range []string{"self", "cpuinfo"} {
-		if err := os.WriteFile(filepath.Join(root, junk), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	// The noise a real /proc carries: named entries that are not processes (a
+	// directory and a file), and a process that vanishes mid-scan — modelled here
+	// as a pid whose status is unreadable, which is what a scan actually races.
+	if err := os.MkdirAll(filepath.Join(root, "irq"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "cpuinfo"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "7777"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	return root
 }
@@ -385,5 +394,14 @@ func TestProcUIDReadsTheRealUID(t *testing.T) {
 	}
 	if _, err := procUID(filepath.Join(dir, "gone", "status")); err == nil {
 		t.Error("a vanished process should be an error, not a silent match")
+	}
+}
+
+// A user who is simply not there is nothing to reap. Anything else that goes
+// wrong in the lookup must be reported: reaping is what makes the delete work, so
+// skipping it quietly would hand us back the userdel exit-8 failure it prevents.
+func TestReapUserIgnoresOnlyAnUnknownUser(t *testing.T) {
+	if err := reapUser("no-such-workspace-user"); err != nil {
+		t.Errorf("unknown user should be a no-op, got %v", err)
 	}
 }
