@@ -62,6 +62,14 @@ type Deps struct {
 	// PrepareHost provisions a bare server and registers it. It takes minutes and
 	// its progress is the point, so it writes every line to out (an SSE stream).
 	PrepareHost func(sshTarget, alias string, firewall, harden bool, out io.Writer) error
+	// DeleteWorkspace destroys a workspace on its host. IRREVERSIBLE: the agent
+	// runs `userdel -r`, so the workspace user and every file in its home are gone.
+	DeleteWorkspace func(name string) error
+	// RemoveHost forgets a server locally. The machine is untouched — its
+	// workspaces keep running, Forge just stops knowing about them.
+	RemoveHost func(alias string) error
+	// SetUIPort records the port the UI binds to. Takes effect on the next start.
+	SetUIPort func(port int) error
 }
 
 // validate reports the first operation the caller forgot to wire. Every field is
@@ -75,6 +83,9 @@ func (d Deps) validate() error {
 		"ListHosts":       d.ListHosts,
 		"CreateWorkspace": d.CreateWorkspace,
 		"PrepareHost":     d.PrepareHost,
+		"DeleteWorkspace": d.DeleteWorkspace,
+		"RemoveHost":      d.RemoveHost,
+		"SetUIPort":       d.SetUIPort,
 	} {
 		if reflect.ValueOf(fn).IsNil() {
 			return fmt.Errorf("ui: Deps.%s is not wired", name)
@@ -192,6 +203,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /api/workspaces", s.handleCreateWorkspace)
 	mux.HandleFunc("POST /api/hosts/prepare", s.handlePrepareHost)
 	mux.HandleFunc("GET /api/jobs/{id}/stream", s.handleJobStream)
+	mux.HandleFunc("DELETE /api/workspaces/{ws}", s.handleDeleteWorkspace)
+	mux.HandleFunc("DELETE /api/hosts/{alias}", s.handleRemoveHost)
+	mux.HandleFunc("PUT /api/config/ui-port", s.handleSetUIPort)
 	return s.guard(mux)
 }
 

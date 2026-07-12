@@ -160,15 +160,10 @@ func uiSetPort(rest []string) int {
 		return fail("usage: forge ui port <port>")
 	}
 	p, err := strconv.Atoi(rest[0])
-	if err != nil || p < 1 || p > 65535 {
+	if err != nil {
 		return fail("invalid port %q (want 1-65535)", rest[0])
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
-	cfg.UIPort = p
-	if err := cfg.Save(); err != nil {
+	if err := setUIPort(p); err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("forge ui port set to %d\n", p)
@@ -178,6 +173,21 @@ func uiSetPort(rest []string) int {
 		}
 	}
 	return 0
+}
+
+// setUIPort records the port the browser UI should bind to. It only takes effect
+// on the next start — a running daemon already holds the old port. Shared by
+// `forge ui port` and the UI's settings panel.
+func setUIPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port %d (want 1-65535)", port)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	cfg.UIPort = port
+	return cfg.Save()
 }
 
 // runUI is the foreground body of the detached UI daemon. It loads config and
@@ -233,6 +243,9 @@ func runUI(_ []string) int {
 		},
 		CreateWorkspace: createWorkspace,
 		PrepareHost:     runHostPrepare,
+		DeleteWorkspace: deleteWorkspace,
+		RemoveHost:      removeHost,
+		SetUIPort:       setUIPort,
 	}
 	if err := ui.Serve(dir, cfg.UIPortOr(), token, deps); err != nil {
 		return fail("%v", err)

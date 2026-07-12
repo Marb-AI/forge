@@ -20,6 +20,7 @@ const state = {
   openFiles: [],  // [{path, name}] open in the read-only viewer
   activeFile: null, // path shown in the viewer, or null (terminal visible)
   showHidden: false, // show dotfiles at the tree root
+  stopped: false, // the active workspace has no Claude session running
 };
 
 // ---- theme ----------------------------------------------------------------
@@ -37,6 +38,13 @@ function applyHljsTheme() {
   const dark = document.documentElement.dataset.theme === "dark";
   document.getElementById("hljs-theme").href =
     dark ? "/assets/vendor/hljs-dark.min.css" : "/assets/vendor/hljs-light.min.css";
+}
+// The single way the theme changes: the toggle, and the saved value at boot.
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("forge-theme", theme);
+  applyTermTheme();
+  applyHljsTheme();
 }
 
 // ---- base64 <-> utf8 bytes -------------------------------------------------
@@ -66,19 +74,50 @@ async function loadWorkspaces() {
 
   // With nothing to show, the terminal would be a black void — offer the one
   // action that makes sense instead.
-  const empty = document.getElementById("empty");
   if (!state.workspaces.length) {
-    empty.hidden = false;
     teardownTerminal();
     teardownSSH();
     hideSSHPanel();
     resetFiles();
     state.active = null;
+    state.stopped = false;
     setStatus(null);
+    renderStage();
     return;
   }
-  empty.hidden = true;
   if (!state.active) selectWs(state.workspaces[0].name);
+  else renderStage();
+}
+
+
+// The stage shows exactly one of: nothing to do, a stopped session, or the
+// terminal. Keeping that in one place is what stops the three from fighting.
+function renderStage() {
+  const none = !state.workspaces.length;
+  document.getElementById("empty").hidden = !none;
+  document.getElementById("stopped").hidden = none || !state.stopped;
+  if (!none && state.stopped) {
+    document.getElementById("stopped-ws").textContent = state.active || "";
+  }
+  renderPowerButton();
+
+  // With no workspace selected, every one of these acts on nothing. Leaving them
+  // lit is a button that lies about being clickable.
+  for (const b of document.querySelectorAll('.rail-btn[data-action]')) {
+    if (b.dataset.action === "settings") continue; // settings always works
+    b.disabled = !state.active;
+  }
+}
+
+// The one rail button is stop or start, depending on what the session is doing —
+// a "stop" you can press on a dead session is just a lie.
+function renderPowerButton() {
+  const b = document.getElementById("rail-power");
+  const stopped = state.stopped;
+  b.dataset.action = stopped ? "start" : "stop";
+  b.querySelector(".ico").textContent = stopped ? "▶" : "■";
+  b.querySelector(".cap").textContent = stopped ? "start" : "stop";
+  b.title = stopped ? "Start the Claude session" : "Stop the Claude session";
 }
 
 function renderTabs() {
@@ -112,7 +151,15 @@ function selectWs(name) {
   // than silently leaving you in the previous workspace's shell.
   teardownSSH();
   hideSSHPanel();
-  openTerminal(name);
+
+  // The terminal stream attaches-or-creates (like `forge workspace <name> claude`),
+  // so opening it on a stopped workspace would quietly resurrect the session you
+  // just stopped. Show the Start card instead and let the choice be yours.
+  const ws = state.workspaces.find((w) => w.name === name);
+  state.stopped = !!ws && ws.status !== "running";
+  teardownTerminal();
+  if (!state.stopped) openTerminal(name);
+  renderStage();
   loadTree(name);
 }
 
@@ -129,8 +176,8 @@ function termTheme() {
     : { background: "#ffffff", foreground: "#1a1a1a", cursor: "#1a1a1a" };
 }
 function applyTermTheme() {
-  for (const s of [state.claude, state.ssh]) {
-    if (s) s.term.options.theme = termTheme();
+  for (const sess of [state.claude, state.ssh]) {
+    if (sess) sess.term.options.theme = termTheme();
   }
 }
 
@@ -229,7 +276,12 @@ function openTerminal(ws) {
       setStatus("Reconnecting to the fresh session…");
       setTimeout(() => { if (state.active === ws) openTerminal(ws); }, 1000);
     } else {
-      setStatus("Session ended. Reselect the tab to reconnect.");
+      // The session is gone (stopped here, or killed from elsewhere). Say so with
+      // the Start card rather than a status line nobody reads.
+      teardownTerminal();
+      state.stopped = true;
+      setStatus(null);
+      renderStage();
     }
   });
 }
@@ -305,36 +357,256 @@ document.getElementById("rail").addEventListener("click", (e) => {
     case "checkpoint": doCheckpoint(); break;
     case "restart": doRestart(); break;
     case "stop": doStop(); break;
+    case "start": doStart(); break;
   }
 });
 
-// ---- settings ---------------------------------------------------------------
-// The port comes from the address we were loaded on, so this needs no endpoint.
-function openSettings() {
-  document.getElementById("set-port").textContent = location.host;
-  syncThemeButtons();
+// ---- settings: the administrative, mostly-irreversible stuff ----------------
+// Theme lives in the tab bar; this panel is for the things you'd otherwise have
+// to drop to the CLI for — and the things you should have to think about first.
+async function openSettings() {
+  setSettingsMsg(null);
+  setSettingsError(null);
+  document.getElementById("set-port").value = location.port || "";
   document.getElementById("settings").hidden = false;
+  await renderAdminLists();
 }
+
 function closeSettings() {
   document.getElementById("settings").hidden = true;
   if (state.claude) state.claude.term.focus();
 }
-function syncThemeButtons() {
-  const dark = document.documentElement.dataset.theme === "dark";
-  document.getElementById("set-dark").classList.toggle("active", dark);
-  document.getElementById("set-light").classList.toggle("active", !dark);
+
+function setSettingsMsg(msg) {
+  const el = document.getElementById("set-msg");
+  if (!msg) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = msg;
 }
-function setTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  localStorage.setItem("forge-theme", theme);
-  applyTermTheme();
-  applyHljsTheme();
-  syncThemeButtons();
+function setSettingsError(msg) {
+  const el = document.getElementById("set-error");
+  if (!msg) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = msg;
 }
+
+async function renderAdminLists() {
+  const wsBox = document.getElementById("set-workspaces");
+  const hostBox = document.getElementById("set-hosts");
+  wsBox.textContent = "";
+  hostBox.textContent = "";
+
+  let workspaces = [];
+  let hosts = [];
+  try {
+    const [a, b] = await Promise.all([fetch("/api/workspaces"), fetch("/api/hosts")]);
+    if (a.ok) workspaces = await a.json();
+    if (b.ok) hosts = await b.json();
+  } catch (e) { /* rendered as empty below */ }
+
+  if (!workspaces.length) wsBox.appendChild(mutedRow("No workspaces."));
+  for (const w of workspaces) {
+    wsBox.appendChild(adminRow(w.name, `${w.host} · ${w.status}`, "Delete", true,
+      () => confirmDeleteWorkspace(w.name)));
+  }
+  if (!hosts.length) hostBox.appendChild(mutedRow("No servers registered."));
+  for (const h of hosts) {
+    hostBox.appendChild(adminRow(h, "", "Remove", false, () => confirmRemoveHost(h)));
+  }
+}
+
+function mutedRow(text) {
+  const d = document.createElement("div");
+  d.className = "muted";
+  d.textContent = text;
+  return d;
+}
+
+function adminRow(name, meta, action, destructive, onClick) {
+  const row = document.createElement("div");
+  row.className = "adminrow";
+
+  const left = document.createElement("div");
+  const title = document.createElement("div");
+  title.textContent = name;
+  left.appendChild(title);
+  if (meta) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    m.textContent = meta;
+    left.appendChild(m);
+  }
+
+  const btn = document.createElement("button");
+  btn.textContent = action;
+  if (destructive) btn.classList.add("destructive");
+  btn.addEventListener("click", onClick);
+
+  row.append(left, btn);
+  return row;
+}
+
+// Deleting a workspace runs `userdel -r` on the server: the user and its whole
+// home go with it. A yes/no dialog is far too easy to click through for that, so
+// you type the name.
+async function confirmDeleteWorkspace(name) {
+  const ok = await confirmAction({
+    title: `Delete the workspace "${name}"?`,
+    body: [
+      { text: "This runs userdel -r on the server." },
+      { text: "The workspace user and its ENTIRE HOME — every file, every repo, every uncommitted change in it — are permanently destroyed. Nothing undoes this.", warn: true },
+    ],
+    confirmLabel: "Delete forever",
+    destructive: true,
+    requireWord: name,
+  });
+  if (!ok) return;
+
+  setSettingsError(null);
+  setSettingsMsg(`Deleting "${name}"…`);
+  try {
+    const res = await fetch(`/api/workspaces/${encodeURIComponent(name)}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+
+    setSettingsMsg(`Deleted "${name}".`);
+    if (state.active === name) {
+      teardownTerminal();
+      teardownSSH();
+      hideSSHPanel();
+      resetFiles();
+      state.active = null;
+    }
+    await loadWorkspaces();
+    await renderAdminLists();
+  } catch (e) {
+    setSettingsMsg(null);
+    setSettingsError("Delete failed: " + e.message);
+  }
+}
+
+// Removing a server only makes Forge forget it — the machine and its workspaces
+// are untouched — so a plain confirm is proportionate here.
+async function confirmRemoveHost(alias) {
+  const ok = await confirmAction({
+    title: `Remove the server "${alias}"?`,
+    body: [
+      { text: "Forge forgets this server, and the workspaces it knows about there disappear from the UI." },
+      { text: "The machine is NOT touched — those workspaces keep running on it, and `forge host add` brings it all back.", warn: false },
+    ],
+    confirmLabel: "Remove server",
+    destructive: true,
+  });
+  if (!ok) return;
+
+  setSettingsError(null);
+  setSettingsMsg(`Removing "${alias}"…`);
+  try {
+    const res = await fetch(`/api/hosts/${encodeURIComponent(alias)}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+
+    setSettingsMsg(`Removed "${alias}".`);
+    await loadWorkspaces();
+    await renderAdminLists();
+  } catch (e) {
+    setSettingsMsg(null);
+    setSettingsError("Remove failed: " + e.message);
+  }
+}
+
+async function saveUIPort() {
+  const port = parseInt(document.getElementById("set-port").value, 10);
+  setSettingsError(null);
+  setSettingsMsg(null);
+  try {
+    const res = await fetch("/api/config/ui-port", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+    // This daemon is holding the old port, so it cannot move while it runs.
+    setSettingsMsg(`Port saved as ${data.port}. Restart to apply: forge ui stop && forge ui`);
+  } catch (e) {
+    setSettingsError("Couldn't save the port: " + e.message);
+  }
+}
+
 document.getElementById("set-close").addEventListener("click", closeSettings);
 document.getElementById("set-done").addEventListener("click", closeSettings);
-document.getElementById("set-dark").addEventListener("click", () => setTheme("dark"));
-document.getElementById("set-light").addEventListener("click", () => setTheme("light"));
+document.getElementById("set-port-save").addEventListener("click", saveUIPort);
+
+
+// ---- confirm dialog ---------------------------------------------------------
+// Our own, not the browser's: these actions destroy work in progress, and the
+// native box can't explain what exactly is about to be lost — nor make you type
+// a name when the thing at stake is a whole workspace.
+//
+// Returns a promise that resolves true only if the user really confirmed.
+let cfResolve = null;
+
+function confirmAction({ title, body, confirmLabel = "Confirm", destructive = false, requireWord = null }) {
+  const modal = document.getElementById("confirm");
+  // Only one dialog at a time. Opening a second over the first would strand the
+  // first promise forever — its caller would sit there awaiting an answer that
+  // can never arrive.
+  if (!modal.hidden) return Promise.resolve(false);
+
+  document.getElementById("cf-title").textContent = title;
+
+  const bodyEl = document.getElementById("cf-body");
+  bodyEl.textContent = "";
+  for (const part of Array.isArray(body) ? body : [body]) {
+    const p = document.createElement("div");
+    if (typeof part === "object") {
+      p.textContent = part.text;
+      if (part.warn) p.className = "warn";
+    } else {
+      p.textContent = part;
+    }
+    bodyEl.appendChild(p);
+  }
+
+  const ok = document.getElementById("cf-ok");
+  ok.textContent = confirmLabel;
+  ok.classList.toggle("destructive", destructive);
+
+  // Typing the name is the only guard proportionate to an irreversible delete.
+  const typeBox = document.getElementById("cf-type");
+  const input = document.getElementById("cf-input");
+  typeBox.hidden = !requireWord;
+  input.value = "";
+  if (requireWord) {
+    document.getElementById("cf-word").textContent = requireWord;
+    ok.disabled = true;
+    input.oninput = () => { ok.disabled = input.value.trim() !== requireWord; };
+  } else {
+    ok.disabled = false;
+    input.oninput = null;
+  }
+
+  modal.hidden = false;
+  (requireWord ? input : ok).focus();
+
+  return new Promise((resolve) => { cfResolve = resolve; });
+}
+
+function closeConfirm(result) {
+  document.getElementById("confirm").hidden = true;
+  const resolve = cfResolve;
+  cfResolve = null;
+  if (resolve) resolve(result);
+  if (!result && state.claude) state.claude.term.focus();
+}
+
+document.getElementById("cf-ok").addEventListener("click", () => closeConfirm(true));
+document.getElementById("cf-cancel").addEventListener("click", () => closeConfirm(false));
+document.getElementById("cf-x").addEventListener("click", () => closeConfirm(false));
+document.getElementById("cf-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !document.getElementById("cf-ok").disabled) closeConfirm(true);
+});
 
 // ---- Claude session actions -----------------------------------------------
 // post() throws with the server's own message (the handlers explain themselves:
@@ -353,7 +625,16 @@ async function post(action, ws) {
 async function doStop() {
   if (!state.active) return;
   const ws = state.active;
-  if (!confirm(`Stop the Claude session for "${ws}"?\nThe session is killed and its context is lost.`)) return;
+  const ok = await confirmAction({
+    title: "Stop the Claude session?",
+    body: [
+      { text: `Claude is running in "${ws}". Stopping kills the session.`, warn: false },
+      { text: "Whatever it was doing stops, and its context — everything you've said this session — is gone. The files on the server are untouched.", warn: true },
+    ],
+    confirmLabel: "Stop session",
+    destructive: true,
+  });
+  if (!ok) return;
 
   state.reconnectOnEnd = false;
   setStatus("Stopping…");
@@ -362,20 +643,48 @@ async function doStop() {
   teardownTerminal();
   try {
     await post("stop", ws);
-    setStatus(`Claude session stopped. Reselect "${ws}" to start it again.`);
+    state.stopped = true;
+    setStatus(null);
   } catch (e) {
     // The stop failed, so the session is still alive — put the terminal back
-    // rather than leaving an empty stage over a session that never died.
+    // rather than leaving a Start card over a session that never died.
     setStatus("Stop failed: " + e.message);
+    state.stopped = false;
     if (state.active === ws) openTerminal(ws);
   }
+  renderStage();
   loadWorkspaces(); // refresh the tab's status dot either way
+}
+
+// Start is exactly what `forge workspace <name> claude` does: the terminal stream
+// attaches or creates. No separate endpoint needed — the session comes up because
+// we attach to it.
+function doStart() {
+  if (!state.active) return;
+  const ws = state.active;
+  state.stopped = false;
+  state.reconnectOnEnd = false;
+  renderStage();
+  // No "starting…" message: openTerminal clears the status line anyway, and the
+  // terminal itself appearing is the feedback.
+  openTerminal(ws);
+  // Give the session a moment to exist, then refresh the tab's status dot.
+  setTimeout(() => { if (state.active === ws) loadWorkspaces(); }, 2000);
 }
 
 async function doRestart() {
   if (!state.active) return;
   const ws = state.active;
-  if (!confirm(`Restart the Claude session for "${ws}"?\nThe current context is lost and a fresh session starts.`)) return;
+  const ok = await confirmAction({
+    title: "Restart the Claude session?",
+    body: [
+      { text: `This kills Claude in "${ws}" and starts a brand-new session.`, warn: false },
+      { text: "The current context is lost — nothing is saved first. If you want to keep what Claude knows, run Checkpoint instead.", warn: true },
+    ],
+    confirmLabel: "Restart session",
+    destructive: true,
+  });
+  if (!ok) return;
 
   // The restart kills the session; the stream's "end" then reconnects us to the
   // fresh one.
@@ -393,7 +702,15 @@ async function doRestart() {
 async function doCheckpoint() {
   if (!state.active) return;
   const ws = state.active;
-  if (!confirm(`Checkpoint "${ws}"?\nClaude writes a handoff to memory, then the session restarts with fresh context. Do this while Claude is idle.`)) return;
+  const ok = await confirmAction({
+    title: "Checkpoint this session?",
+    body: [
+      { text: `Claude writes a handoff to its memory, then the session in "${ws}" restarts and continues from it with a fresh context.`, warn: false },
+      { text: "Do this while Claude is idle — if it's mid-task the checkpoint refuses rather than interrupt it.", warn: false },
+    ],
+    confirmLabel: "Checkpoint",
+  });
+  if (!ok) return;
 
   // Checkpoint ends the session (after saving) and starts a fresh one, so the
   // stream's "end" should reconnect us rather than report a dead session.
@@ -457,7 +774,8 @@ function lastLine(text) {
 document.getElementById("ssh-close").addEventListener("click", () => toggleSSH(false));
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  // Topmost layer wins: the modals, then the ssh overlay.
+  // Topmost layer wins: the confirm dialog, then the other modals, then ssh.
+  if (!document.getElementById("confirm").hidden) { closeConfirm(false); return; }
   if (!document.getElementById("wizard").hidden) { closeWizard(); return; }
   if (!document.getElementById("settings").hidden) { closeSettings(); return; }
   if (!document.getElementById("sshpanel").hidden) {
@@ -500,6 +818,7 @@ const NEW_HOST = "__new__";
 
 document.getElementById("add-tab").addEventListener("click", openWizard);
 document.getElementById("empty-create").addEventListener("click", openWizard);
+document.getElementById("stopped-start").addEventListener("click", doStart);
 document.getElementById("wiz-close").addEventListener("click", closeWizard);
 document.getElementById("wiz-cancel").addEventListener("click", closeWizard);
 document.getElementById("wiz-create").addEventListener("click", submitWizard);
@@ -721,9 +1040,12 @@ function renderLevel(ws, base, entries) {
     const tw = document.createElement("span");
     tw.className = "tw";
     tw.innerHTML = e.dir ? ICON_CHEVRON : "";
+    // A language mark where we have one (fileicons.js), the plain glyph otherwise,
+    // so an unknown extension looks like a file rather than like a gap.
+    const lang = e.dir ? "" : fileIconSVG(e.name);
     const ti = document.createElement("span");
-    ti.className = "ti";
-    ti.innerHTML = e.dir ? ICON_FOLDER : ICON_FILE;
+    ti.className = lang ? "ti lang" : "ti";
+    ti.innerHTML = e.dir ? ICON_FOLDER : (lang || ICON_FILE);
     const tn = document.createElement("span");
     tn.className = "tn";
     tn.textContent = e.name;

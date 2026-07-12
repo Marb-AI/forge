@@ -130,6 +130,23 @@ func (r *termRegistry) get(key string) *term {
 	return r.m[key]
 }
 
+// closeKeys closes and drops the given terminals, if they are live. Used when a
+// workspace is about to be destroyed under them.
+func (r *termRegistry) closeKeys(keys ...string) {
+	r.mu.Lock()
+	var doomed []*term
+	for _, k := range keys {
+		if t := r.m[k]; t != nil {
+			doomed = append(doomed, t)
+			delete(r.m, k)
+		}
+	}
+	r.mu.Unlock()
+	for _, t := range doomed {
+		t.close()
+	}
+}
+
 func (r *termRegistry) closeAll() {
 	r.mu.Lock()
 	terms := make([]*term, 0, len(r.m))

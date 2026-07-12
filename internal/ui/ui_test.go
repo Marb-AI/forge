@@ -227,6 +227,9 @@ func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 		ListHosts:       func() ([]string, error) { return nil, nil },
 		CreateWorkspace: func(string, string) error { return nil },
 		PrepareHost:     func(string, string, bool, bool, io.Writer) error { return nil },
+		DeleteWorkspace: func(string) error { return nil },
+		RemoveHost:      func(string) error { return nil },
+		SetUIPort:       func(int) error { return nil },
 	}
 	if err := full.validate(); err != nil {
 		t.Fatalf("a fully wired Deps should validate, got %v", err)
@@ -241,6 +244,9 @@ func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 		"ListHosts":       func(d *Deps) { d.ListHosts = nil },
 		"CreateWorkspace": func(d *Deps) { d.CreateWorkspace = nil },
 		"PrepareHost":     func(d *Deps) { d.PrepareHost = nil },
+		"DeleteWorkspace": func(d *Deps) { d.DeleteWorkspace = nil },
+		"RemoveHost":      func(d *Deps) { d.RemoveHost = nil },
+		"SetUIPort":       func(d *Deps) { d.SetUIPort = nil },
 	}
 	for name, drop := range drops {
 		d := full

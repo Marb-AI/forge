@@ -221,29 +221,43 @@ forge ui
 ```
 
 Starts a small local server and opens it. Everything the CLI does to a workspace,
-you can do here — it is a second front end over the same SSH and tmux, not a
-reimplementation.
+you can do here — it is a second front end over the same SSH and tmux, calling the
+same code, not a reimplementation that quietly drifts.
 
 - **Tabs** across the top, one per workspace, with a live status dot. **+** opens
   a wizard that creates a workspace — and can register a whole new server first,
   streaming the `host prepare` run so you watch it install rather than guess.
 - **The Claude session** fills the middle, as a real terminal. It's the same tmux
   session `forge workspace <name> claude` attaches to, so closing the tab just
-  detaches — Claude keeps working.
-- **Checkpoint / restart / stop** buttons on the right, wired to the commands of
-  the same name.
+  detaches — Claude keeps working. Its clickable options work too: a mouse click
+  is just more input, and it takes the same path as typing.
+- **Checkpoint, restart, stop/start** on the right, wired to the commands of the
+  same name. A stopped session doesn't quietly come back the moment you click its
+  tab — it shows a **Start** button, and starting it is exactly
+  `forge workspace <name> claude`.
 - **A read-only file tree** on the left, rooted at the workspace and unable to
-  leave it. Click a file and it opens over the terminal with syntax highlighting.
-  Read-only is the point: Claude writes the code, you inspect it. Dotfiles at the
-  root (plus `.git` and `.claude` anywhere) are hidden behind the eye toggle.
-- **An SSH shell** that slides *over* the terminal instead of shrinking it, so
-  opening it never reflows what Claude is drawing. Hiding it **keeps the shell
-  running** — you come back to the same shell, same directory.
+  leave it. Files carry their language's icon; click one and it opens over the
+  terminal with syntax highlighting. Read-only is the point: Claude writes the
+  code, you inspect it. Dotfiles at the root (plus `.git` and `.claude` anywhere)
+  hide behind the eye toggle.
+- **An SSH shell** that opens *over* the terminal — the same box a file opens in,
+  so the tree and the rail stay put and Claude never gets reflowed. Hiding it
+  **keeps the shell running**: you come back to the same shell, same directory,
+  same half-finished command.
+- **Settings** holds the things you'd otherwise drop to the CLI for, and the ones
+  worth thinking about first: deleting a workspace, removing a server, and the UI
+  port.
 - Light and dark themes.
 
+**Nothing destructive happens on one click.** Stop, restart, checkpoint, removing
+a server and deleting a workspace each explain what exactly is about to be lost
+before they do it. Deleting a workspace runs `userdel -r` on the server — the
+user and its entire home, every file and every uncommitted change in it — so that
+one makes you type the workspace's name.
+
 **The port.** It defaults to `47615` — deliberately obscure, so it won't collide
-with a dev server. Change it with `forge ui port <port>`; the choice is saved in
-`~/.forge/config.json`, and a running UI needs a restart to pick it up:
+with a dev server. Change it in Settings or with `forge ui port <port>`; the choice
+is saved in `~/.forge/config.json`, and a running UI needs a restart to pick it up:
 
 ```sh
 forge ui port 8099
@@ -252,13 +266,15 @@ forge ui stop && forge ui
 
 **No login, and none needed.** The server binds to `127.0.0.1` only, so nothing
 off your machine can reach it. It still checks the `Host` header (so a rebound
-DNS name can't get in), gates every request on a random token that `forge ui`
-puts in the URL it opens, and refuses cross-origin writes — which is what stops
-another tab in your browser from driving your workspaces. No password to manage.
+DNS name can't get in), gates every request on a random token that `forge ui` puts
+in the URL it opens and then keeps in a Strict-SameSite cookie, and refuses
+cross-origin writes — which is what stops another tab in your browser from driving
+your workspaces. No password to manage.
 
-**Single binary, still.** The HTML, JS and CSS — xterm.js and highlight.js
-included — are compiled into `forge` itself. There is nothing to install and no
-build step; `make` is still just Go.
+**Single binary, still.** The HTML, JS and CSS — xterm.js, highlight.js and the
+file-type icons included — are compiled into `forge` itself. There is nothing to
+install and no build step; `make` is still just Go. (`FORGE_UI_DEV=<repo>` serves
+them from disk while working on the UI.)
 
 > The terminal needs a local pty, which Windows doesn't provide, so the browser UI
 > is macOS and Linux only for now. The rest of the Windows client is unaffected.

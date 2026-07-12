@@ -57,6 +57,24 @@
               <button id="empty-create" class="primary big">Create workspace</button>
             </div>
           </div>
+          <div id="stopped" hidden>
+            <div class="empty-card">
+              <div class="empty-title">Session stopped</div>
+              <p class="empty-text">
+                Claude isn't running in <b><span id="stopped-ws"></span></b>. Its files are
+                untouched — starting it again gives you a fresh session.
+              </p>
+              <button id="stopped-start" class="primary big">▶  Start Claude</button>
+            </div>
+          </div>
+          <aside id="sshpanel" hidden>
+            <div class="pane-head">
+          <span>SSH · <span id="ssh-ws"></span></span>
+          <button id="ssh-close" title="Hide (Esc) — the shell keeps running">✕</button>
+        </div>
+            <div id="sshbody"><div id="sshterm"></div></div>
+            <div id="ssh-note" class="muted pad" hidden></div>
+          </aside>
           <div id="fileview" hidden>
             <div id="fileview-head" class="muted"></div>
             <pre><code id="fileview-code" class="hljs"></code></pre>
@@ -72,7 +90,7 @@
         <button class="rail-btn" data-action="restart" title="Restart the Claude session (context lost)">
           <span class="ico">⟳</span><span class="cap">restart</span>
         </button>
-        <button class="rail-btn" data-action="stop" title="Stop the Claude session">
+        <button class="rail-btn" id="rail-power" data-action="stop" title="Stop the Claude session">
           <span class="ico">■</span><span class="cap">stop</span>
         </button>
         <div class="rail-sep"></div>
@@ -84,14 +102,26 @@
         </button>
       </aside>
 
-      <aside id="sshpanel" hidden>
-        <div class="pane-head">
-          <span>SSH · <span id="ssh-ws"></span></span>
-          <button id="ssh-close" title="Hide (Esc) — the shell keeps running">✕</button>
+    </div>
+  </div>
+
+  <div id="confirm" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <span id="cf-title"></span>
+        <button id="cf-x" title="Cancel (Esc)">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="cf-body" class="cf-body"></div>
+        <div id="cf-type" hidden>
+          <label for="cf-input">Type <b><span id="cf-word"></span></b> to confirm</label>
+          <input id="cf-input" type="text" autocomplete="off" spellcheck="false">
         </div>
-        <div id="sshbody"><div id="sshterm"></div></div>
-        <div id="ssh-note" class="muted pad" hidden></div>
-      </aside>
+      </div>
+      <div class="modal-foot">
+        <button id="cf-cancel">Cancel</button>
+        <button id="cf-ok" class="primary">Confirm</button>
+      </div>
     </div>
   </div>
 
@@ -102,18 +132,32 @@
         <button id="set-close" title="Close (Esc)">✕</button>
       </div>
       <div class="modal-body">
-        <label>Theme</label>
+        <label>Workspaces</label>
+        <div class="hint danger-hint">
+          Deleting a workspace runs <code>userdel -r</code> on the server: the user and
+          its entire home — <b>every file in it</b> — are gone. Nothing undoes this.
+        </div>
+        <div id="set-workspaces" class="adminlist"></div>
+
+        <label>Servers</label>
+        <div class="hint">
+          Removing a server only makes Forge forget it. The machine is untouched and its
+          workspaces keep running; <code>forge host add</code> brings it back.
+        </div>
+        <div id="set-hosts" class="adminlist"></div>
+
+        <label for="set-port">UI port</label>
         <div class="row">
-          <button id="set-dark" class="seg">Dark</button>
-          <button id="set-light" class="seg">Light</button>
+          <input id="set-port" type="number" min="1" max="65535" inputmode="numeric">
+          <button id="set-port-save">Save</button>
+        </div>
+        <div class="hint">
+          Loopback only — nothing off this machine can reach it. A change needs a restart:
+          <code>forge ui stop &amp;&amp; forge ui</code>
         </div>
 
-        <label>Port</label>
-        <div class="hint">
-          This UI is on <code id="set-port"></code>, loopback only — nothing off this
-          machine can reach it. To move it:
-          <br><code>forge ui port &lt;port&gt;</code> then <code>forge ui stop &amp;&amp; forge ui</code>
-        </div>
+        <div id="set-msg" class="hint" hidden></div>
+        <div id="set-error" class="err" hidden></div>
       </div>
       <div class="modal-foot">
         <button id="set-done" class="primary">Done</button>
@@ -168,6 +212,7 @@
   <script src="/assets/vendor/xterm.min.js"></script>
   <script src="/assets/vendor/addon-fit.min.js"></script>
   <script src="/assets/vendor/highlight.min.js"></script>
+  <script src="/assets/vendor/fileicons.js"></script>
   <script src="/assets/app.js"></script>
 </body>
 </html>

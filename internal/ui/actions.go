@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
@@ -131,6 +132,78 @@ func (s *server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "name": req.Name, "host": req.Host})
+}
+
+// The administrative, mostly-irreversible operations, which is why they live
+// behind the settings panel rather than a button you can hit by accident.
+
+// handleDeleteWorkspace destroys a workspace on its host. This is the most
+// destructive thing the UI can do: the agent runs `userdel -r`, so the workspace
+// user and its entire home — all the code in it — are gone for good. The browser
+// makes you type the name first; nothing can undo it.
+func (s *server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
+	ws := r.PathValue("ws")
+	if s.deps.HostFor(ws) == nil {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
+		return
+	}
+	// Close our terminals for it FIRST, and not merely for tidiness: `userdel`
+	// refuses to remove a user that still has processes, and an attached ssh
+	// session is one of that user's processes. Leave them open and the delete
+	// fails. The cost is that a delete which fails for some other reason has
+	// still ended the session — the files are untouched and it restarts, which is
+	// the cheaper of the two mistakes.
+	s.terms.closeKeys(termKey(ws, termClaude), termKey(ws, termSSH))
+
+	if err := s.deps.DeleteWorkspace(ws); err != nil {
+		writeJSONError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleRemoveHost forgets a server. The machine is untouched: its workspaces
+// keep running, Forge just stops knowing about it — so this one is reversible,
+// with `forge host add`.
+func (s *server) handleRemoveHost(w http.ResponseWriter, r *http.Request) {
+	alias := r.PathValue("alias")
+	if !s.knownHost(alias) {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("no such host %q", alias))
+		return
+	}
+	// Past that check a failure is ours (the config didn't save), not the user's —
+	// reporting it as "not found" would send them looking for the wrong problem.
+	if err := s.deps.RemoveHost(alias); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// knownHost reports whether alias is a registered server.
+func (s *server) knownHost(alias string) bool {
+	hosts, err := s.deps.ListHosts()
+	if err != nil {
+		return false
+	}
+	return slices.Contains(hosts, alias)
+}
+
+// handleSetUIPort records a new port for the UI. It cannot take effect now — this
+// very daemon holds the old one — so the browser is told a restart is needed.
+func (s *server) handleSetUIPort(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Port int `json:"port"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("bad request"))
+		return
+	}
+	if err := s.deps.SetUIPort(req.Port); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "port": req.Port, "restart_required": true})
 }
 
 // validName keeps a workspace name or host alias safe as a Linux username and a

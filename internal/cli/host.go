@@ -126,13 +126,23 @@ func hostRemove(args []string) int {
 	if len(args) == 0 {
 		return fail("usage: forge host remove <alias>")
 	}
-	alias := args[0]
-	cfg, err := config.Load()
-	if err != nil {
+	if err := removeHost(args[0]); err != nil {
 		return fail("%v", err)
 	}
+	fmt.Printf("removed host %q\n", args[0])
+	return 0
+}
+
+// removeHost forgets a server locally. It does NOT touch the machine: the server
+// keeps running, and so do its workspaces — Forge just stops knowing about them.
+// Shared by `forge host remove` and the UI's settings panel.
+func removeHost(alias string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
 	if _, ok := cfg.Hosts[alias]; !ok {
-		return fail("no such host %q", alias)
+		return fmt.Errorf("no such host %q", alias)
 	}
 	delete(cfg.Hosts, alias)
 	delete(cfg.Ports, alias)
@@ -141,11 +151,7 @@ func hostRemove(args []string) int {
 			delete(cfg.Workspaces, ws)
 		}
 	}
-	if err := cfg.Save(); err != nil {
-		return fail("%v", err)
-	}
-	fmt.Printf("removed host %q\n", alias)
-	return 0
+	return cfg.Save()
 }
 
 func flush(w *tabwriter.Writer) int {

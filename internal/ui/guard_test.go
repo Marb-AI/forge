@@ -27,6 +27,9 @@ func testServer(t *testing.T) (*server, http.Handler) {
 			ListHosts:       func() ([]string, error) { return []string{}, nil },
 			CreateWorkspace: func(string, string) error { return nil },
 			PrepareHost:     func(string, string, bool, bool, io.Writer) error { return nil },
+			DeleteWorkspace: func(string) error { return nil },
+			RemoveHost:      func(string) error { return nil },
+			SetUIPort:       func(int) error { return nil },
 		},
 	}
 	return s, s.handler()
