@@ -206,7 +206,14 @@ function renderTabs() {
     label.textContent = ws.name;
     tab.append(dot, label);
 
-    tab.addEventListener("click", () => selectWs(ws.name));
+    // Clicking a tab hands focus to the tab button, and a click on the tab you are
+    // already on returns early from selectWs — so nothing takes the focus back and
+    // your next keystrokes go to a <button> instead of Claude. Give the terminal
+    // back its focus: clicking a workspace means "I want to be typing in it".
+    tab.addEventListener("click", () => {
+      selectWs(ws.name);
+      state.claude?.term.focus();
+    });
     tabs.appendChild(tab);
   }
 }
@@ -295,6 +302,20 @@ function makeTerminal(ws, kind, el, onEnd) {
   // like typing — so clicking Claude's options works over plain POST.
   term.onData((data) => postInput(ws, kind, data));
   term.onResize(({ cols, rows }) => postResize(ws, kind, cols, rows));
+
+  // OSC 52 is the ONLY way text gets out of a session and into your clipboard.
+  // The workspace is a headless Linux box: no X, no Wayland, no xclip — nothing
+  // there has a clipboard to copy into. So everything that copies (Claude's
+  // "press c" on the login URL, a tmux copy-mode yank, Claude writing a snippet)
+  // hands the text to the *terminal* as an OSC 52 escape and trusts it to reach
+  // you. xterm.js does not implement OSC 52; unhandled, it is dropped on the
+  // floor. That is why "copied" appeared and nothing was ever copied — the
+  // message was Claude reporting it had sent the escape, not the clipboard
+  // confirming it arrived.
+  term.parser.registerOscHandler(52, (payload) => {
+    copyFromSession(payload);
+    return true; // handled: never let it fall through and print as garbage
+  });
 
   const ro = new ResizeObserver(() => { try { fit.fit(); } catch (e) {} });
   ro.observe(el);
@@ -414,6 +435,63 @@ function setStatus(msg) {
   if (!msg) { el.hidden = true; el.textContent = ""; return; }
   el.hidden = false;
   el.textContent = msg;
+}
+
+// flashStatus says something and then gets out of the way. Only for things the
+// terminal already did — never for state you'd want to come back and read.
+let statusTimer = null;
+function flashStatus(msg, ms = 2000) {
+  setStatus(msg);
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => setStatus(null), ms);
+}
+
+// copyFromSession handles an OSC 52 payload: "<selection>;<base64>", e.g. "c;aGk=".
+// A payload of "?" is the terminal being *asked* for the clipboard's contents;
+// we ignore it rather than answer, because a session that can read your clipboard
+// on demand can read whatever you last copied — a password, a token — and Forge
+// runs Claude in these sessions with permission prompts turned off.
+function copyFromSession(payload) {
+  const semi = payload.indexOf(";");
+  if (semi < 0) return;
+  const data = payload.slice(semi + 1);
+  if (data === "?" || data === "") return;
+  let text;
+  try {
+    text = new TextDecoder().decode(b64decodeBytes(data));
+  } catch (e) {
+    return; // not base64: nothing we can put anywhere
+  }
+  writeClipboard(text);
+}
+
+// writeClipboard puts text on the *browser's* clipboard. The async Clipboard API
+// is the real path (the UI is served from 127.0.0.1, which counts as a secure
+// context, so it is available), but it can still be refused — Safari wants a
+// recent user gesture, and an OSC 52 arriving from the server is not one. The
+// old execCommand path is the fallback, and if even that is refused we say so:
+// a copy that silently does nothing is the bug we are here to fix, and telling
+// you "copied" when nothing was copied would just be the same lie in a new place.
+function writeClipboard(text) {
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    // Off-screen but focusable — execCommand("copy") copies the selection, so
+    // the text has to really be selected in a really-rendered element.
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    flashStatus(ok ? "Copied to clipboard" : "Could not reach the clipboard — select the text and copy it yourself");
+  };
+  if (!navigator.clipboard || !navigator.clipboard.writeText) return fallback();
+  navigator.clipboard.writeText(text).then(
+    () => flashStatus("Copied to clipboard"),
+    () => fallback(),
+  );
 }
 
 // ---- right rail ------------------------------------------------------------
