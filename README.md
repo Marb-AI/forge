@@ -8,6 +8,10 @@ session running in the background (in tmux), so it survives SSH disconnects, a
 closed laptop lid, even your machine rebooting. Reattach and Claude is exactly
 where you left it.
 
+Drive it from the terminal, or from a [browser UI](#browser-ui) (`forge ui`) —
+tabs per workspace, the live Claude session, a read-only file tree, and a shell
+that pops over the top. Same SSH and tmux underneath, either way.
+
 Forge is a single small binary. On the server it uses nothing exotic — plain
 Linux users for isolation, tmux for sessions, SSH tunnels for dev servers — so
 there's little to trust or maintain.
@@ -181,6 +185,12 @@ Forwarding
   forge forwarding status
   forge spawn                                      keep tunnels alive in the background (idempotent)
 
+UI
+  forge ui                                         start the browser UI and open it (= ui start)
+  forge ui stop
+  forge ui status
+  forge ui port <port>                             change the port it listens on
+
 Info
   forge show ports [host]                          ports in use on the server (paste to Claude)
 ```
@@ -201,6 +211,57 @@ dragging selects and copies straight to your local clipboard (over SSH, via the
 OSC 52 escape), and the wheel scrolls back through history. The trade-off is that
 your terminal's own selection now needs **Shift** (or **Option** in some
 terminals) held down, since a plain drag belongs to tmux.
+
+---
+
+## Browser UI
+
+```sh
+forge ui
+```
+
+Starts a small local server and opens it. Everything the CLI does to a workspace,
+you can do here — it is a second front end over the same SSH and tmux, not a
+reimplementation.
+
+- **Tabs** across the top, one per workspace, with a live status dot. **+** opens
+  a wizard that creates a workspace — and can register a whole new server first,
+  streaming the `host prepare` run so you watch it install rather than guess.
+- **The Claude session** fills the middle, as a real terminal. It's the same tmux
+  session `forge workspace <name> claude` attaches to, so closing the tab just
+  detaches — Claude keeps working.
+- **Checkpoint / restart / stop** buttons on the right, wired to the commands of
+  the same name.
+- **A read-only file tree** on the left, rooted at the workspace and unable to
+  leave it. Click a file and it opens over the terminal with syntax highlighting.
+  Read-only is the point: Claude writes the code, you inspect it. Dotfiles at the
+  root (plus `.git` and `.claude` anywhere) are hidden behind the eye toggle.
+- **An SSH shell** that slides *over* the terminal instead of shrinking it, so
+  opening it never reflows what Claude is drawing. Hiding it **keeps the shell
+  running** — you come back to the same shell, same directory.
+- Light and dark themes.
+
+**The port.** It defaults to `47615` — deliberately obscure, so it won't collide
+with a dev server. Change it with `forge ui port <port>`; the choice is saved in
+`~/.forge/config.json`, and a running UI needs a restart to pick it up:
+
+```sh
+forge ui port 8099
+forge ui stop && forge ui
+```
+
+**No login, and none needed.** The server binds to `127.0.0.1` only, so nothing
+off your machine can reach it. It still checks the `Host` header (so a rebound
+DNS name can't get in), gates every request on a random token that `forge ui`
+puts in the URL it opens, and refuses cross-origin writes — which is what stops
+another tab in your browser from driving your workspaces. No password to manage.
+
+**Single binary, still.** The HTML, JS and CSS — xterm.js and highlight.js
+included — are compiled into `forge` itself. There is nothing to install and no
+build step; `make` is still just Go.
+
+> The terminal needs a local pty, which Windows doesn't provide, so the browser UI
+> is macOS and Linux only for now. The rest of the Windows client is unaffected.
 
 ---
 

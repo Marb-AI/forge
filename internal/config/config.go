@@ -34,6 +34,21 @@ type Config struct {
 	// client-side convenience so `workspace <name> ssh` etc. need no host arg;
 	// the server remains the source of truth for what actually exists.
 	Workspaces map[string]string `json:"workspaces"`
+	// UIPort is the localhost port the browser UI (`forge ui`) binds to. Zero
+	// means "unset" — callers fall back to DefaultUIPort.
+	UIPort int `json:"ui_port,omitempty"`
+}
+
+// DefaultUIPort is the localhost port `forge ui` uses when none is configured.
+// Deliberately obscure so it rarely collides with a dev server.
+const DefaultUIPort = 47615
+
+// UIPortOr returns the configured UI port, or DefaultUIPort if unset.
+func (c *Config) UIPortOr() int {
+	if c.UIPort > 0 {
+		return c.UIPort
+	}
+	return DefaultUIPort
 }
 
 // Dir returns ~/.forge, creating it if necessary.
