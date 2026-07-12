@@ -72,7 +72,7 @@ eager is a workspace that has to rebuild from scratch in the morning:
 |---|---|
 | **Dangling images** | the layer sets a rebuild left behind. *Not* `prune -a`, which would also delete tagged images that no container happens to be running right now — i.e. the images of every workspace you aren't currently using. |
 | **Build cache** | usually the biggest win. |
-| **Stopped containers** | ones that exited and were never cleaned up. |
+| **Stopped containers: no** | 23 MB against 3.9 GB of cache — nothing — and removing one takes its writable layer, so a stack you stopped for the night would need `up` rather than `start` in the morning. |
 | **Volumes: never** | that is where your data lives. |
 
 Everything is filtered to `until=24h`, so nothing built today is touched, and an

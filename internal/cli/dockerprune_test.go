@@ -17,11 +17,15 @@ func TestDockerPruneIsConservative(t *testing.T) {
 	if strings.Contains(script, "volume prune") {
 		t.Fatal("volumes must never be pruned — that is where data lives")
 	}
+	// Nor containers: worth ~nothing next to the cache, and pruning one drops its
+	// writable layer, so a stack stopped overnight would need `up`, not `start`.
+	if strings.Contains(script, "container prune") {
+		t.Error("stopped containers must not be pruned")
+	}
 	// Nothing built today may be touched.
 	for _, want := range []string{
 		"docker image prune -f --filter until=24h",
 		"docker builder prune -f --filter until=24h",
-		"docker container prune -f --filter until=24h",
 		"OnCalendar=*-*-* 03:00:00",
 		"Persistent=true",
 		"systemctl enable --now forge-docker-prune.timer",

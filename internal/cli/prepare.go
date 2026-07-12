@@ -480,8 +480,13 @@ fi
 //     behind. `-a` would also delete any tagged image that no container happens to
 //     be running right now — which, with several workspaces where not all are up,
 //     means quietly deleting the images of every idle project each night.
-//   - Build cache, and stopped containers.
+//   - Build cache, which on a real host is where the growth actually is.
 //   - Never volumes. That is where data lives.
+//
+// Stopped containers are deliberately NOT pruned either. On the host I measured
+// they were 23MB against 3.9GB of build cache — nothing — and removing one takes
+// its writable layer with it, so a stack you `compose stop`-ed for the night is
+// gone in the morning and has to be `up`-ed rather than `start`-ed. Not worth it.
 //
 // Everything is filtered to 24h, so nothing you built today is touched, and an
 // image an actually-running container uses is never a candidate in the first place.
@@ -502,9 +507,10 @@ docker system df 2>/dev/null || exit 0
 docker image prune -f --filter until=24h || true
 # BuildKit cache. Usually the biggest win.
 docker builder prune -f --filter until=24h || true
-# Containers that exited and were never cleaned up.
-docker container prune -f --filter until=24h || true
-# Volumes are NOT pruned. That is where data lives.
+# Containers are NOT pruned: worth ~nothing next to the cache, and removing one
+# takes its writable layer with it, so a stack stopped for the night would have to
+# be re-created in the morning rather than just started.
+# Volumes are NOT pruned either. That is where data lives.
 
 echo "docker disk usage after:"
 docker system df 2>/dev/null || true
@@ -513,7 +519,7 @@ chmod 0755 /usr/local/bin/forge-docker-prune
 
 cat > /etc/systemd/system/forge-docker-prune.service <<'UNIT'
 [Unit]
-Description=Forge: reclaim Docker disk (dangling images, build cache, dead containers)
+Description=Forge: reclaim Docker disk (dangling images and build cache)
 After=docker.service
 Requires=docker.service
 
