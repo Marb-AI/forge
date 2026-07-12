@@ -45,3 +45,29 @@ type ErrorResult struct {
 
 // TmuxSession is the fixed session name each workspace uses for Claude.
 const TmuxSession = "claude"
+
+// SourceEnv is the prelude every workspace command runs: it sources the
+// workspace env file so the session inherits COMPOSE_PROJECT_NAME et al. even
+// though it isn't an interactive login shell. `set -a` exports what it sources.
+const SourceEnv = `set -a; [ -f "$HOME/.forge/env" ] && . "$HOME/.forge/env"; set +a; `
+
+// The remote commands that drive a workspace's Claude session. Both front ends —
+// the CLI and the browser UI — build them here rather than each spelling out its
+// own tmux invocation, so the two can't drift apart.
+const (
+	// AttachClaude attaches the session, creating it if it isn't there. This is
+	// what a terminal (or the browser) runs to get a live session.
+	AttachClaude = SourceEnv + "tmux new -A -s " + TmuxSession + " claude"
+
+	// StartClaude starts a fresh session detached — used by a hard restart, where
+	// nobody is attached yet.
+	StartClaude = SourceEnv + "tmux new -d -s " + TmuxSession + " claude"
+
+	// ResumeClaude starts a fresh session detached and tells Claude to pick up
+	// from the handoff it just wrote. This is the tail of a checkpoint.
+	ResumeClaude = SourceEnv + "tmux new -d -s " + TmuxSession + ` 'claude "continue from memory"'`
+
+	// KillClaude ends the session if it exists and succeeds either way, so only a
+	// connection failure surfaces as an error.
+	KillClaude = "tmux kill-session -t " + TmuxSession + " 2>/dev/null || true"
+)

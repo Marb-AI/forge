@@ -56,32 +56,45 @@ func runSupervisor(_ []string) int {
 // startSupervisorDetached launches this binary again as a detached background
 // process running the supervisor, with output going to ~/.forge/forge.log.
 func startSupervisorDetached(dir string) error {
+	return startDetached(dir, "forge.log", runSupervisorArg)
+}
+
+// startDetached re-execs this binary with arg as a background process that
+// outlives the launching shell, logging to dir/logName. It is the shared body
+// of `forge spawn` and `forge ui`, which both run a long-lived daemon.
+func startDetached(dir, logName, arg string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	logf, err := os.OpenFile(filepath.Join(dir, "forge.log"),
+	logf, err := os.OpenFile(filepath.Join(dir, logName),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer logf.Close()
 
-	cmd := exec.Command(self, runSupervisorArg)
+	cmd := exec.Command(self, arg)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	cmd.SysProcAttr = proc.DetachAttr() // detach from this terminal
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// Do not Wait: let it outlive us. It writes its own pidfile in Run().
+	// Do not Wait: let it outlive us. It writes its own pidfile on startup.
 	return cmd.Process.Release()
 }
 
 // supervisorPID returns the running supervisor's pid, if any. A stale pidfile
 // (process gone) is treated as not-running.
 func supervisorPID(dir string) (int, bool) {
-	data, err := os.ReadFile(supervisor.PIDPath(dir))
+	return pidFromFile(supervisor.PIDPath(dir))
+}
+
+// pidFromFile reads a pidfile and reports the pid if that process is alive. A
+// missing or stale pidfile reads as not-running.
+func pidFromFile(path string) (int, bool) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, false
 	}
