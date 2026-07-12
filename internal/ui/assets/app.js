@@ -451,11 +451,23 @@ function flashStatus(msg, ms = 2000) {
 // we ignore it rather than answer, because a session that can read your clipboard
 // on demand can read whatever you last copied — a password, a token — and Forge
 // runs Claude in these sessions with permission prompts turned off.
+//
+// Anything a session writes is untrusted — Claude runs there unattended, and a
+// runaway command's output is terminal output like any other. So the payload is
+// capped before it is decoded: a copy is a URL, a snippet, a stack trace. A
+// megabyte of base64 is not a copy, and decoding it to find that out is exactly
+// the work we do not want to be tricked into.
+const maxClipboardBytes = 1 << 20; // 1 MiB of base64, before decoding
+
 function copyFromSession(payload) {
   const semi = payload.indexOf(";");
   if (semi < 0) return;
   const data = payload.slice(semi + 1);
   if (data === "?" || data === "") return;
+  if (data.length > maxClipboardBytes) {
+    flashStatus("Refused a clipboard payload over 1 MB");
+    return;
+  }
   let text;
   try {
     text = new TextDecoder().decode(b64decodeBytes(data));
@@ -474,10 +486,13 @@ function copyFromSession(payload) {
 // you "copied" when nothing was copied would just be the same lie in a new place.
 function writeClipboard(text) {
   const fallback = () => {
+    // The copy has to steal the focus — execCommand("copy") copies the selection,
+    // so the text must really be selected in a really-rendered element. Give the
+    // focus back afterwards: the copy was triggered from inside a session you are
+    // typing in, and the keystroke after it belongs to Claude, not to the page.
+    const focused = document.activeElement;
     const ta = document.createElement("textarea");
     ta.value = text;
-    // Off-screen but focusable — execCommand("copy") copies the selection, so
-    // the text has to really be selected in a really-rendered element.
     ta.style.position = "fixed";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
@@ -485,6 +500,8 @@ function writeClipboard(text) {
     let ok = false;
     try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
     ta.remove();
+    if (focused && focused.focus) focused.focus();
+    else state.claude?.term.focus();
     flashStatus(ok ? "Copied to clipboard" : "Could not reach the clipboard — select the text and copy it yourself");
   };
   if (!navigator.clipboard || !navigator.clipboard.writeText) return fallback();
