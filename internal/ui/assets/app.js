@@ -124,10 +124,18 @@ function renderTabs() {
   const tabs = document.getElementById("tabs");
   tabs.innerHTML = "";
   for (const ws of state.workspaces) {
+    const active = ws.name === state.active;
     const tab = document.createElement("button");
-    tab.className = "tab" + (ws.name === state.active ? " active" : "") +
+    tab.className = "tab" + (active ? " active" : "") +
       (ws.status === "running" ? " running" : "");
     tab.title = ws.host + " · " + ws.status;
+
+    // Real tab semantics, since we claim role="tablist": screen readers get told
+    // which one is selected, and a roving tabindex keeps Tab from walking through
+    // every workspace — the arrow keys move between them instead.
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
 
     // Built as nodes, like every other list here — no innerHTML, so no hand-rolled
     // escaping to get wrong later.
@@ -141,6 +149,26 @@ function renderTabs() {
     tabs.appendChild(tab);
   }
 }
+
+// Arrow keys move between workspaces, Home/End jump to the ends — the keyboard
+// contract a tablist promises.
+document.getElementById("tabs").addEventListener("keydown", (e) => {
+  const names = state.workspaces.map((w) => w.name);
+  if (names.length < 2) return;
+
+  const i = names.indexOf(state.active);
+  let next = null;
+  switch (e.key) {
+    case "ArrowRight": next = names[(i + 1) % names.length]; break;
+    case "ArrowLeft": next = names[(i - 1 + names.length) % names.length]; break;
+    case "Home": next = names[0]; break;
+    case "End": next = names[names.length - 1]; break;
+    default: return;
+  }
+  e.preventDefault();
+  selectWs(next);
+  document.querySelector("#tabs .tab.active")?.focus();
+});
 
 function selectWs(name) {
   if (state.active === name && state.claude) return;

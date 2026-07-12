@@ -15,7 +15,9 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -113,6 +115,19 @@ type server struct {
 // PIDPath returns the ui daemon's pidfile location (sibling to the supervisor's).
 func PIDPath(dir string) string { return filepath.Join(dir, "ui.pid") }
 
+// TokenPath returns the session token's location. The daemon writes it; `forge ui`
+// reads it back to build the URL it opens.
+func TokenPath(dir string) string { return filepath.Join(dir, "ui.token") }
+
+// newToken mints a session token.
+func newToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // Serve runs the UI daemon: it binds to 127.0.0.1:port, claims the pidfile once
 // the bind succeeded, and blocks serving requests until the process is signalled
 // (SIGINT/SIGTERM). This is the body of the detached `forge ui` daemon.
@@ -120,10 +135,35 @@ func PIDPath(dir string) string { return filepath.Join(dir, "ui.pid") }
 // The order matters: `forge ui` waits for the pidfile to decide the daemon is
 // up, so the pidfile must mean "bound and serving", never "started and about to
 // fail on a port that's already taken".
-func Serve(dir string, port int, token string, deps Deps) error {
+func Serve(dir string, port int, deps Deps) error {
 	// Fail fast on an incomplete wiring rather than nil-checking in a dozen
 	// handlers (and panicking in the ones that forget).
 	if err := deps.validate(); err != nil {
+		return err
+	}
+
+	// Bind BEFORE anything else: loopback only, so nothing off this machine can
+	// reach the UI. If the port is taken we fail here, and `forge ui` — which
+	// waits for the pidfile — reports that instead of cheerfully opening a
+	// browser at a dead address.
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return fmt.Errorf("cannot listen on 127.0.0.1:%d: %w", port, err)
+	}
+
+	// The token is minted HERE, by the daemon that won the port — not by the
+	// command that spawned it. Two `forge ui` racing each other would otherwise
+	// each write a token, and the URL one of them printed would open a session
+	// the surviving daemon has never heard of. The winner writes the token, then
+	// the pidfile; `forge ui` waits for the pidfile, so by the time it reads the
+	// token, the token it reads is the one being served.
+	token, err := newToken()
+	if err != nil {
+		_ = ln.Close()
+		return err
+	}
+	if err := os.WriteFile(TokenPath(dir), []byte(token), 0o600); err != nil {
+		_ = ln.Close()
 		return err
 	}
 
@@ -132,15 +172,6 @@ func Serve(dir string, port int, token string, deps Deps) error {
 		terms:     newTermRegistry(),
 		ckRunning: map[string]bool{},
 		jobs:      map[string]*job{},
-	}
-
-	// Bind BEFORE claiming the pidfile: loopback only, so nothing off this
-	// machine can reach the UI. If the port is taken we fail here, and `forge ui`
-	// — which waits for the pidfile — reports that instead of cheerfully opening
-	// a browser at a dead address.
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return fmt.Errorf("cannot listen on 127.0.0.1:%d: %w", port, err)
 	}
 
 	if err := os.WriteFile(PIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
@@ -240,11 +271,9 @@ func (s *server) guard(next http.Handler) http.Handler {
 			http.Error(w, "forbidden — open the URL that `forge ui` printed", http.StatusForbidden)
 			return
 		}
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			if o := r.Header.Get("Origin"); o != "" && !originOK(o) {
-				http.Error(w, "bad origin", http.StatusForbidden)
-				return
-			}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
+			http.Error(w, "bad origin", http.StatusForbidden)
+			return
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -301,14 +330,34 @@ func loopbackHost(hostport string) bool {
 	return false
 }
 
-// originOK reports whether an Origin header points back at loopback — used to
-// reject cross-site state-changing requests.
-func originOK(origin string) bool {
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
+// sameOrigin reports whether a state-changing request came from this very UI —
+// the exact scheme, host AND port we are serving on.
+//
+// "It's loopback" is not enough, and that was a real hole. SameSite is defined
+// over *sites*, and a site ignores the port: to the browser, a page on
+// http://127.0.0.1:9999 is the same site as this UI, so it gets our
+// Strict-SameSite cookie attached automatically. CORS doesn't save us either —
+// a POST with Content-Type: text/plain is a "simple" request and is sent without
+// a preflight, which is exactly the shape of our own /input endpoint. So any web
+// app you happen to be running on any other localhost port could type into your
+// Claude session, or stop it, just by asking.
+//
+// Requiring the Origin to match our own origin exactly closes that: a page on
+// another port cannot forge one, because the browser sets it.
+//
+// An absent Origin is allowed: browsers attach Origin to every cross-origin
+// request and to same-origin writes, so no Origin means no browser-driven
+// cross-site request. A local tool holding your own token is you.
+func sameOrigin(r *http.Request) bool {
+	o := r.Header.Get("Origin")
+	if o == "" {
+		return true
 	}
-	return loopbackHost(u.Host)
+	u, err := url.Parse(o)
+	if err != nil || u.Host == "" || u.Scheme != "http" {
+		return false // malformed, another scheme, or the literal "null"
+	}
+	return u.Host == r.Host
 }
 
 func tokenEqual(a, b string) bool {

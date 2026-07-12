@@ -2,6 +2,8 @@ package ui
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -92,13 +94,41 @@ func TestLoopbackHost(t *testing.T) {
 	}
 }
 
-func TestOriginOK(t *testing.T) {
-	if !originOK("http://127.0.0.1:47615") {
-		t.Error("same-origin request should be allowed")
+func TestSameOrigin(t *testing.T) {
+	req := func(origin string) *http.Request {
+		r := httptest.NewRequest("POST", "http://127.0.0.1:47615/api/ws/x/stop", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		return r
 	}
-	for _, o := range []string{"http://evil.com", "https://evil.com:47615", "null", ""} {
-		if originOK(o) {
-			t.Errorf("originOK(%q) = true, want false", o)
+
+	if !sameOrigin(req("http://127.0.0.1:47615")) {
+		t.Error("our own origin must be allowed")
+	}
+	if !sameOrigin(req("")) {
+		t.Error("no Origin means no browser-driven cross-site request; it must be allowed")
+	}
+
+	// The hole this test exists for. A page on ANOTHER localhost port is the same
+	// *site* as far as SameSite is concerned, so it gets our cookie; and a POST
+	// with Content-Type: text/plain is CORS-"simple", so it is sent with no
+	// preflight to stop it. Only an exact origin match keeps it out.
+	crossPort := []string{
+		"http://127.0.0.1:9999",
+		"http://127.0.0.1:3000",
+		"http://localhost:47615", // same name, but not the host we are serving on
+		"http://localhost:5173",
+	}
+	for _, o := range crossPort {
+		if sameOrigin(req(o)) {
+			t.Errorf("sameOrigin(%q) = true — another local origin could drive the UI", o)
+		}
+	}
+
+	for _, o := range []string{"http://evil.com", "https://127.0.0.1:47615", "null", "not a url"} {
+		if sameOrigin(req(o)) {
+			t.Errorf("sameOrigin(%q) = true, want false", o)
 		}
 	}
 }

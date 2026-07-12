@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -48,8 +46,6 @@ func uiCmd(args []string) int {
 	}
 }
 
-func tokenPath(dir string) string { return filepath.Join(dir, "ui.token") }
-
 func uiStart() int {
 	dir, err := config.Dir()
 	if err != nil {
@@ -67,25 +63,21 @@ func uiStart() int {
 		return 0
 	}
 
-	token, err := newToken()
-	if err != nil {
-		return fail("%v", err)
-	}
-	if err := writeToken(dir, token); err != nil {
-		return fail("%v", err)
-	}
 	if err := startDetached(dir, "ui.log", runUIArg); err != nil {
 		return fail("%v", err)
 	}
-	// The daemon writes its pidfile only once it has actually bound the port, so
-	// waiting for it turns "port already in use" into a real error instead of a
-	// browser opening on a dead address.
+	// The daemon writes its pidfile only once it has bound the port, so waiting
+	// for it turns "port already in use" into a real error instead of a browser
+	// opening on a dead address.
 	if !waitForUI(dir, 3*time.Second) {
 		return fail("the UI daemon didn't come up (port %d may be in use)\n  see %s",
 			port, filepath.Join(dir, "ui.log"))
 	}
 
-	url := uiURL(port, token)
+	// Read the token back rather than trusting one we made up: the daemon mints
+	// it after winning the port and writes it before the pidfile, so this is the
+	// token actually being served — even if another `forge ui` raced us.
+	url := uiURL(port, readToken(dir))
 	fmt.Printf("forge ui started\n  %s\n", url)
 	openBrowser(url)
 	return 0
@@ -202,11 +194,6 @@ func runUI(_ []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	token := readToken(dir)
-	if token == "" {
-		return fail("no ui token found — start with: forge ui")
-	}
-
 	deps := ui.Deps{
 		ListWorkspaces: listWorkspacesInfo,
 		HostFor: func(name string) *config.Host {
@@ -247,7 +234,7 @@ func runUI(_ []string) int {
 		RemoveHost:      removeHost,
 		SetUIPort:       setUIPort,
 	}
-	if err := ui.Serve(dir, cfg.UIPortOr(), token, deps); err != nil {
+	if err := ui.Serve(dir, cfg.UIPortOr(), deps); err != nil {
 		return fail("%v", err)
 	}
 	return 0
@@ -290,20 +277,9 @@ func uiURL(port int, token string) string {
 	return fmt.Sprintf("http://127.0.0.1:%d/?t=%s", port, token)
 }
 
-func newToken() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-func writeToken(dir, token string) error {
-	return os.WriteFile(tokenPath(dir), []byte(token), 0o600)
-}
-
+// readToken reads the token the running daemon minted for itself.
 func readToken(dir string) string {
-	data, err := os.ReadFile(tokenPath(dir))
+	data, err := os.ReadFile(ui.TokenPath(dir))
 	if err != nil {
 		return ""
 	}
