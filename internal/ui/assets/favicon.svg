@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- An anvil: the one thing "forge" can own, and a shape that still reads as
+       itself at 16px, where anything with detail turns to mush. The horn on the
+       left is what stops it from being a generic I-beam.
+
+       The colour follows the browser's own chrome, so the mark is dark on a light
+       tab strip and light on a dark one — a single flat fill would go invisible on
+       one of them. -->
+  <style>
+    path { fill: #16181d; }
+    @media (prefers-color-scheme: dark) { path { fill: #e8e8e8; } }
+  </style>
+  <path d="M1 10 L6 6 L30 6 L30 12 L20 12 L20 20 L27 20 L27 26 L5 26 L5 20 L12 20 L12 12 L6 12 Z"/>
+</svg>
