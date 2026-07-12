@@ -14,9 +14,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
@@ -139,10 +142,125 @@ func opDelete(args []string) int {
 	}
 	// Kill any running session first (ignore failure — may not exist).
 	_, _ = run("runuser", "-l", *name, "-c", "tmux kill-server")
+	// Then make sure *nothing* of the user is left running, or userdel refuses
+	// ("user X is currently used by process N", exit 8) and the delete fails.
+	if err := reapUser(*name); err != nil {
+		return emitError("%v", err)
+	}
 	if out, err := run("userdel", "-r", *name); err != nil {
 		return emitError("userdel: %v: %s", err, out)
 	}
 	return emit(agentproto.OK{OK: true})
+}
+
+// procRoot is the procfs mount; a variable so tests can point it at a fixture.
+var procRoot = "/proc"
+
+// reapKill is how long we give the user's processes to exit after a signal —
+// once after SIGTERM (so a shell or Claude can wind down), once after SIGKILL.
+const (
+	reapGrace = 5 * time.Second
+	reapPoll  = 100 * time.Millisecond
+)
+
+// reapUser ends every process owned by the workspace user, and returns only once
+// none are left. `userdel` refuses to remove a user that still owns a process, so
+// delete must clear them out first — and killing the tmux server alone does not:
+// the sshd sessions behind the browser's terminals and file pane die on their own
+// schedule, milliseconds after we drop the connection, which is exactly the window
+// userdel looks in. Waiting for the process table, rather than for a timer, is
+// what makes the delete deterministic instead of a coin flip.
+//
+// SIGTERM first, SIGKILL for whatever ignores it. An unknown user is not an error
+// — there is nothing to reap, and userdel will say so better than we can.
+func reapUser(name string) error {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return nil
+	}
+	for _, sig := range []os.Signal{syscall.SIGTERM, syscall.SIGKILL} {
+		pids, err := userPIDs(procRoot, u.Uid)
+		if err != nil {
+			return fmt.Errorf("scan processes of %s: %v", name, err)
+		}
+		if len(pids) == 0 {
+			return nil
+		}
+		for _, pid := range pids {
+			p, err := os.FindProcess(pid)
+			if err != nil {
+				continue
+			}
+			// A process that exited between the scan and here is the outcome we
+			// wanted anyway, so a failed signal is not worth reporting.
+			_ = p.Signal(sig)
+		}
+		if waitReaped(u.Uid, reapGrace) {
+			return nil
+		}
+	}
+	pids, _ := userPIDs(procRoot, u.Uid)
+	return fmt.Errorf("processes of %s would not die: %v", name, pids)
+}
+
+// waitReaped polls until the user owns no processes, or the deadline passes.
+func waitReaped(uid string, within time.Duration) bool {
+	for waited := time.Duration(0); ; waited += reapPoll {
+		pids, err := userPIDs(procRoot, uid)
+		if err == nil && len(pids) == 0 {
+			return true
+		}
+		if waited >= within {
+			return false
+		}
+		time.Sleep(reapPoll)
+	}
+}
+
+// userPIDs lists the processes whose real UID is uid, by reading procfs — no
+// pgrep, so the agent depends on nothing the server might not have installed.
+// Our own PID is skipped: the agent runs as root, so it should never match, but
+// signalling ourselves mid-delete is not a mistake worth leaving possible.
+func userPIDs(root, uid string) ([]int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	self := os.Getpid()
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == self {
+			continue // not a process directory (or it is us)
+		}
+		owner, err := procUID(filepath.Join(root, e.Name(), "status"))
+		if err != nil {
+			continue // it exited while we looked: nothing to kill
+		}
+		if owner == uid {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+// procUID reads the real UID from a /proc/<pid>/status file, whose Uid line is
+// "Uid:\treal\teffective\tsaved\tfs".
+func procUID(statusPath string) (string, error) {
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "Uid:")
+		if !ok {
+			continue
+		}
+		if f := strings.Fields(rest); len(f) > 0 {
+			return f[0], nil
+		}
+	}
+	return "", fmt.Errorf("no Uid line in %s", statusPath)
 }
 
 func opList() int {

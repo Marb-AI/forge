@@ -2,8 +2,12 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -304,4 +308,82 @@ func TestSeedGhAuth(t *testing.T) {
 			t.Error("expected no hosts.yml to be written")
 		}
 	})
+}
+
+// fakeProc builds a procfs fixture: pid -> real UID, plus the noise a real /proc
+// carries (named directories, and a pid whose status has no Uid line).
+func fakeProc(t *testing.T, owners map[int]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for pid, uid := range owners {
+		dir := filepath.Join(root, strconv.Itoa(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		status := fmt.Sprintf("Name:\tsshd\nUid:\t%[1]s\t%[1]s\t%[1]s\t%[1]s\nGid:\t%[1]s\n", uid)
+		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, junk := range []string{"self", "cpuinfo"} {
+		if err := os.WriteFile(filepath.Join(root, junk), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func TestUserPIDsFindsOnlyTheUsersProcesses(t *testing.T) {
+	root := fakeProc(t, map[int]string{1: "0", 4242: "1001", 4243: "1001", 9000: "1002"})
+
+	pids, err := userPIDs(root, "1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Ints(pids)
+	if !slices.Equal(pids, []int{4242, 4243}) {
+		t.Errorf("pids = %v, want [4242 4243]", pids)
+	}
+
+	none, err := userPIDs(root, "1003")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Errorf("pids for an unused uid = %v, want none", none)
+	}
+}
+
+// The agent must never signal itself out of existence mid-delete, even if it were
+// somehow running as the workspace user.
+func TestUserPIDsSkipsSelf(t *testing.T) {
+	self := os.Getpid()
+	root := fakeProc(t, map[int]string{self: "1001", 4242: "1001"})
+
+	pids, err := userPIDs(root, "1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(pids, []int{4242}) {
+		t.Errorf("pids = %v, want [4242] (self excluded)", pids)
+	}
+}
+
+func TestProcUIDReadsTheRealUID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "status")
+	// Real uid 1001, but effective 0 — we want the first field, not any other.
+	if err := os.WriteFile(path, []byte("Name:\tbash\nUid:\t1001\t0\t0\t0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	uid, err := procUID(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid != "1001" {
+		t.Errorf("uid = %q, want 1001", uid)
+	}
+	if _, err := procUID(filepath.Join(dir, "gone", "status")); err == nil {
+		t.Error("a vanished process should be an error, not a silent match")
+	}
 }
