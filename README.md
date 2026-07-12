@@ -339,4 +339,6 @@ restarts, backups, CI/CD, or build pipelines. Those belong to each project.
 MIT — see [LICENSE](LICENSE).
 
 <sub>Hacking on Forge itself? `make build` (dev) or `make release` (all
-platforms) — Go standard library only, no dependencies.</sub>
+platforms). One dependency — `creack/pty`, which the browser UI's terminal needs;
+everything else is the Go standard library. The UI's vendored JS/CSS is checked
+in and embedded, so there is no node step.</sub>
