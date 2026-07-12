@@ -59,3 +59,38 @@ func TestTargetsFromHost(t *testing.T) {
 		t.Errorf("WorkspaceTarget = %+v", w)
 	}
 }
+
+// Without ConnectTimeout, ssh waits out the operating system's TCP timeout —
+// measured at over 45 seconds against an unreachable address — and every command
+// that touches that host waits with it, the browser UI's workspace list included.
+// ServerAlive* does not cover this: it only notices a peer that dies *after* the
+// connection is established. A host that never answers at all is this option's job.
+func TestEveryConnectionBoundsHowLongItWaitsForTheServer(t *testing.T) {
+	joined := strings.Join(commonOpts(22), " ")
+	if !strings.Contains(joined, "ConnectTimeout=") {
+		t.Fatal("no ConnectTimeout: an unreachable host would hang every command that touches it")
+	}
+	if connectTimeout <= 0 || connectTimeout > 30 {
+		t.Errorf("ConnectTimeout=%d is not a bound anyone would wait out", connectTimeout)
+	}
+}
+
+// This file has always said Forge is key-only and never prompts for a password.
+// It wasn't: BatchMode=no is the default and does nothing to stop password auth —
+// `ssh -G` reported passwordauthentication yes the entire time the comment claimed
+// otherwise. A bad key would drop into a prompt, which in the UI daemon is a prompt
+// nobody is there to answer.
+func TestKeyOnlyIsEnforcedAndNotMerelyClaimed(t *testing.T) {
+	joined := strings.Join(commonOpts(22), " ")
+
+	for _, off := range []string{"PasswordAuthentication=no", "KbdInteractiveAuthentication=no"} {
+		if !strings.Contains(joined, off) {
+			t.Errorf("key-only is claimed but not enforced: missing %s", off)
+		}
+	}
+	// …while a *local* key passphrase must still be askable. That is a different
+	// thing from the server asking for a password, and BatchMode=yes would break it.
+	if !strings.Contains(joined, "BatchMode=no") {
+		t.Error("BatchMode must stay no, or a passphrase-protected key can't be used")
+	}
+}

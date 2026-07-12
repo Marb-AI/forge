@@ -12,14 +12,38 @@ import (
 	"github.com/Marb-AI/forge/internal/config"
 )
 
+// connectTimeout bounds how long we wait for a server to answer at all.
+//
+// Without it, ssh hangs on the operating system's TCP timeout — measured at over
+// 45 seconds against an unreachable address — and every command that touches that
+// host hangs with it, including the browser UI's workspace list. Generous enough
+// for a slow link, short enough that a dead host is reported rather than waited on.
+const connectTimeout = 10
+
 // commonOpts are applied to every connection: fail fast on a dead server rather
 // than hanging on a long TCP timeout, and never prompt interactively for a
 // password (Forge is key-only).
+//
+// ConnectTimeout is what makes the first half of that true. ServerAlive* only
+// notices a peer that dies *after* the connection is up; a host that never answers
+// at all is the connect timeout's problem, and for a long time nothing set one.
 func commonOpts(port int) []string {
 	opts := []string{
+		"-o", "ConnectTimeout=" + strconv.Itoa(connectTimeout),
 		"-o", "ServerAliveInterval=5",
 		"-o", "ServerAliveCountMax=3",
-		"-o", "BatchMode=no", // allow key passphrase prompts, but not password auth
+		// Key-only, and now actually enforced. BatchMode=no is the default and does
+		// nothing to stop password auth: `ssh -G` reported passwordauthentication yes
+		// the whole time this file claimed otherwise. Turning both methods off makes a
+		// bad key fail immediately and honestly ("Permission denied (publickey)")
+		// rather than dropping into a prompt — which, in the UI daemon, is a prompt
+		// nobody is there to answer.
+		//
+		// BatchMode stays "no" so that a *local* key passphrase can still be asked for.
+		// That is a different thing from the server asking for a password.
+		"-o", "PasswordAuthentication=no",
+		"-o", "KbdInteractiveAuthentication=no",
+		"-o", "BatchMode=no",
 		// TOFU: record a new server's host key on first connect instead of
 		// refusing non-interactively (you own the servers Forge connects to).
 		// A *changed* key still fails loudly — that's a real warning.

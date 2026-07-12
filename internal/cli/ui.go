@@ -240,32 +240,17 @@ func runUI(_ []string) int {
 	return 0
 }
 
-// listWorkspacesInfo gathers workspaces across all reachable hosts for the UI.
-// Unlike the CLI's `workspace list`, it silently skips unreachable hosts rather
-// than printing an "(unreachable)" row — the UI refetches on its own.
+// listWorkspacesInfo adapts the shared listing for the browser UI. Same source of
+// truth as `forge workspace list`: our config says which workspaces are ours, the
+// host says whether Claude is running in them.
 func listWorkspacesInfo() ([]ui.WorkspaceInfo, error) {
-	cfg, err := config.Load()
+	list, err := listWorkspaces()
 	if err != nil {
 		return nil, err
 	}
-	aliases := make([]string, 0, len(cfg.Hosts))
-	for a := range cfg.Hosts {
-		aliases = append(aliases, a)
-	}
-	sort.Strings(aliases)
-
-	out := []ui.WorkspaceInfo{}
-	for _, alias := range aliases {
-		var res agentproto.ListResult
-		if err := callAgent(cfg.Hosts[alias], &res, "workspace-list"); err != nil {
-			continue
-		}
-		sort.Slice(res.Workspaces, func(i, j int) bool {
-			return res.Workspaces[i].Name < res.Workspaces[j].Name
-		})
-		for _, ws := range res.Workspaces {
-			out = append(out, ui.WorkspaceInfo{Name: ws.Name, Host: alias, Status: ws.Status})
-		}
+	out := make([]ui.WorkspaceInfo, 0, len(list))
+	for _, ws := range list {
+		out = append(out, ui.WorkspaceInfo{Name: ws.Name, Host: ws.Host, Status: ws.Status})
 	}
 	return out, nil
 }

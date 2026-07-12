@@ -111,36 +111,108 @@ func deleteWorkspace(name string) error {
 	return cfg.Save()
 }
 
-func workspaceList() int {
+// WorkspaceStatus is one workspace of ours, and the state of the Claude session in
+// it. The status is the session's — a workspace is a Linux user and a home
+// directory, and cannot itself be "stopped".
+type WorkspaceStatus struct {
+	Name   string
+	Host   string
+	Status string
+}
+
+// listWorkspaces returns the workspaces THIS CLIENT created, with the state of the
+// Claude session in each.
+//
+// The list comes from our config, not from the host. The host's own list is every
+// directory under /home/workspaces — including ones Forge never made, belonging to
+// someone else or created by hand. Those are not ours: every command here refuses
+// to touch a workspace that isn't in the config ("not created by this client"), so
+// listing them only offers what we will then decline to do.
+//
+// The host is still asked, but only for what the config cannot know: whether a
+// Claude session is running. That answer costs an SSH round trip, which is why the
+// name and host — the parts we already have — are never made to wait for it.
+func listWorkspaces() ([]WorkspaceStatus, error) {
 	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+
+	// Ask only the hosts we actually have workspaces on, and each of them once. A
+	// host we have nothing on has nothing to tell us, and every one of these is an
+	// SSH round trip.
+	needed := map[string]bool{}
+	for _, alias := range cfg.Workspaces {
+		needed[alias] = true
+	}
+
+	sessions := map[string]map[string]string{} // host alias -> workspace -> session status
+	for alias := range needed {
+		host := cfg.Hosts[alias]
+		if host == nil {
+			continue // config names a host it no longer has; treated as unreachable
+		}
+		var res agentproto.ListResult
+		if err := callAgent(host, &res, "workspace-list"); err != nil {
+			continue // unreachable; its workspaces are reported as such below
+		}
+		byName := map[string]string{}
+		for _, ws := range res.Workspaces {
+			byName[ws.Name] = ws.Status
+		}
+		sessions[alias] = byName
+	}
+
+	return mergeWorkspaceStatus(cfg.Workspaces, sessions), nil
+}
+
+// mergeWorkspaceStatus is the decision, separated from the SSH so it can be tested:
+// given the workspaces our config claims (name -> host alias) and what each host
+// reported (alias -> name -> session status), what do we show?
+//
+// Only ours. A workspace the host has but our config doesn't is somebody else's, or
+// was made by hand — and every command refuses to touch it anyway.
+func mergeWorkspaceStatus(mine map[string]string, sessions map[string]map[string]string) []WorkspaceStatus {
+	names := make([]string, 0, len(mine))
+	for name := range mine {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]WorkspaceStatus, 0, len(names))
+	for _, name := range names {
+		alias := mine[name]
+		status := agentproto.StatusUnreachable
+		if byName, answered := sessions[alias]; answered {
+			// The host answered and doesn't have it: it is gone — deleted from another
+			// machine, most likely. Reporting "stopped" would be a lie you could act
+			// on (there is nothing left to start).
+			status = agentproto.StatusMissing
+			if s, ok := byName[name]; ok {
+				status = s
+			}
+		}
+		out = append(out, WorkspaceStatus{Name: name, Host: alias, Status: status})
+	}
+	return out
+}
+
+func workspaceList() int {
+	list, err := listWorkspaces()
 	if err != nil {
 		return fail("%v", err)
 	}
-	if len(cfg.Hosts) == 0 {
-		fmt.Println("no hosts registered")
+	if len(list) == 0 {
+		fmt.Println("no workspaces (create one: forge workspace create <name> <host>)")
 		return 0
 	}
 
-	aliases := make([]string, 0, len(cfg.Hosts))
-	for a := range cfg.Hosts {
-		aliases = append(aliases, a)
-	}
-	sort.Strings(aliases)
-
+	// CLAUDE, not STATUS: what is reported is the state of the Claude session, not
+	// of the workspace, which exists until you delete it.
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tHOST\tSTATUS")
-	for _, alias := range aliases {
-		var res agentproto.ListResult
-		if err := callAgent(cfg.Hosts[alias], &res, "workspace-list"); err != nil {
-			fmt.Fprintf(w, "-\t%s\t(unreachable)\n", alias)
-			continue
-		}
-		sort.Slice(res.Workspaces, func(i, j int) bool {
-			return res.Workspaces[i].Name < res.Workspaces[j].Name
-		})
-		for _, ws := range res.Workspaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", ws.Name, alias, ws.Status)
-		}
+	fmt.Fprintln(w, "NAME\tHOST\tCLAUDE")
+	for _, ws := range list {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", ws.Name, ws.Host, ws.Status)
 	}
 	return flush(w)
 }

@@ -13,6 +13,7 @@
 
 const state = {
   workspaces: [],
+  hosts: [],       // registered servers, cached so Settings paints instantly
   active: null,   // workspace name
   claude: null,   // the Claude terminal session (main stage)
   ssh: null,      // the ssh shell session (overlay panel) — survives hiding
@@ -63,13 +64,19 @@ function b64decodeBytes(b64) {
 
 // ---- workspaces / tabs -----------------------------------------------------
 async function loadWorkspaces() {
-  try {
-    const res = await fetch("/api/workspaces");
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    state.workspaces = await res.json();
-  } catch (e) {
-    state.workspaces = [];
-  }
+  // Both, in parallel. /api/hosts is a local file and answers in about 5ms;
+  // /api/workspaces goes over SSH to ask which Claude sessions are up and takes
+  // half a second. Fetching the cheap one here keeps state.hosts warm, so Settings
+  // can paint the truth immediately instead of painting "No servers registered."
+  // and correcting itself half a second later — which is exactly the few-pixel
+  // reflow this used to cause.
+  const [ws, hosts] = await Promise.all([
+    fetch("/api/workspaces").then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    fetch("/api/hosts").then((r) => (r.ok ? r.json() : [])).catch(() => []),
+  ]);
+  state.workspaces = ws;
+  state.hosts = hosts;
+
   renderTabs();
 
   // With nothing to show, the terminal would be a black void — offer the one
@@ -95,18 +102,54 @@ async function loadWorkspaces() {
 function renderStage() {
   const none = !state.workspaces.length;
   document.getElementById("empty").hidden = !none;
-  document.getElementById("stopped").hidden = none || !state.stopped;
-  if (!none && state.stopped) {
-    document.getElementById("stopped-ws").textContent = state.active || "";
-  }
+
+  const card = document.getElementById("stopped");
+  card.hidden = none || !state.stopped;
+  if (!none && state.stopped) paintStoppedCard();
+
   renderPowerButton();
 
-  // With no workspace selected, every one of these acts on nothing. Leaving them
-  // lit is a button that lies about being clickable.
+  // Nothing to act on without a workspace the host has actually confirmed —
+  // checkpoint/restart/ssh against a missing or unreachable one can only fail.
+  const ws = state.workspaces.find((w) => w.name === state.active);
+  const usable = !!ws && isUsable(ws.status);
   for (const b of document.querySelectorAll('.rail-btn[data-action]')) {
     if (b.dataset.action === "settings") continue; // settings always works
-    b.disabled = !state.active;
+    b.disabled = !usable;
   }
+}
+
+// The card that stands in for the terminal. It has to say which of three different
+// things is actually true — offering "Start Claude" for a workspace the host no
+// longer has would only ssh into a user that doesn't exist.
+function paintStoppedCard() {
+  const ws = state.workspaces.find((w) => w.name === state.active);
+  const status = ws ? ws.status : "stopped";
+  const title = document.getElementById("stopped-title");
+  const text = document.getElementById("stopped-text");
+  const start = document.getElementById("stopped-start");
+
+  if (status === "missing") {
+    title.textContent = "Not on the server";
+    text.textContent = `"${state.active}" is in your local config, but "${ws.host}" doesn't have it — ` +
+      `it was most likely deleted from another machine. Remove it in Settings.`;
+    start.hidden = true;
+    return;
+  }
+  if (!isUsable(status)) {
+    // Name the server, not just the workspace: knowing it's unreachable is no use
+    // if you have to go and look up which machine to check.
+    const host = ws ? ws.host : "it";
+    title.textContent = "Server unreachable";
+    text.textContent = `Can't reach "${host}", the server "${state.active}" lives on, ` +
+      `so there is no telling whether Claude is running. Nothing has been changed.`;
+    start.hidden = true;
+    return;
+  }
+  title.textContent = "Session stopped";
+  text.textContent = `Claude isn't running in "${state.active}". Its files are untouched — ` +
+    `starting it again gives you a fresh session.`;
+  start.hidden = false;
 }
 
 // The one rail button is stop or start, depending on what the session is doing —
@@ -120,6 +163,24 @@ function renderPowerButton() {
   b.title = stopped ? "Start the Claude session" : "Stop the Claude session";
 }
 
+// The status the agent reports is `tmux has-session -t claude` — it is the state
+// of the CLAUDE SESSION, not of the workspace. A workspace can't be "stopped":
+// it's a Linux user and a home directory, and it exists until you delete it.
+// Saying "stopped" next to its name reads as though the whole thing is down.
+function sessionLabel(status) {
+  switch (status) {
+    case "running": return "Claude running";
+    case "stopped": return "Claude stopped";
+    // Ours, per the config — but the host doesn't have it. Deleted from another
+    // machine, most likely. Calling that "stopped" would be a lie you could act on.
+    case "missing": return "not on the server";
+    default: return "server unreachable";
+  }
+}
+
+// Only a workspace the host confirmed can be started, attached to or browsed.
+function isUsable(status) { return status === "running" || status === "stopped"; }
+
 function renderTabs() {
   const tabs = document.getElementById("tabs");
   tabs.innerHTML = "";
@@ -128,7 +189,7 @@ function renderTabs() {
     const tab = document.createElement("button");
     tab.className = "tab" + (active ? " active" : "") +
       (ws.status === "running" ? " running" : "");
-    tab.title = ws.host + " · " + ws.status;
+    tab.title = `${ws.host} · ${sessionLabel(ws.status)}`;
 
     // Real tab semantics, since we claim role="tablist": screen readers get told
     // which one is selected, and a roving tabindex keeps Tab from walking through
@@ -184,11 +245,15 @@ function selectWs(name) {
   // so opening it on a stopped workspace would quietly resurrect the session you
   // just stopped. Show the Start card instead and let the choice be yours.
   const ws = state.workspaces.find((w) => w.name === name);
-  state.stopped = !!ws && ws.status !== "running";
+  state.stopped = !ws || ws.status !== "running";
   teardownTerminal();
   if (!state.stopped) openTerminal(name);
   renderStage();
-  loadTree(name);
+
+  // No point walking a tree on a host we can't reach, or in a home that is gone.
+  if (ws && isUsable(ws.status)) loadTree(name);
+  else document.getElementById("filetree").innerHTML =
+    '<div class="muted">No files to show.</div>';
 }
 
 function hideSSHPanel() {
@@ -418,23 +483,39 @@ function setSettingsError(msg) {
   el.textContent = msg;
 }
 
+// Paint from what the app already knows, then refresh in the background.
+//
+// /api/workspaces goes over SSH to ask the server which Claude sessions are up —
+// half a second, sometimes more — while /api/hosts is a local file and answers in
+// four milliseconds. Awaiting both meant the panel opened with the servers listed
+// and the workspaces section conspicuously blank, filling in later. We already
+// have the workspaces in hand, so there is no reason to make anyone watch that.
 async function renderAdminLists() {
+  paintAdminLists(state.workspaces, state.hosts);
+
+  let workspaces = state.workspaces;
+  let hosts = state.hosts;
+  try {
+    const [a, b] = await Promise.all([fetch("/api/workspaces"), fetch("/api/hosts")]);
+    if (a.ok) workspaces = await a.json();
+    if (b.ok) hosts = await b.json();
+  } catch (e) { return; } // keep what we painted; it is the last thing we knew
+
+  state.workspaces = workspaces;
+  state.hosts = hosts;
+  // Only repaint if the panel is still open — the fetch may outlive it.
+  if (!document.getElementById("settings").hidden) paintAdminLists(workspaces, hosts);
+}
+
+function paintAdminLists(workspaces, hosts) {
   const wsBox = document.getElementById("set-workspaces");
   const hostBox = document.getElementById("set-hosts");
   wsBox.textContent = "";
   hostBox.textContent = "";
 
-  let workspaces = [];
-  let hosts = [];
-  try {
-    const [a, b] = await Promise.all([fetch("/api/workspaces"), fetch("/api/hosts")]);
-    if (a.ok) workspaces = await a.json();
-    if (b.ok) hosts = await b.json();
-  } catch (e) { /* rendered as empty below */ }
-
   if (!workspaces.length) wsBox.appendChild(mutedRow("No workspaces."));
   for (const w of workspaces) {
-    wsBox.appendChild(adminRow(w.name, `${w.host} · ${w.status}`, "Delete", true,
+    wsBox.appendChild(adminRow(w.name, `${w.host} · ${sessionLabel(w.status)}`, "Delete", true,
       () => confirmDeleteWorkspace(w.name)));
   }
   if (!hosts.length) hostBox.appendChild(mutedRow("No servers registered."));
@@ -902,6 +983,7 @@ async function refreshHostOptions(select) {
     const res = await fetch("/api/hosts");
     if (res.ok) hosts = await res.json();
   } catch (e) { /* treated as none */ }
+  state.hosts = hosts;
 
   for (const h of hosts) {
     const opt = document.createElement("option");
