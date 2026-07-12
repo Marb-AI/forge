@@ -60,11 +60,10 @@
           </div>
           <div id="stopped" hidden>
             <div class="empty-card">
-              <div class="empty-title">Session stopped</div>
-              <p class="empty-text">
-                Claude isn't running in <b><span id="stopped-ws"></span></b>. Its files are
-                untouched — starting it again gives you a fresh session.
-              </p>
+              <!-- Filled in by paintStoppedCard: this card stands in for the terminal,
+                   and has to say which of three different things is actually true. -->
+              <div class="empty-title" id="stopped-title"></div>
+              <p class="empty-text" id="stopped-text"></p>
               <button id="stopped-start" class="primary big">▶  Start Claude</button>
             </div>
           </div>

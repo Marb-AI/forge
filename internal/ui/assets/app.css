@@ -31,7 +31,12 @@
 html, body { height: 100%; margin: 0; }
 
 /* Theme every scrollbar (terminal scrollback, file tree, ssh panel) so the
-   native white one never shows through on the dark UI. */
+   native white one never shows through on the dark UI.
+
+   Styling ::-webkit-scrollbar has a cost worth knowing about: it turns macOS's
+   overlay scrollbars into classic ones that occupy layout. Anything that grows
+   asynchronously would then jog sideways the moment its scrollbar appeared, so the
+   panes that fill from the network reserve the gutter up front (below). */
 * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -131,7 +136,7 @@ button:hover { background: var(--bg-3); }
    Deeper down they're real project files (.env, .github) and always show — so
    only root nodes ever get the .dotfile class. */
 #filetree:not(.show-hidden) .tnode.dotfile { display: none; }
-#filetree { flex: 1; overflow: auto; padding: 8px 10px; }
+#filetree { flex: 1; overflow: auto; padding: 8px 10px; scrollbar-gutter: stable; }
 
 #main {
   flex: 1;
@@ -336,12 +341,18 @@ button.big { padding: 10px 20px; font-size: 13px; }
   position: fixed;
   inset: 0;
   z-index: 100;
+  /* #confirm raises itself below — it opens *over* these, and equal z-index would
+     leave DOM order to decide (it lost). */
   display: flex;
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.55);
 }
 #wizard[hidden], #settings[hidden], #confirm[hidden] { display: none; }
+/* The confirm dialog is asked for BY the other modals ("Delete" in Settings), so
+   it must sit above them. Esc already treats it as the topmost layer; this makes
+   the paint order agree. */
+#confirm { z-index: 200; }
 
 .modal {
   width: 420px;
@@ -363,7 +374,14 @@ button.big { padding: 10px 20px; font-size: 13px; }
 }
 .modal-head button { width: 22px; height: 22px; font-size: 12px; }
 .modal { max-height: calc(100vh - 64px); }
-.modal-body { padding: 14px 12px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.modal-body {
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  scrollbar-gutter: stable; /* the lists fill from the network; don't jog when they do */
+}
 .modal-body .row { display: flex; gap: 6px; align-items: stretch; }
 .modal-body .row select { flex: 1; }
 .modal-body .row button {
