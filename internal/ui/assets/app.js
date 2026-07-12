@@ -930,7 +930,7 @@ function setWizBusy(busy, label) {
   wiz.create().disabled = busy;
   wiz.create().textContent = busy ? (label || "Working…") : "Create";
   for (const id of ["wiz-name", "wiz-host", "wiz-addhost", "wiz-target", "wiz-alias",
-                    "wiz-firewall", "wiz-harden", "wiz-cancel"]) {
+                    "wiz-firewall", "wiz-harden", "wiz-prune", "wiz-cancel"]) {
     document.getElementById(id).disabled = busy;
   }
 }
@@ -957,7 +957,8 @@ async function submitWizard() {
       setWizBusy(true, "Preparing server…");
       await prepareHost(target, alias,
         document.getElementById("wiz-firewall").checked,
-        document.getElementById("wiz-harden").checked);
+        document.getElementById("wiz-harden").checked,
+        document.getElementById("wiz-prune").checked);
       host = alias;
       // The server is registered now. Fold it into the dropdown and select it,
       // so if the workspace step fails, hitting Create again retries just that —
@@ -989,7 +990,7 @@ async function submitWizard() {
 
 // prepareHost runs `host prepare` server-side and streams its output into the
 // wizard's log, resolving when it finishes. Same run you'd watch in a terminal.
-async function prepareHost(target, alias, firewall, harden) {
+async function prepareHost(target, alias, firewall, harden, dockerPrune) {
   const log = document.getElementById("wiz-log");
   log.hidden = false;
   log.textContent = "";
@@ -997,7 +998,7 @@ async function prepareHost(target, alias, firewall, harden) {
   const res = await fetch("/api/hosts/prepare", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target, alias, firewall, harden }),
+    body: JSON.stringify({ target, alias, firewall, harden, dockerPrune }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok && res.status !== 202) throw new Error(data.error || "HTTP " + res.status);

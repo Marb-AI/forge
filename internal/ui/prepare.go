@@ -14,10 +14,11 @@ import (
 // the SSH key it prints for GitHub.
 func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Target   string `json:"target"`
-		Alias    string `json:"alias"`
-		Firewall bool   `json:"firewall"`
-		Harden   bool   `json:"harden"`
+		Target      string `json:"target"`
+		Alias       string `json:"alias"`
+		Firewall    bool   `json:"firewall"`
+		Harden      bool   `json:"harden"`
+		DockerPrune bool   `json:"dockerPrune"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("bad request"))
@@ -35,7 +36,7 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, err := s.startJob(func(out io.Writer) error {
-		return s.deps.PrepareHost(req.Target, req.Alias, req.Firewall, req.Harden, out)
+		return s.deps.PrepareHost(req.Target, req.Alias, req.Firewall, req.Harden, req.DockerPrune, out)
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)

@@ -27,12 +27,13 @@ func hostPrepare(args []string) int {
 	alias, rest := extractFlag(args, "alias")
 	noFirewall := hasBoolFlag(rest, "--no-firewall")
 	noHarden := hasBoolFlag(rest, "--no-ssh-harden")
-	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden")
+	noPrune := hasBoolFlag(rest, "--no-docker-prune")
+	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune")
 
 	if len(rest) < 1 || alias == "" {
-		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden]")
+		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune]")
 	}
-	if err := runHostPrepare(rest[0], alias, !noFirewall, !noHarden, os.Stdout); err != nil {
+	if err := runHostPrepare(rest[0], alias, !noFirewall, !noHarden, !noPrune, os.Stdout); err != nil {
 		return fail("%v", err)
 	}
 	return 0
@@ -42,7 +43,7 @@ func hostPrepare(args []string) int {
 // server and registers it, writing every line of progress to out. The CLI passes
 // os.Stdout; the browser UI passes an SSE stream, so the wizard can show the same
 // long provisioning run live instead of a spinner.
-func runHostPrepare(sshTarget, alias string, firewall, harden bool, out io.Writer) error {
+func runHostPrepare(sshTarget, alias string, firewall, harden, dockerPrune bool, out io.Writer) error {
 	user, addr, port, err := config.ParseSSHTarget(sshTarget)
 	if err != nil {
 		return err
@@ -90,7 +91,7 @@ func runHostPrepare(sshTarget, alias string, firewall, harden bool, out io.Write
 	}
 
 	// 2) Run the provisioning script as root.
-	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, firewall, harden)
+	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, firewall, harden, dockerPrune)
 	runner := "bash -s"
 	if !isRoot {
 		runner = "sudo bash -s"
@@ -244,7 +245,7 @@ func contains(ss []string, s string) bool {
 
 // buildPrepareScript assembles the idempotent remote provisioning script. It
 // assumes it runs as root (the caller wraps it in `sudo bash -s` when needed).
-func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort int, user string, isRoot, firewall, harden bool) string {
+func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort int, user string, isRoot, firewall, harden, dockerPrune bool) string {
 	var b strings.Builder
 	b.WriteString(prepareBase)
 	b.WriteString(ghSection)
@@ -257,6 +258,9 @@ func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort
 	}
 	if harden {
 		b.WriteString(sshHardenSection)
+	}
+	if dockerPrune {
+		b.WriteString(dockerPruneSection)
 	}
 	b.WriteString("echo '[forge] host prepared.'\n")
 
@@ -464,6 +468,81 @@ fi
 
 // sshHardenSection disables password auth (keys only), but only if an
 // authorized_keys already exists, so we never lock ourselves out.
+
+// dockerPruneSection installs a nightly Docker clean-up. A build server fills up
+// fast — every rebuild orphans the layers it replaced, and BuildKit's cache grows
+// without bound — and a full disk breaks every workspace at once.
+//
+// What it removes is deliberately conservative, because the failure mode of being
+// too eager is a workspace that has to rebuild from scratch in the morning:
+//
+//   - DANGLING images only (no -a). Those are the layer sets a rebuild left
+//     behind. `-a` would also delete any tagged image that no container happens to
+//     be running right now — which, with several workspaces where not all are up,
+//     means quietly deleting the images of every idle project each night.
+//   - Build cache, and stopped containers.
+//   - Never volumes. That is where data lives.
+//
+// Everything is filtered to 24h, so nothing you built today is touched, and an
+// image an actually-running container uses is never a candidate in the first place.
+//
+// A systemd timer rather than cron: no extra package, it logs to the journal, and
+// Persistent=true means a server that was off at 03:00 still runs the clean-up
+// when it comes back.
+const dockerPruneSection = `echo "[forge] installing nightly docker clean-up (03:00) ..."
+cat > /usr/local/bin/forge-docker-prune <<'PRUNE'
+#!/bin/sh
+# Reclaim disk from Docker. Conservative on purpose — see prepare.go.
+set -e
+echo "docker disk usage before:"
+docker system df 2>/dev/null || exit 0
+
+# Layer sets orphaned by a rebuild. NOT -a: that would delete tagged images no
+# container happens to be running, i.e. every idle workspace's images.
+docker image prune -f --filter until=24h || true
+# BuildKit cache. Usually the biggest win.
+docker builder prune -f --filter until=24h || true
+# Containers that exited and were never cleaned up.
+docker container prune -f --filter until=24h || true
+# Volumes are NOT pruned. That is where data lives.
+
+echo "docker disk usage after:"
+docker system df 2>/dev/null || true
+PRUNE
+chmod 0755 /usr/local/bin/forge-docker-prune
+
+cat > /etc/systemd/system/forge-docker-prune.service <<'UNIT'
+[Unit]
+Description=Forge: reclaim Docker disk (dangling images, build cache, dead containers)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/forge-docker-prune
+UNIT
+
+cat > /etc/systemd/system/forge-docker-prune.timer <<'UNIT'
+[Unit]
+Description=Forge: nightly Docker clean-up
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# A server that was off at 03:00 still runs it once it is back.
+Persistent=true
+# Don't have every Forge host hammer its disk at the same second.
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable --now forge-docker-prune.timer 2>/dev/null || true
+echo "[forge] docker clean-up scheduled (systemctl list-timers forge-docker-prune)"
+echo "[forge]   run it now:  sudo forge-docker-prune"
+`
+
 const sshHardenSection = `KEYFILE=""
 [ -s /root/.ssh/authorized_keys ] && KEYFILE=/root/.ssh/authorized_keys
 [ -s "$HOME/.ssh/authorized_keys" ] && KEYFILE="$HOME/.ssh/authorized_keys"
