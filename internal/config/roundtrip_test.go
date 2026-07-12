@@ -49,6 +49,55 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUIPortRoundTripAndDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Unset means "use the default" — never port 0.
+	c, _ := Load()
+	if c.UIPort != 0 {
+		t.Errorf("fresh config should have no explicit UI port, got %d", c.UIPort)
+	}
+	if c.UIPortOr() != DefaultUIPort {
+		t.Errorf("UIPortOr() = %d, want the default %d", c.UIPortOr(), DefaultUIPort)
+	}
+
+	c.UIPort = 8099
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UIPort != 8099 || got.UIPortOr() != 8099 {
+		t.Errorf("UI port not persisted: got %d (UIPortOr %d)", got.UIPort, got.UIPortOr())
+	}
+}
+
+// A config written by an older forge (no ui_port key) must still load, and fall
+// back to the default rather than to port 0.
+func TestOldConfigWithoutUIPortLoads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".forge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"hosts":{},"forwards":{},"workspaces":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("an older config must still load: %v", err)
+	}
+	if c.UIPortOr() != DefaultUIPort {
+		t.Errorf("UIPortOr() = %d, want the default %d", c.UIPortOr(), DefaultUIPort)
+	}
+}
+
 func TestSetPortsEmptyRemoves(t *testing.T) {
 	c := &Config{Ports: map[string]map[string][]int{}}
 	c.SetPorts("h", "w", []int{1, 2})

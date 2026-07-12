@@ -32,61 +32,72 @@ func hostPrepare(args []string) int {
 	if len(rest) < 1 || alias == "" {
 		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden]")
 	}
-	user, addr, port, err := config.ParseSSHTarget(rest[0])
-	if err != nil {
+	if err := runHostPrepare(rest[0], alias, !noFirewall, !noHarden, os.Stdout); err != nil {
 		return fail("%v", err)
+	}
+	return 0
+}
+
+// runHostPrepare is the transport-agnostic `host prepare`: it provisions a bare
+// server and registers it, writing every line of progress to out. The CLI passes
+// os.Stdout; the browser UI passes an SSE stream, so the wizard can show the same
+// long provisioning run live instead of a spinner.
+func runHostPrepare(sshTarget, alias string, firewall, harden bool, out io.Writer) error {
+	user, addr, port, err := config.ParseSSHTarget(sshTarget)
+	if err != nil {
+		return err
 	}
 	target := sshx.Target{User: user, Addr: addr, Port: port}
 
 	// Probe: arch, uid, package manager — in one round trip.
-	out, err := sshx.Capture(target.Args(
+	probe, err := sshx.Capture(target.Args(
 		"uname -m; id -u; { command -v apt-get || command -v dnf || command -v yum || echo none; }",
 	)...)
 	if err != nil {
-		return fail("cannot reach %s: %v", target.User+"@"+addr, err)
+		return fmt.Errorf("cannot reach %s: %w", target.User+"@"+addr, err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	lines := strings.Split(strings.TrimSpace(string(probe)), "\n")
 	if len(lines) < 3 {
-		return fail("unexpected probe output: %q", string(out))
+		return fmt.Errorf("unexpected probe output: %q", string(probe))
 	}
 	arch, uid := strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1])
 	pkgMgr := filepath.Base(strings.TrimSpace(lines[2]))
 
 	goarch, err := unameToGoArch(arch)
 	if err != nil {
-		return fail("%v", err)
+		return err
 	}
 	iproutePkg, ok := iproutePackage(pkgMgr)
 	if !ok {
-		return fail("unsupported distro: no apt-get/dnf/yum found (%q)", lines[2])
+		return fmt.Errorf("unsupported distro: no apt-get/dnf/yum found (%q)", lines[2])
 	}
 	sshClientPkg, _ := sshClientPackage(pkgMgr)
 	isRoot := uid == "0"
 
 	agentSrc, agentLabel, agentClose, err := agentReader(goarch)
 	if err != nil {
-		return fail("%v", err)
+		return err
 	}
 	defer agentClose()
 
-	fmt.Printf("preparing %s@%s (arch %s, %s)\n", user, addr, arch, pkgMgr)
+	fmt.Fprintf(out, "preparing %s@%s (arch %s, %s)\n", user, addr, arch, pkgMgr)
 
 	// 1) Upload the agent binary to /tmp; the provisioning script (as root)
 	//    installs it into place.
-	fmt.Printf("→ uploading forge-agent (%s)\n", agentLabel)
-	if err := sshx.RunWithInput(agentSrc, target.Args("cat > /tmp/forge-agent")...); err != nil {
-		return fail("upload failed: %v", err)
+	fmt.Fprintf(out, "→ uploading forge-agent (%s)\n", agentLabel)
+	if err := sshx.RunWithInputTo(agentSrc, out, target.Args("cat > /tmp/forge-agent")...); err != nil {
+		return fmt.Errorf("upload failed: %w", err)
 	}
 
 	// 2) Run the provisioning script as root.
-	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, !noFirewall, !noHarden)
+	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, firewall, harden)
 	runner := "bash -s"
 	if !isRoot {
 		runner = "sudo bash -s"
 	}
-	fmt.Println("→ provisioning (idempotent) …")
-	if err := sshx.RunWithInput(strings.NewReader(script), target.Args(runner)...); err != nil {
-		return fail("provisioning failed: %v", err)
+	fmt.Fprintln(out, "→ provisioning (idempotent) …")
+	if err := sshx.RunWithInputTo(strings.NewReader(script), out, target.Args(runner)...); err != nil {
+		return fmt.Errorf("provisioning failed: %w", err)
 	}
 
 	// 3) Read the host's public key back, so a re-run always shows it — whether it
@@ -94,27 +105,27 @@ func hostPrepare(args []string) int {
 	//    (the private key is not), so this needs no sudo.
 	pubkey, err := sshx.Capture(target.Args("cat " + hostKeyPath + ".pub")...)
 	if err != nil {
-		return fail("cannot read host key %s.pub: %v", hostKeyPath, err)
+		return fmt.Errorf("cannot read host key %s.pub: %w", hostKeyPath, err)
 	}
 
 	// 4) Register the host now that it is ready.
 	cfg, err := config.Load()
 	if err != nil {
-		return fail("%v", err)
+		return err
 	}
 	cfg.Hosts[alias] = &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
 	if err := cfg.Save(); err != nil {
-		return fail("%v", err)
+		return err
 	}
 
-	fmt.Printf("\nhost %q ready.\n", alias)
-	fmt.Printf("\n  git identity — register this key on GitHub (Settings → SSH keys) so\n")
-	fmt.Printf("  workspaces can clone and push without your laptop:\n\n")
-	fmt.Printf("    %s\n", strings.TrimSpace(string(pubkey)))
-	fmt.Printf("\n  gh is installed but not authenticated. Log in once for the whole host:\n")
-	fmt.Printf("    forge host gh-login %s\n", alias)
-	fmt.Printf("\n  next: forge workspace create <name> %s\n", alias)
-	return 0
+	fmt.Fprintf(out, "\nhost %q ready.\n", alias)
+	fmt.Fprintf(out, "\n  git identity — register this key on GitHub (Settings → SSH keys) so\n")
+	fmt.Fprintf(out, "  workspaces can clone and push without your laptop:\n\n")
+	fmt.Fprintf(out, "    %s\n", strings.TrimSpace(string(pubkey)))
+	fmt.Fprintf(out, "\n  gh is installed but not authenticated. Log in once for the whole host:\n")
+	fmt.Fprintf(out, "    forge host gh-login %s\n", alias)
+	fmt.Fprintf(out, "\n  next: forge workspace create <name> %s\n", alias)
+	return nil
 }
 
 // hostKeyDir holds the host-wide git identity: one key per server, copied into

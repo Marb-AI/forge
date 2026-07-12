@@ -1,0 +1,501 @@
+/* Forge UI — monochrome, Warp-ish. Dark by default; [data-theme="light"] flips it. */
+:root[data-theme="dark"] {
+  --bg: #0a0a0a;
+  --bg-2: #121212;
+  --bg-3: #1a1a1a;
+  --fg: #e6e6e6;
+  --fg-dim: #8a8a8a;
+  --border: #262626;
+  --accent: #f0f0f0;
+  --tab-active: #1f1f1f;
+  --err-fg: #ff8f8f;
+  --err-bg: rgba(255, 90, 90, 0.10);
+  --err-border: rgba(255, 90, 90, 0.30);
+}
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-2: #f5f5f5;
+  --bg-3: #ececec;
+  --fg: #1a1a1a;
+  --fg-dim: #6a6a6a;
+  --border: #dcdcdc;
+  --accent: #111111;
+  --tab-active: #ffffff;
+  --err-fg: #b3261e;
+  --err-bg: rgba(179, 38, 30, 0.07);
+  --err-border: rgba(179, 38, 30, 0.28);
+}
+:root { --rail-w: 66px; }  /* rail width; the ssh overlay butts against it */
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+
+/* Theme every scrollbar (terminal scrollback, file tree, ssh panel) so the
+   native white one never shows through on the dark UI. */
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
+::-webkit-scrollbar-corner { background: transparent; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+}
+button {
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+button:hover { background: var(--bg-3); }
+.muted { color: var(--fg-dim); }
+.pad { padding: 10px; }
+
+#app { display: flex; flex-direction: column; height: 100%; }
+
+/* ---- tab bar ---- */
+#tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 6px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  -webkit-user-select: none;
+  user-select: none;
+}
+#tabs { display: flex; gap: 2px; overflow-x: auto; }
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.tab:hover { background: var(--bg-3); }
+.tab.active { color: var(--fg); background: var(--tab-active); border-color: var(--border); }
+.tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-dim); }
+.tab.running .dot { background: #3ecf6a; }
+#add-tab { width: 24px; height: 24px; font-size: 15px; line-height: 1; }
+.spacer { flex: 1; }
+#theme-toggle { width: 26px; height: 24px; }
+
+/* ---- body columns ---- */
+#body { flex: 1; display: flex; min-height: 0; position: relative; }
+#filepane {
+  width: 20%;
+  min-width: 180px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border-right: 1px solid var(--border);
+}
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border);
+}
+.pane-head button {
+  width: 22px;
+  height: 22px;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pane-head button svg { display: block; }
+.pane-head button.active { color: var(--fg); background: var(--bg-3); }
+.pane-actions { display: flex; gap: 2px; }
+
+/* Dotfiles are hidden at the ROOT only (home is full of .cache/.ssh noise).
+   Deeper down they're real project files (.env, .github) and always show — so
+   only root nodes ever get the .dotfile class. */
+#filetree:not(.show-hidden) .tnode.dotfile { display: none; }
+#filetree { flex: 1; overflow: auto; padding: 8px 10px; }
+
+#main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;   /* let children shrink below content height */
+  overflow: hidden;
+  background: var(--bg);
+  padding: 6px 8px; /* gutter lives here, NOT on #terminal — see below */
+}
+#filetabs { display: flex; gap: 2px; padding-bottom: 4px; }
+#filetabs:empty { display: none; }
+
+/* File micro-tabs (open files), under the workspace tabs. */
+.ftab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 4px 0 9px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.ftab:hover { background: var(--bg-3); }
+.ftab.active { color: var(--fg); background: var(--bg-2); border-color: var(--border); }
+.ftab .x {
+  width: 15px; height: 15px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 3px; font-size: 11px; color: var(--fg-dim);
+}
+.ftab .x:hover { background: var(--border); color: var(--fg); }
+
+/* Stage holds the terminal and the file viewer that overlays it. The terminal
+   keeps running (and its size) underneath while a file is open. */
+#stage { flex: 1; min-height: 0; position: relative; display: flex; }
+/* min-height:0 + overflow:hidden clamp the terminal to the leftover height
+   (without them xterm's own rows drive the container taller and the fit loop
+   runs away). No padding here: FitAddon measures this element's height but
+   ignores its padding, so any padding makes it compute one row too many and the
+   bottom line gets clipped. The gutter is on #main instead. */
+#terminal {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+#fileview {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+#fileview[hidden] { display: none; }
+#fileview-head {
+  padding: 6px 10px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#fileview pre { margin: 0; flex: 1; overflow: auto; }
+#fileview code.hljs {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: transparent;
+}
+
+/* File tree rows. */
+.trow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.trow:hover { background: var(--bg-3); }
+.trow .tw {
+  flex: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-dim);
+  transition: transform 0.12s ease;
+}
+.trow .tw svg { display: block; }
+.trow.open .tw { transform: rotate(90deg); }
+.trow .ti { flex: 0 0 auto; display: inline-flex; align-items: center; color: var(--fg-dim); }
+/* Language marks bring their own colours; only the fallback glyph inherits the
+   dimmed monochrome of the tree. */
+.trow .ti.lang { color: inherit; }
+.trow .ti svg { display: block; }
+.trow .tn { overflow: hidden; text-overflow: ellipsis; }
+.trow.file { color: var(--fg); }
+.tchildren { margin-left: 11px; }
+
+/* ---- empty state (no workspaces at all) ---- */
+#empty {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+#empty[hidden] { display: none; }
+#stopped {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+#stopped[hidden] { display: none; }
+.empty-card { max-width: 420px; text-align: center; padding: 0 20px; }
+.empty-title { font-size: 16px; margin-bottom: 8px; }
+.empty-text { color: var(--fg-dim); font-size: 12.5px; line-height: 1.6; margin: 0 0 18px; }
+button.primary {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+  border-radius: 6px;
+}
+button.primary:hover { background: var(--fg); opacity: 0.85; }
+button.big { padding: 10px 20px; font-size: 13px; }
+#term-status { padding: 6px 10px; border-top: 1px solid var(--border); }
+
+/* ---- right rail + ssh panel ---- */
+#rail {
+  width: var(--rail-w);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 4px;
+  background: var(--bg-2);
+  border-left: 1px solid var(--border);
+}
+.rail-btn {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 6px 2px;
+}
+.rail-btn .ico { font-size: 15px; line-height: 1; }
+.rail-btn .cap { font-size: 9px; line-height: 1; color: var(--fg-dim); letter-spacing: 0.02em; }
+.rail-btn:hover .cap, .rail-btn.active .cap { color: var(--fg); }
+.rail-btn.active { background: var(--bg-3); border-color: var(--border); }
+.rail-btn:disabled { opacity: 0.35; cursor: default; }
+.rail-sep { width: 70%; height: 1px; background: var(--border); margin: 5px 0; }
+
+/* The ssh shell fills the chat area — the same box the file viewer uses, so it
+   reads as "another thing over the terminal" rather than a new layout. The file
+   tree and the rail stay put; only Claude's terminal is covered, and it keeps
+   running (and keeps its size) underneath. */
+#sshpanel {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+#sshpanel[hidden] { display: none; }
+#sshpanel .pane-head button { width: 22px; height: 22px; font-size: 12px; }
+/* Gutter on the wrapper, never on the fit container (#sshterm) — padding there
+   makes FitAddon overcount rows and clip the bottom line. */
+#sshbody { flex: 1; min-height: 0; display: flex; padding: 6px 8px; }
+#sshterm { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+#sshterm .xterm { height: 100%; }
+#ssh-note { border-top: 1px solid var(--border); font-size: 11.5px; }
+#ssh-note[hidden] { display: none; }
+
+/* xterm fills its container */
+#terminal .xterm { height: 100%; }
+
+/* ---- modals (wizard, settings) ---- */
+#wizard, #settings, #confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+#wizard[hidden], #settings[hidden], #confirm[hidden] { display: none; }
+
+.modal {
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.modal-head button { width: 22px; height: 22px; font-size: 12px; }
+.modal { max-height: calc(100vh - 64px); }
+.modal-body { padding: 14px 12px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.modal-body .row { display: flex; gap: 6px; align-items: stretch; }
+.modal-body .row select { flex: 1; }
+.modal-body .row button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+/* The wizard's "+" is the only square one; scoping it here stopped it from
+   squashing every other button in a .row (Save was 34px wide and overflowing). */
+#wiz-addhost { width: 34px; padding: 0; font-size: 15px; }
+#wiz-addhost.active { background: var(--bg-3); color: var(--fg); }
+#wiz-newhost { display: flex; flex-direction: column; gap: 4px; }
+#wiz-newhost[hidden] { display: none; }
+.cb {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: 0;
+  margin-top: 2px;
+}
+.cb input { width: auto; }
+#wiz-log {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#wiz-log[hidden] { display: none; }
+.modal-body label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+  margin-top: 6px;
+}
+.modal-body input, .modal-body select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+}
+.modal-body input:focus, .modal-body select:focus { outline: 1px solid var(--fg-dim); }
+/* Drop the native dropdown arrow (it clings to the edge and ignores the theme)
+   and draw our own chevron with real breathing room. */
+.modal-body select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238a8a8a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px;
+}
+.modal-body select:disabled, .modal-body input:disabled { opacity: 0.5; }
+.hint { font-size: 11px; color: var(--fg-dim); line-height: 1.45; }
+.hint code { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; }
+.err {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--err-fg);
+  background: var(--err-bg);
+  border: 1px solid var(--err-border);
+  white-space: pre-wrap;
+}
+.err[hidden] { display: none; }
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+.modal-foot button {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.modal-foot button:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- settings: the administrative, mostly-irreversible stuff ---- */
+.adminlist { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.adminrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.adminrow .meta { color: var(--fg-dim); font-size: 11px; }
+.adminrow button {
+  padding: 4px 10px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.adminrow button.destructive { color: var(--err-fg); border-color: var(--err-border); }
+.adminrow button.destructive:hover { background: var(--err-bg); }
+.adminlist .muted { font-size: 11.5px; padding: 2px; }
+.danger-hint { color: var(--err-fg); }
+#set-port { width: 100%; }
+#set-port-save { padding: 7px 14px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+
+/* ---- confirm dialog: our own, because the native one can't say enough ---- */
+#confirm .modal { width: 460px; }
+.cf-body { font-size: 12.5px; line-height: 1.6; color: var(--fg); white-space: pre-wrap; }
+.cf-body .warn { color: var(--err-fg); }
+#cf-type { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+#cf-type[hidden] { display: none; }
+#cf-type label { font-size: 11px; text-transform: none; letter-spacing: 0; color: var(--fg-dim); }
+#cf-input { width: 100%; }
+#cf-ok.destructive { background: var(--err-fg); border-color: var(--err-fg); color: #fff; }
+#cf-ok.destructive:hover { background: var(--err-fg); opacity: 0.88; }
+#cf-ok:disabled { opacity: 0.45; cursor: default; }

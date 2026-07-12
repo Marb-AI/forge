@@ -33,6 +33,12 @@ Forwarding:
   forge forwarding status
   forge spawn                                     ensure the tunnel supervisor is up
 
+UI:
+  forge ui [start]                               start the local browser UI + open it
+  forge ui stop
+  forge ui status
+  forge ui port <port>                           set the UI's localhost port
+
 Info:
   forge show ports [host]                        listening + forwarded ports (paste to Claude)
 `
@@ -54,8 +60,12 @@ func Main(args []string) int {
 		return showCmd(args[1:])
 	case "spawn":
 		return spawnCmd(args[1:])
+	case "ui":
+		return uiCmd(args[1:])
 	case runSupervisorArg: // hidden: the detached daemon re-execs itself with this
 		return runSupervisor(args[1:])
+	case runUIArg: // hidden: the detached UI daemon re-execs itself with this
+		return runUI(args[1:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return 0

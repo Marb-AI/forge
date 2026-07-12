@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/config"
@@ -42,29 +43,7 @@ func workspaceCreate(args []string) int {
 		return fail("usage: forge workspace create <name> <host-alias>")
 	}
 	name, alias := args[0], args[1]
-
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
-	host := cfg.Hosts[alias]
-	if host == nil {
-		return fail("no such host %q (see: forge host list)", alias)
-	}
-
-	pubkey, err := findPublicKey()
-	if err != nil {
-		return fail("%v", err)
-	}
-	enc := base64.StdEncoding.EncodeToString(pubkey)
-
-	var res agentproto.CreateResult
-	if err := callAgent(host, &res, "workspace-create", "--name", name, "--pubkey", enc); err != nil {
-		return fail("%v", err)
-	}
-
-	cfg.AddWorkspace(name, alias)
-	if err := cfg.Save(); err != nil {
+	if err := createWorkspace(name, alias); err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("created workspace %q on %s\n", name, alias)
@@ -72,28 +51,64 @@ func workspaceCreate(args []string) int {
 	return 0
 }
 
+// createWorkspace provisions a workspace on a registered host and records it
+// locally. Shared by `forge workspace create` and the browser UI's wizard, so
+// both take exactly the same path.
+func createWorkspace(name, alias string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	host := cfg.Hosts[alias]
+	if host == nil {
+		return fmt.Errorf("no such host %q (see: forge host list)", alias)
+	}
+
+	pubkey, err := findPublicKey()
+	if err != nil {
+		return err
+	}
+	enc := base64.StdEncoding.EncodeToString(pubkey)
+
+	var res agentproto.CreateResult
+	if err := callAgent(host, &res, "workspace-create", "--name", name, "--pubkey", enc); err != nil {
+		return err
+	}
+
+	cfg.AddWorkspace(name, alias)
+	return cfg.Save()
+}
+
 func workspaceDelete(args []string) int {
 	if len(args) < 1 {
 		return fail("usage: forge workspace delete <name>")
 	}
 	name := args[0]
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
-	host := cfg.HostFor(name)
-	if host == nil {
-		return fail("unknown workspace %q — not created by this client", name)
-	}
-	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
-		return fail("%v", err)
-	}
-	cfg.RemoveWorkspace(name)
-	if err := cfg.Save(); err != nil {
+	if err := deleteWorkspace(name); err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("deleted workspace %q\n", name)
 	return 0
+}
+
+// deleteWorkspace destroys a workspace on its host and forgets it locally.
+// This is irreversible: the agent runs `userdel -r`, so the workspace's Linux
+// user and its entire home — every file in it — are gone. Shared by
+// `forge workspace delete` and the UI's settings panel.
+func deleteWorkspace(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	host := cfg.HostFor(name)
+	if host == nil {
+		return fmt.Errorf("unknown workspace %q — not created by this client", name)
+	}
+	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
+		return err
+	}
+	cfg.RemoveWorkspace(name)
+	return cfg.Save()
 }
 
 func workspaceList() int {
@@ -161,11 +176,6 @@ func workspaceAction(name, action string, rest []string) int {
 	}
 }
 
-// sourceEnv sources the workspace environment file before launching, so the
-// Claude/tmux session gets COMPOSE_PROJECT_NAME et al. even though it is not an
-// interactive shell that would read .bashrc. `set -a` exports everything sourced.
-const sourceEnv = `set -a; [ -f "$HOME/.forge/env" ] && . "$HOME/.forge/env"; set +a; `
-
 // workspaceClaude launches plain `claude` in tmux. tmux gives the persistence:
 // detach (Ctrl-b d) keeps the session to reattach later; /exit or Ctrl-C ends
 // Claude, the command finishes, the tmux session is gone, and the next launch is
@@ -184,12 +194,10 @@ func workspaceClaude(target sshx.Target, rest []string) int {
 	switch sub {
 	case "", "attach":
 		// attach-or-create in one command; survives disconnect via tmux.
-		remote := sourceEnv + fmt.Sprintf("tmux new -A -s %s claude", session)
-		return runInteractive(target.TTYArgs(remote))
+		return runInteractive(target.TTYArgs(agentproto.AttachClaude))
 	case "renew":
 		// kill the existing session (reset context) then start fresh and attach.
-		remote := fmt.Sprintf("tmux kill-session -t %s 2>/dev/null; ", session) +
-			sourceEnv + fmt.Sprintf("tmux new -A -s %s claude", session)
+		remote := agentproto.KillClaude + "; " + agentproto.AttachClaude
 		return runInteractive(target.TTYArgs(remote))
 	case "stop":
 		if err := runCapture(target.Args("tmux", "kill-session", "-t", session)); err != nil {
@@ -214,19 +222,33 @@ const checkpointMarker = "FORGE_CHECKPOINT_SAVED"
 // memory with a fresh context window. Run it from another terminal while the
 // session is idle.
 func workspaceCheckpoint(target sshx.Target, session string) int {
+	if err := runCheckpoint(target, session, func(m string) { fmt.Println(m) }); err != nil {
+		return fail("%v", err)
+	}
+	fmt.Println("done — fresh session running from memory. Reattach with: forge workspace <name> claude")
+	return 0
+}
+
+// runCheckpoint is the transport-agnostic checkpoint: it asks the running Claude
+// session to write a handoff to memory, waits for it to finish, then restarts the
+// session so it continues from memory with a fresh context. Progress is reported
+// through log so the CLI can print it and the browser UI can surface it. On any
+// error the session is left running untouched (nothing killed) unless the error
+// says otherwise.
+func runCheckpoint(target sshx.Target, session string, log func(string)) error {
 	if err := runCapture(target.Args("tmux", "has-session", "-t", session)); err != nil {
-		return fail("no running claude session to checkpoint (start one with: forge workspace <name> claude)")
+		return fmt.Errorf("no running claude session to checkpoint — start one first (forge workspace <name> claude, or the tab in forge ui)")
 	}
 	// Safe gate: only proceed when the pane is stable (no task streaming output).
 	if !claudeIdle(target, session) {
-		return fail("Claude looks busy — run checkpoint when it's idle (nothing running)")
+		return fmt.Errorf("Claude looks busy — run checkpoint when it's idle (nothing running)")
 	}
 	// A marker already on screen is a leftover from an earlier checkpoint that
 	// timed out (a successful one restarts the session, clearing it). Sending now
 	// would match that stale line instantly and kill a session mid-work.
 	if pane, ok := capturePane(target, session); ok && hasMarkerLine(pane, checkpointMarker) {
-		return fail("a marker from an earlier checkpoint is still on screen — restart the session first:\n" +
-			"  forge workspace <name> claude stop && forge workspace <name> claude")
+		return fmt.Errorf("a marker from an earlier checkpoint is still on screen — restart the session first " +
+			"(forge workspace <name> claude stop && forge workspace <name> claude, or the restart button in forge ui)")
 	}
 
 	// The marker is embedded mid-sentence (words before and after) so its echo in
@@ -237,14 +259,14 @@ func workspaceCheckpoint(target sshx.Target, session string) int {
 		"seamlessly. Do not ask me anything; just do it. After the memory is fully written — " +
 		"including any index or pointer file it needs — print the token " + checkpointMarker +
 		" alone on its own line, as the very last thing you output, and then stop."
-	fmt.Println("→ asking Claude to write a handoff to memory…")
+	log("→ asking Claude to write a handoff to memory…")
 	if err := sendText(target, session, prompt); err != nil {
-		return fail("send prompt: %v", err)
+		return fmt.Errorf("send prompt: %w", err)
 	}
 
 	capture := func() (string, bool) { return capturePane(target, session) }
 	if !waitForMarker(capture, checkpointMarker, panePoll, 3*time.Minute) {
-		return fail("Claude didn't confirm the handoff in time — left the session running, nothing killed")
+		return fmt.Errorf("Claude didn't confirm the handoff in time — left the session running, nothing killed")
 	}
 
 	// The marker means "Claude believes it is done", not "Claude has stopped".
@@ -252,19 +274,17 @@ func workspaceCheckpoint(target sshx.Target, session string) int {
 	// the memory index, say. Killing on the marker alone truncates that write, and
 	// the handoff we were preserving is the thing we corrupt. So wait for the pane
 	// to actually fall quiet before killing anything.
-	fmt.Println("→ marker seen; waiting for Claude to go quiet…")
+	log("→ marker seen; waiting for Claude to go quiet…")
 	if !waitQuiet(capture, panePoll, paneQuietFor, 2*time.Minute) {
-		return fail("Claude kept working after the marker — left the session running, nothing killed")
+		return fmt.Errorf("Claude kept working after the marker — left the session running, nothing killed")
 	}
 
-	fmt.Println("→ handoff saved; restarting the session from memory…")
+	log("→ handoff saved; restarting the session from memory…")
 	_ = runCapture(target.Args("tmux", "kill-session", "-t", session))
-	launch := sourceEnv + fmt.Sprintf("tmux new -d -s %s 'claude \"continue from memory\"'", session)
-	if err := runCapture(target.Args(launch)); err != nil {
-		return fail("restart: %v (start it manually with: forge workspace <name> claude)", err)
+	if err := runCapture(target.Args(agentproto.ResumeClaude)); err != nil {
+		return fmt.Errorf("restart: %w (start it manually with: forge workspace <name> claude)", err)
 	}
-	fmt.Println("done — fresh session running from memory. Reattach with: forge workspace <name> claude")
-	return 0
+	return nil
 }
 
 // sendText types text into the tmux session and presses Enter. The text is piped
@@ -349,14 +369,35 @@ func waitForMarker(capture func() (string, bool), marker string, poll, timeout t
 	return false
 }
 
-// hasMarkerLine reports whether any whole (trimmed) line of s equals the marker.
+// hasMarkerLine reports whether any line of s is the marker and nothing else.
+//
+// "Nothing else" is the whole trick. Claude Code decorates each of its output
+// lines with a bullet — the marker arrives as "● FORGE_CHECKPOINT_SAVED", never
+// bare — so an exact-equality check never matches, and every checkpoint runs to
+// its timeout with the handoff written but the session never restarted. Leading
+// decoration therefore has to be stripped.
+//
+// But only *decoration* may be stripped. The prompt we type mentions the token
+// mid-sentence, and the pane echoes that prompt straight back; if a substring
+// match were enough we would fire on our own prompt the instant we sent it and
+// kill the session mid-work. So: strip the leading glyphs, then demand the rest
+// of the line be exactly the marker — which the echoed sentence, with its words
+// on either side, never is.
 func hasMarkerLine(s, marker string) bool {
 	for _, line := range strings.Split(s, "\n") {
-		if strings.TrimSpace(line) == marker {
+		if strings.TrimSpace(stripDecoration(line)) == marker {
 			return true
 		}
 	}
 	return false
+}
+
+// stripDecoration drops leading whitespace and TUI glyphs (bullets, box-drawing,
+// arrows) from a pane line, leaving it starting at its first real word.
+func stripDecoration(line string) string {
+	return strings.TrimLeftFunc(line, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
 }
 
 func workspaceExpose(target sshx.Target, rest []string) int {

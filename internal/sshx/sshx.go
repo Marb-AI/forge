@@ -99,11 +99,24 @@ func Capture(args ...string) ([]byte, error) {
 }
 
 // RunWithInput runs ssh with stdin taken from r and stdout/stderr streamed to
-// the terminal. Used to pipe a provisioning script (or a binary) to the host.
+// the terminal — each to its own stream, so redirecting one doesn't capture the
+// other. Used to pipe a provisioning script (or a binary) to the host.
 func RunWithInput(r io.Reader, args ...string) error {
+	return runWithInput(r, os.Stdout, os.Stderr, args...)
+}
+
+// RunWithInputTo is RunWithInput with the output going wherever the caller wants
+// — an SSE stream for the browser UI — so a long provisioning run can be watched
+// from either front end. stdout and stderr are merged, because a follower reads
+// one stream and wants the errors in it, in order.
+func RunWithInputTo(r io.Reader, out io.Writer, args ...string) error {
+	return runWithInput(r, out, out, args...)
+}
+
+func runWithInput(r io.Reader, stdout, stderr io.Writer, args ...string) error {
 	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = r
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	return cmd.Run()
 }

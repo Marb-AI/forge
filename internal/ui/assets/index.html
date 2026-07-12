@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forge</title>
+  <link rel="stylesheet" href="/assets/vendor/xterm.min.css">
+  <link id="hljs-theme" rel="stylesheet" href="/assets/vendor/hljs-dark.min.css">
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div id="app">
+    <header id="tabbar">
+      <div id="tabs" role="tablist"></div>
+      <button id="add-tab" title="New workspace">+</button>
+      <div class="spacer"></div>
+      <button id="theme-toggle" title="Toggle light/dark">◐</button>
+    </header>
+
+    <div id="body">
+      <aside id="filepane">
+        <div class="pane-head">
+          <span>Files</span>
+          <span class="pane-actions">
+            <button id="files-hidden" title="Show hidden files (root only)">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+            <button id="files-refresh" title="Refresh">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
+            </button>
+          </span>
+        </div>
+        <div id="filetree" class="muted">Select a workspace.</div>
+      </aside>
+
+      <main id="main">
+        <div id="filetabs"></div>
+        <div id="stage" role="tabpanel">
+          <div id="terminal"></div>
+          <div id="empty" hidden>
+            <div class="empty-card">
+              <div class="empty-title">No workspaces yet</div>
+              <p class="empty-text">
+                A workspace is an isolated Claude Code session running on your server.
+                It keeps going when you close the laptop — reattach and Claude is exactly
+                where you left it.
+              </p>
+              <button id="empty-create" class="primary big">Create workspace</button>
+            </div>
+          </div>
+          <div id="stopped" hidden>
+            <div class="empty-card">
+              <div class="empty-title">Session stopped</div>
+              <p class="empty-text">
+                Claude isn't running in <b><span id="stopped-ws"></span></b>. Its files are
+                untouched — starting it again gives you a fresh session.
+              </p>
+              <button id="stopped-start" class="primary big">▶  Start Claude</button>
+            </div>
+          </div>
+          <aside id="sshpanel" hidden>
+            <div class="pane-head">
+          <span>SSH · <span id="ssh-ws"></span></span>
+          <button id="ssh-close" title="Hide (Esc) — the shell keeps running">✕</button>
+        </div>
+            <div id="sshbody"><div id="sshterm"></div></div>
+            <div id="ssh-note" class="muted pad" hidden></div>
+          </aside>
+          <div id="fileview" hidden>
+            <div id="fileview-head" class="muted"></div>
+            <pre><code id="fileview-code" class="hljs"></code></pre>
+          </div>
+        </div>
+        <div id="term-status" class="muted" hidden></div>
+      </main>
+
+      <aside id="rail">
+        <button class="rail-btn" data-action="checkpoint" title="Save a handoff to memory, then restart with fresh context">
+          <span class="ico">⚑</span><span class="cap">checkpoint</span>
+        </button>
+        <button class="rail-btn" data-action="restart" title="Restart the Claude session (context lost)">
+          <span class="ico">⟳</span><span class="cap">restart</span>
+        </button>
+        <button class="rail-btn" id="rail-power" data-action="stop" title="Stop the Claude session">
+          <span class="ico">■</span><span class="cap">stop</span>
+        </button>
+        <div class="rail-sep"></div>
+        <button class="rail-btn" data-action="ssh" title="Open a shell on the server">
+          <span class="ico">&gt;_</span><span class="cap">ssh</span>
+        </button>
+        <button class="rail-btn" data-action="settings" title="Settings">
+          <span class="ico">⚙</span><span class="cap">settings</span>
+        </button>
+      </aside>
+
+    </div>
+  </div>
+
+  <div id="confirm" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <span id="cf-title"></span>
+        <button id="cf-x" title="Cancel (Esc)">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="cf-body" class="cf-body"></div>
+        <div id="cf-type" hidden>
+          <label for="cf-input">Type <b><span id="cf-word"></span></b> to confirm</label>
+          <input id="cf-input" type="text" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button id="cf-cancel">Cancel</button>
+        <button id="cf-ok" class="primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <span>Settings</span>
+        <button id="set-close" title="Close (Esc)">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>Workspaces</label>
+        <div class="hint danger-hint">
+          Deleting a workspace runs <code>userdel -r</code> on the server: the user and
+          its entire home — <b>every file in it</b> — are gone. Nothing undoes this.
+        </div>
+        <div id="set-workspaces" class="adminlist"></div>
+
+        <label>Servers</label>
+        <div class="hint">
+          Removing a server only makes Forge forget it. The machine is untouched and its
+          workspaces keep running; <code>forge host add</code> brings it back.
+        </div>
+        <div id="set-hosts" class="adminlist"></div>
+
+        <label for="set-port">UI port</label>
+        <div class="row">
+          <input id="set-port" type="number" min="1" max="65535" inputmode="numeric">
+          <button id="set-port-save">Save</button>
+        </div>
+        <div class="hint">
+          Loopback only — nothing off this machine can reach it. A change needs a restart:
+          <code>forge ui stop &amp;&amp; forge ui</code>
+        </div>
+
+        <div id="set-msg" class="hint" hidden></div>
+        <div id="set-error" class="err" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <button id="set-done" class="primary">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="wizard" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <span>New workspace</span>
+        <button id="wiz-close" title="Close (Esc)">✕</button>
+      </div>
+      <div class="modal-body">
+        <label for="wiz-name">Workspace name</label>
+        <input id="wiz-name" type="text" autocomplete="off" spellcheck="false"
+               placeholder="e.g. marbai-02">
+        <div class="hint">Letters, digits, dash or underscore. Becomes the Linux user on the server.</div>
+
+        <label for="wiz-host">Server</label>
+        <div class="row">
+          <select id="wiz-host"></select>
+          <button id="wiz-addhost" title="Register a new server">+</button>
+        </div>
+
+        <div id="wiz-newhost" hidden>
+          <label for="wiz-target">SSH target</label>
+          <input id="wiz-target" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="root@1.2.3.4">
+          <label for="wiz-alias">Alias</label>
+          <input id="wiz-alias" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="e.g. remote-dev-02">
+          <label class="cb"><input type="checkbox" id="wiz-firewall" checked> Lock firewall to SSH-only</label>
+          <label class="cb"><input type="checkbox" id="wiz-harden" checked> Disable SSH password auth</label>
+          <div class="hint">
+            Create will provision this server first — git, tmux, docker, gh, and a git
+            identity whose public key it prints below (add it to GitHub). Takes a few
+            minutes; you'll see it run.
+          </div>
+        </div>
+
+        <pre id="wiz-log" hidden></pre>
+        <div id="wiz-error" class="err" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <button id="wiz-cancel">Cancel</button>
+        <button id="wiz-create" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/assets/vendor/xterm.min.js"></script>
+  <script src="/assets/vendor/addon-fit.min.js"></script>
+  <script src="/assets/vendor/highlight.min.js"></script>
+  <script src="/assets/vendor/fileicons.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
