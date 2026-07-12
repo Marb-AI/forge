@@ -520,8 +520,12 @@ chmod 0755 /usr/local/bin/forge-docker-prune
 cat > /etc/systemd/system/forge-docker-prune.service <<'UNIT'
 [Unit]
 Description=Forge: reclaim Docker disk (dangling images and build cache)
+# After, but deliberately NOT Requires. Requires would fail the unit outright on a
+# host where Docker was removed or disabled — leaving a timer that is permanently
+# red — and it would also *start* Docker at 03:00 on a host where someone had
+# stopped it on purpose. The script already exits cleanly when Docker is absent,
+# which is the behaviour we want: nothing to clean, so nothing happens.
 After=docker.service
-Requires=docker.service
 
 [Service]
 Type=oneshot
