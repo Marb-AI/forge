@@ -4,10 +4,23 @@
 // binaries from drifting apart.
 package agentproto
 
-// Status values for a workspace's Claude session.
+// Status values for a workspace's Claude session — the whole vocabulary, in one
+// place, because the browser UI switches on these strings too and a rename that
+// only happened here would silently mislabel every workspace.
+//
+// The agent emits the first two: it can only speak for workspaces the host has.
+// The client adds the last two, which describe the gap between what its config
+// claims and what the host really has.
 const (
 	StatusRunning = "running"
 	StatusStopped = "stopped"
+
+	// StatusMissing: our config records the workspace; the host says it doesn't
+	// have it. Deleted from another machine, most likely. Reporting it as "stopped"
+	// would be a lie you could act on — there is nothing left to start.
+	StatusMissing = "missing"
+	// StatusUnreachable: we could not ask the host, so we do not know.
+	StatusUnreachable = "unreachable"
 )
 
 // Workspace is the agent's view of a single workspace.

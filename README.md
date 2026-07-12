@@ -198,7 +198,8 @@ Hosts
 Workspaces
   forge workspace create <name> <host-alias>
   forge workspace delete <name>
-  forge workspace list                            NAME  HOST  STATUS
+  forge workspace list                            NAME  HOST  CLAUDE  (your workspaces; the
+                                                  status is the Claude session's)
 
   forge workspace <name> ssh [--no-agent]         shell as the workspace user (agent forwarded by default)
   forge workspace <name> claude                   open the Claude session (attach-or-create)

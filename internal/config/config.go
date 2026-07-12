@@ -30,9 +30,15 @@ type Host struct {
 type Config struct {
 	Hosts map[string]*Host            `json:"hosts"`
 	Ports map[string]map[string][]int `json:"forwards"`
-	// Workspaces maps a workspace name to the host alias it lives on. This is
-	// client-side convenience so `workspace <name> ssh` etc. need no host arg;
-	// the server remains the source of truth for what actually exists.
+	// Workspaces maps a workspace name to the host alias it lives on — and it is
+	// the record of which workspaces are OURS.
+	//
+	// The host's own list is every directory under /home/workspaces, including ones
+	// Forge never created: a colleague's, or one made by hand. Those are not ours to
+	// show or to touch, and every command here refuses them anyway ("not created by
+	// this client"). So the list of workspaces comes from here; the host is asked
+	// only for what this file cannot know — whether a Claude session is running in
+	// one.
 	Workspaces map[string]string `json:"workspaces"`
 	// UIPort is the localhost port the browser UI (`forge ui`) binds to. Zero
 	// means "unset" — callers fall back to DefaultUIPort.
