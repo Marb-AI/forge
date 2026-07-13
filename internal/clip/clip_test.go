@@ -3,6 +3,7 @@ package clip
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -152,3 +153,62 @@ func TestFilterRefusesAnOversizedPayload(t *testing.T) {
 		t.Errorf("an oversized payload must not be buffered, still holding %d bytes", len(f.pending))
 	}
 }
+
+// The only shape an over-the-cap payload can actually have: too big to arrive in
+// one read. The cap must not lose track of the sequence between reads — decide
+// once, then keep forwarding until it ends. Get this wrong and the tail of the
+// base64 (and its BEL) is printed onto the user's screen as if it were output.
+func TestFilterDoesNotLeakAnOversizedPayloadSplitAcrossWrites(t *testing.T) {
+	var out bytes.Buffer
+	f, copied := newTestFilter(&out, false)
+
+	head := "\x1b]52;c;" + strings.Repeat("A", maxPayload+10)
+	tail := strings.Repeat("B", 64) + "\x07"
+	if _, err := f.Write([]byte(head)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(tail + "prompt$ ")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*copied) != 0 {
+		t.Errorf("an oversized payload must not be copied")
+	}
+	// Everything is forwarded as the escape sequence it is — a terminal that
+	// handles OSC 52 sees a well-formed sequence, and one that does not discards
+	// it. What must never happen is the payload arriving as ordinary output.
+	want := head + tail + "prompt$ "
+	if got := out.String(); got != want {
+		t.Errorf("stream mangled: got %d bytes, want %d (the sequence forwarded whole, then the prompt)",
+			len(got), len(want))
+	}
+	if strings.Contains(out.String()[len(head):], "\x07prompt$ ") != true {
+		t.Errorf("the sequence must end at its terminator, with the prompt after it")
+	}
+}
+
+// A dead terminal must be reported, not papered over. Swallowing the error and
+// buffering for a writer that will never take another byte grows `pending`
+// forever and tells the copier everything is fine.
+func TestFilterReportsWriteErrors(t *testing.T) {
+	boom := errors.New("terminal is gone")
+	f := NewFilter(errWriter{boom})
+	f.copy = func(string) error { return errNoClipboard } // force the forward path
+
+	if _, err := f.Write([]byte(osc52("hi"))); !errors.Is(err, boom) {
+		t.Errorf("Write error = %v, want %v", err, boom)
+	}
+	if _, err := f.Write([]byte("plain output")); !errors.Is(err, boom) {
+		t.Errorf("Write error on ordinary output = %v, want %v", err, boom)
+	}
+	if len(f.pending) != 0 {
+		t.Errorf("a failed write must not stash %d bytes for a writer that is gone", len(f.pending))
+	}
+}
+
+type errWriter struct{ err error }
+
+func (w errWriter) Write(p []byte) (int, error) { return 0, w.err }
