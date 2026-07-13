@@ -513,8 +513,13 @@ func findPublicKey() ([]byte, error) {
 func runInteractive(args []string) int {
 	f := clip.NewFilter(os.Stdout)
 	err := sshx.RunInteractiveTo(f, args...)
-	// Emit anything held back mid-escape when the session ended.
-	_ = f.Flush()
+	// Emit anything held back mid-escape when the session ended. A session that
+	// ended badly has already said so — but if ssh was happy and the flush is not,
+	// then the last thing the session drew never reached the screen, and only this
+	// return value is left to say so.
+	if ferr := f.Flush(); ferr != nil && err == nil {
+		return fail("terminal output: %v", ferr)
+	}
 	if err != nil {
 		// Interactive exit codes (e.g. Ctrl-C) are normal; don't shout.
 		return 1
