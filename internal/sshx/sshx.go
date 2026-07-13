@@ -107,9 +107,21 @@ func (t Target) LocalForwardArgs(localPort, remotePort int) []string {
 // RunInteractive execs ssh wired to the current terminal and blocks until it
 // exits. Used for shells, Claude attach and one-off `expose`.
 func RunInteractive(args ...string) error {
+	return RunInteractiveTo(os.Stdout, args...)
+}
+
+// RunInteractiveTo is RunInteractive with the session's output going through out
+// — so Forge can watch it for the OSC 52 clipboard escape (see internal/clip)
+// rather than leaving the copy to whichever terminal the user happens to run.
+//
+// stdin stays the real terminal, deliberately. ssh puts *that* fd into raw mode
+// and reads the window size from it, so leaving it alone means we inherit both
+// for free: no raw-mode handling of our own, no SIGWINCH plumbing, no pty in the
+// middle of an interactive Claude session. Only the output is ours to read.
+func RunInteractiveTo(out io.Writer, args ...string) error {
 	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }

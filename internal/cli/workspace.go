@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
+	"github.com/Marb-AI/forge/internal/clip"
 	"github.com/Marb-AI/forge/internal/config"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
@@ -504,8 +505,22 @@ func findPublicKey() ([]byte, error) {
 	return nil, fmt.Errorf("no SSH public key found in ~/.ssh (set FORGE_PUBKEY to override)")
 }
 
+// runInteractive runs an interactive ssh session with its output passing through
+// the clipboard filter, so text copied inside the session (Claude's "press c" on
+// the login URL, a tmux yank) reaches the clipboard on *this* machine whatever
+// terminal it is being run in — Terminal.app has never supported OSC 52, and Warp
+// now denies it by default. See internal/clip.
 func runInteractive(args []string) int {
-	if err := sshx.RunInteractive(args...); err != nil {
+	f := clip.NewFilter(os.Stdout)
+	err := sshx.RunInteractiveTo(f, args...)
+	// Emit anything held back mid-escape when the session ended. A session that
+	// ended badly has already said so — but if ssh was happy and the flush is not,
+	// then the last thing the session drew never reached the screen, and only this
+	// return value is left to say so.
+	if ferr := f.Flush(); ferr != nil && err == nil {
+		return fail("terminal output: %v", ferr)
+	}
+	if err != nil {
 		// Interactive exit codes (e.g. Ctrl-C) are normal; don't shout.
 		return 1
 	}

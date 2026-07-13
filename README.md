@@ -236,10 +236,27 @@ carry on writing the memory index. Restarting on the token alone truncates exact
 the handoff the checkpoint exists to preserve.
 
 **Copying text out of a session.** The workspace's tmux has `mouse on`, so
-dragging selects and copies straight to your local clipboard (over SSH, via the
-OSC 52 escape), and the wheel scrolls back through history. The trade-off is that
-your terminal's own selection now needs **Shift** (or **Option** in some
-terminals) held down, since a plain drag belongs to tmux.
+dragging selects and copies straight to your local clipboard, and the wheel
+scrolls back through history. The trade-off is that your terminal's own selection
+now needs **Shift** (or **Option** in some terminals) held down, since a plain
+drag belongs to tmux.
+
+The copy itself is Forge's job, not your terminal's. A workspace is a headless
+Linux box — no X, no Wayland, no `xclip` — so nothing there has a clipboard: a
+session that copies (a tmux yank, Claude's **press `c`** on a login URL) can only
+hand the text to the terminal as an OSC 52 escape and hope. Terminals are a coin
+flip on that: Terminal.app has never implemented OSC 52 and has no setting to
+turn on, Warp now denies it by default ([CVE-2026-48725][osc52-cve] — a remote
+host could silently read or overwrite your clipboard), iTerm2 ships it off, while
+Ghostty, WezTerm and kitty allow it. So Forge reads its own SSH output, catches
+the escape itself, and puts the text on your clipboard with the local OS tool.
+Any terminal, same behaviour — and the browser UI does the same with
+`navigator.clipboard`.
+
+Clipboard **reads** (a session asking what you last copied) are refused, not
+answered. Claude runs in these sessions with permission prompts off.
+
+[osc52-cve]: https://github.com/warpdotdev/warp/security/advisories/GHSA-wgqj-4c26-7c4g
 
 ---
 
