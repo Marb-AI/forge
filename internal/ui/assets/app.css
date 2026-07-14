@@ -88,9 +88,17 @@ button:hover { background: var(--bg-3); }
   border: 1px solid transparent;
   border-radius: 5px;
   white-space: nowrap;
+  /* Safari won't start a drag on a <button> from draggable="true" alone; without
+     this you get a drag cursor and no reorder. Chrome and Firefox ignore it. */
+  -webkit-user-drag: element;
 }
 .tab:hover { background: var(--bg-3); }
 .tab.active { color: var(--fg); background: var(--tab-active); border-color: var(--border); }
+/* The tab being dragged: a hole the others close around, while the cursor carries
+   the drag image. Hover has to be muted or the gap lights up as you pass over it. */
+.tab.dragging { opacity: 0.35; }
+.tab.dragging:hover { background: transparent; }
+.tab.dragging.active:hover { background: var(--tab-active); }
 .tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-dim); }
 .tab.running .dot { background: #3ecf6a; }
 #add-tab { width: 24px; height: 24px; font-size: 15px; line-height: 1; }
