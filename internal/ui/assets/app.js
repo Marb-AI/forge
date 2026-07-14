@@ -200,14 +200,18 @@ function savedOrder() {
 // Sort by the saved order; anything the saved order has never seen — a workspace
 // just created, or one created on another machine — keeps its server position at
 // the end, so new tabs appear rather than silently landing in the middle.
+// Every workspace gets a real number for a rank — a saved one its saved position,
+// an unseen one its server position pushed past the end of the saved list. Two
+// unknowns then compare by where the server put them, which is the alphabetical
+// order we wanted, rather than by whatever a comparator returning Infinity minus
+// Infinity happens to mean to the engine.
 function orderWorkspaces(list) {
   const order = savedOrder();
   const rank = new Map(order.map((n, i) => [n, i]));
-  return list.slice().sort((a, b) => {
-    const ra = rank.has(a.name) ? rank.get(a.name) : Infinity;
-    const rb = rank.has(b.name) ? rank.get(b.name) : Infinity;
-    return ra - rb;
-  });
+  return list
+    .map((ws, i) => ({ ws, r: rank.has(ws.name) ? rank.get(ws.name) : order.length + i }))
+    .sort((a, b) => a.r - b.r)
+    .map((x) => x.ws);
 }
 
 // Written from the tab strip's own DOM after a drag, so what you see is what gets
