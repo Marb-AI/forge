@@ -74,7 +74,7 @@ async function loadWorkspaces() {
     fetch("/api/workspaces").then((r) => (r.ok ? r.json() : [])).catch(() => []),
     fetch("/api/hosts").then((r) => (r.ok ? r.json() : [])).catch(() => []),
   ]);
-  state.workspaces = ws;
+  state.workspaces = orderWorkspaces(ws);
   state.hosts = hosts;
 
   renderTabs();
@@ -181,6 +181,84 @@ function sessionLabel(status) {
 // Only a workspace the host confirmed can be started, attached to or browsed.
 function isUsable(status) { return status === "running" || status === "stopped"; }
 
+// ---- tab order -------------------------------------------------------------
+// The server lists workspaces alphabetically, which is a fine default and a poor
+// permanent arrangement: the tabs you keep are the ones you work in, not the ones
+// whose names sort first. So the order you drag them into is yours, and it lives
+// here in the browser — there is nothing about "the tabs I like left-to-right"
+// that belongs on the host, and every machine you open the UI from gets to
+// disagree about it.
+const ORDER_KEY = "forge-tab-order";
+
+function savedOrder() {
+  try {
+    const v = JSON.parse(localStorage.getItem(ORDER_KEY) || "[]");
+    return Array.isArray(v) ? v.filter((n) => typeof n === "string") : [];
+  } catch { return []; }
+}
+
+// Sort by the saved order; anything the saved order has never seen — a workspace
+// just created, or one created on another machine — keeps its server position at
+// the end, so new tabs appear rather than silently landing in the middle.
+// Every workspace gets a real number for a rank — a saved one its saved position,
+// an unseen one its server position pushed past the end of the saved list. Two
+// unknowns then compare by where the server put them, which is the alphabetical
+// order we wanted, rather than by whatever a comparator returning Infinity minus
+// Infinity happens to mean to the engine.
+function orderWorkspaces(list) {
+  const order = savedOrder();
+  const rank = new Map(order.map((n, i) => [n, i]));
+  return list
+    .map((ws, i) => ({ ws, r: rank.has(ws.name) ? rank.get(ws.name) : order.length + i }))
+    .sort((a, b) => a.r - b.r)
+    .map((x) => x.ws);
+}
+
+// Written from the tab strip's own DOM after a drag, so what you see is what gets
+// stored. Deleted workspaces fall out of the list here rather than accumulating.
+function saveOrder() {
+  const names = [...document.querySelectorAll("#tabs .tab")].map((t) => t.dataset.name);
+  state.workspaces = orderBy(names, state.workspaces);
+  localStorage.setItem(ORDER_KEY, JSON.stringify(names));
+}
+
+function orderBy(names, list) {
+  const byName = new Map(list.map((w) => [w.name, w]));
+  return names.map((n) => byName.get(n)).filter(Boolean);
+}
+
+// The tab the pointer is currently to the left of: the first one whose horizontal
+// midpoint we haven't passed yet. Null means "past them all" — append.
+function tabBefore(tabs, x) {
+  for (const t of tabs.querySelectorAll(".tab:not(.dragging)")) {
+    const r = t.getBoundingClientRect();
+    if (x < r.left + r.width / 2) return t;
+  }
+  return null;
+}
+
+// Drag to reorder. The dragged tab moves through the DOM as you pass each
+// neighbour's midpoint, so the strip rearranges under the cursor and the drop is
+// just where you let go — no drop indicator to interpret, no jump at the end.
+function initTabDrag() {
+  const tabs = document.getElementById("tabs");
+
+  tabs.addEventListener("dragover", (e) => {
+    const dragging = tabs.querySelector(".tab.dragging");
+    if (!dragging) return;
+    e.preventDefault(); // without this the drop is refused and the drag "snaps back"
+    e.dataTransfer.dropEffect = "move";
+    const before = tabBefore(tabs, e.clientX);
+    if (before === dragging) return;
+    if (before) tabs.insertBefore(dragging, before);
+    else tabs.appendChild(dragging);
+  });
+
+  // Let go anywhere — over the strip, or off it. The tabs are already sitting where
+  // the drag left them, so both paths commit the same order; dragend always fires.
+  tabs.addEventListener("drop", (e) => e.preventDefault());
+}
+
 function renderTabs() {
   const tabs = document.getElementById("tabs");
   tabs.innerHTML = "";
@@ -197,6 +275,22 @@ function renderTabs() {
     tab.setAttribute("role", "tab");
     tab.setAttribute("aria-selected", active ? "true" : "false");
     tab.tabIndex = active ? 0 : -1;
+
+    // Reordering: the name is what the order is stored by, and dataTransfer must
+    // carry something or Firefox won't start the drag at all.
+    tab.dataset.name = ws.name;
+    tab.draggable = true;
+    tab.addEventListener("dragstart", (e) => {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", ws.name);
+      // Deferred: setting it now would be captured in the drag image, and the tab
+      // you're dragging would be the one that looks faded out from under itself.
+      requestAnimationFrame(() => tab.classList.add("dragging"));
+    });
+    tab.addEventListener("dragend", () => {
+      tab.classList.remove("dragging");
+      saveOrder();
+    });
 
     // Built as nodes, like every other list here — no innerHTML, so no hand-rolled
     // escaping to get wrong later.
@@ -225,6 +319,23 @@ document.getElementById("tabs").addEventListener("keydown", (e) => {
   if (names.length < 2) return;
 
   const i = names.indexOf(state.active);
+
+  // Alt+Arrow moves the tab instead of moving between tabs — dragging is the
+  // obvious way to reorder, but it can't be the only way for anyone who isn't
+  // using a mouse. Doesn't wrap: a tab at the end has nowhere further to go, and
+  // teleporting it to the other side is never what was meant.
+  if (e.altKey && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+    const j = e.key === "ArrowRight" ? i + 1 : i - 1;
+    if (i < 0 || j < 0 || j >= names.length) return;
+    e.preventDefault();
+    names.splice(j, 0, names.splice(i, 1)[0]);
+    state.workspaces = orderBy(names, state.workspaces);
+    localStorage.setItem(ORDER_KEY, JSON.stringify(names));
+    renderTabs();
+    document.querySelector("#tabs .tab.active")?.focus();
+    return;
+  }
+
   let next = null;
   switch (e.key) {
     case "ArrowRight": next = names[(i + 1) % names.length]; break;
@@ -1374,6 +1485,7 @@ function hideFileView() {
 
 // ---- boot ------------------------------------------------------------------
 initTheme();
+initTabDrag();
 state.showHidden = localStorage.getItem("forge-show-hidden") === "1";
 applyShowHidden();
 loadWorkspaces();
