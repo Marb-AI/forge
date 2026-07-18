@@ -195,7 +195,8 @@ func runUI(_ []string) int {
 		return fail("%v", err)
 	}
 	deps := ui.Deps{
-		ListWorkspaces: listWorkspacesInfo,
+		ListWorkspaces:    listWorkspacesInfo,
+		WorkspaceActivity: workspaceActivityInfo,
 		HostFor: func(name string) *config.Host {
 			// Reload each time so workspaces added while the daemon runs resolve.
 			c, err := config.Load()
@@ -251,6 +252,20 @@ func listWorkspacesInfo() ([]ui.WorkspaceInfo, error) {
 	out := make([]ui.WorkspaceInfo, 0, len(list))
 	for _, ws := range list {
 		out = append(out, ui.WorkspaceInfo{Name: ws.Name, Host: ws.Host, Status: ws.Status})
+	}
+	return out, nil
+}
+
+// workspaceActivityInfo adapts the agent's activity map into the ui package's own
+// type, so ui need not import agentproto (same split as listWorkspacesInfo).
+func workspaceActivityInfo() (map[string]ui.Activity, error) {
+	act, err := workspacesActivity()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]ui.Activity, len(act))
+	for name, a := range act {
+		out[name] = ui.Activity{State: a.State, TS: a.TS}
 	}
 	return out, nil
 }

@@ -22,6 +22,7 @@ const state = {
   activeFile: null, // path shown in the viewer, or null (terminal visible)
   showHidden: false, // show dotfiles at the tree root
   stopped: false, // the active workspace has no Claude session running
+  activity: {},   // ws name -> {state, ts}: Claude's attention state, polled
 };
 
 // ---- theme ----------------------------------------------------------------
@@ -311,6 +312,17 @@ function renderTabs() {
     label.textContent = ws.name;
     tab.append(dot, label);
 
+    // A workspace where Claude is waiting for you gets a mark you can spot from
+    // another tab. It clears the moment you look (see wantsYou / ackActivity).
+    if (wantsYou(ws.name)) {
+      tab.classList.add("attn");
+      const mark = document.createElement("span");
+      mark.className = "attn-mark";
+      mark.textContent = "✳";
+      mark.title = "Claude is waiting for you";
+      tab.insertBefore(mark, label);
+    }
+
     // Clicking a tab hands focus to the tab button, and a click on the tab you are
     // already on returns early from selectWs — so nothing takes the focus back and
     // your next keystrokes go to a <button> instead of Claude. Give the terminal
@@ -321,7 +333,66 @@ function renderTabs() {
     });
     tabs.appendChild(tab);
   }
+  attnSig = attnSignature();
 }
+
+// ---- Claude activity: the idle indicator -----------------------------------
+// The tabs can tell you Claude is waiting in a workspace you aren't looking at.
+// The state comes from Claude Code hooks on the host (Stop -> idle, Notification
+// -> waiting, UserPromptSubmit -> busy), recorded per workspace and polled here.
+// "Seen" is remembered per workspace by the timestamp of the episode you looked
+// at, so a mark clears when you view the tab and lights again on the next Stop —
+// exactly like a notification, and surviving a reload.
+const ACK_KEY = "forge-activity-ack";
+function activityAcks() {
+  try {
+    const v = JSON.parse(localStorage.getItem(ACK_KEY) || "{}");
+    return v && typeof v === "object" ? v : {};
+  } catch { return {}; }
+}
+function ackActivity(ws) {
+  const a = state.activity[ws];
+  if (!a) return;
+  const acks = activityAcks();
+  if (acks[ws] === a.ts) return;
+  acks[ws] = a.ts;
+  localStorage.setItem(ACK_KEY, JSON.stringify(acks));
+}
+// Claude wants you here: it finished (idle) or needs a decision (waiting), and
+// this is a newer moment than the one you last acknowledged. The active tab never
+// flags — looking at it IS acknowledging it.
+function wantsYou(ws) {
+  if (ws === state.active) return false;
+  const a = state.activity[ws];
+  if (!a || (a.state !== "idle" && a.state !== "waiting")) return false;
+  return a.ts > (activityAcks()[ws] || 0);
+}
+function attnSignature() {
+  return state.workspaces.filter((w) => wantsYou(w.name)).map((w) => w.name).join("|");
+}
+
+let attnSig = "";
+async function pollActivity() {
+  // A hidden tab SSHing every few seconds is the background churn we're avoiding;
+  // the browser throttles hidden timers anyway, so make the intent explicit.
+  if (document.visibilityState !== "visible" || !state.workspaces.length) return;
+  let act;
+  try {
+    act = await fetch("/api/activity").then((r) => (r.ok ? r.json() : null));
+  } catch { return; }
+  if (!act) return;
+  state.activity = act;
+  if (state.active) ackActivity(state.active); // you're looking at it
+  // Only repaint the tabs when the set of flagged ones actually changed, and
+  // never mid-drag — a reorder in progress owns the strip.
+  if (attnSignature() !== attnSig && !document.querySelector(".tab.dragging")) {
+    renderTabs();
+  }
+}
+setInterval(pollActivity, 4000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") pollActivity();
+});
 
 // Arrow keys move between workspaces, Home/End jump to the ends — the keyboard
 // contract a tablist promises.
@@ -365,6 +436,7 @@ function selectWs(name) {
   state.active = name;
   // Remember it so a refresh comes back here (see initialWorkspace).
   localStorage.setItem(ACTIVE_KEY, name);
+  ackActivity(name); // opening a workspace clears its "waiting for you" mark
   renderTabs();
   resetFiles();
   // The ssh shell belongs to one workspace, so switching tabs drops it rather
@@ -1501,4 +1573,4 @@ initTheme();
 initTabDrag();
 state.showHidden = localStorage.getItem("forge-show-hidden") === "1";
 applyShowHidden();
-loadWorkspaces();
+loadWorkspaces().then(pollActivity);

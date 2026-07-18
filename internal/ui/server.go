@@ -45,11 +45,22 @@ type WorkspaceInfo struct {
 	Status string `json:"status"`
 }
 
+// Activity is a workspace's Claude attention state (state is "busy"/"idle"/
+// "waiting"), with the unix second the state was set — the cli package fills it
+// in from the agent (the ui package must not import agentproto).
+type Activity struct {
+	State string `json:"state"`
+	TS    int64  `json:"ts"`
+}
+
 // Deps are the Forge operations the UI needs, injected by the cli package so the
 // ui package stays free of the agent/command machinery (and of import cycles).
 type Deps struct {
 	// ListWorkspaces returns the current workspaces across all hosts.
 	ListWorkspaces func() ([]WorkspaceInfo, error)
+	// WorkspaceActivity returns each workspace's Claude attention state, keyed by
+	// name. Polled by the UI to light up tabs where Claude is waiting for you.
+	WorkspaceActivity func() (map[string]Activity, error)
 	// HostFor resolves a workspace name to the host it lives on, or nil.
 	HostFor func(name string) *config.Host
 	// Checkpoint saves a handoff to memory and restarts the session from it. It
@@ -222,6 +233,7 @@ func (s *server) handler() http.Handler {
 	assets := http.StripPrefix("/assets/", http.FileServer(http.FS(assetFS())))
 	mux.Handle("GET /assets/", noCache(assets))
 	mux.HandleFunc("GET /api/workspaces", s.handleWorkspaces)
+	mux.HandleFunc("GET /api/activity", s.handleActivity)
 	mux.HandleFunc("GET /api/term/{ws}/{kind}/stream", s.handleTermStream)
 	mux.HandleFunc("POST /api/term/{ws}/{kind}/input", s.handleTermInput)
 	mux.HandleFunc("POST /api/term/{ws}/{kind}/resize", s.handleTermResize)
@@ -310,6 +322,19 @@ func (s *server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 		list = []WorkspaceInfo{}
 	}
 	writeJSON(w, list)
+}
+
+// handleActivity returns each workspace's Claude attention state, keyed by name.
+// The UI polls this on a short interval; a host we can't reach just contributes
+// nothing, so a slow or down host dims its tabs rather than failing the request.
+func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	act := map[string]Activity{}
+	if s.deps.WorkspaceActivity != nil {
+		if a, err := s.deps.WorkspaceActivity(); err == nil && a != nil {
+			act = a
+		}
+	}
+	writeJSON(w, act)
 }
 
 // loopbackHost reports whether the request's Host header names the loopback
