@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 
@@ -239,20 +240,56 @@ func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+	// Coalesce the pty's output into at most one SSE event per tick. A generating
+	// Claude repaints its TUI many times a second, so the pty hands us a burst of
+	// small reads; sending each as its own base64 event means the browser parses
+	// and the network frames hundreds of tiny messages a second — which is exactly
+	// what stutters on a slow link. Gathering a tick's worth into one event
+	// collapses that without dropping or reordering a byte (we only ever join
+	// adjacent reads, and xterm already tolerates escape sequences split across
+	// writes). The window bounds how late a byte can be: keystroke echo can arrive
+	// up to one tick later, invisible next to the ssh round-trip it already waits
+	// on. A burst that fills the buffer flushes early, so a flood can't build a
+	// single enormous frame or stall behind the timer.
+	const (
+		flushInterval = 16 * time.Millisecond
+		maxCoalesce   = 64 * 1024
+	)
+	var pending []byte
+	flush := func() bool {
+		if len(pending) == 0 {
+			return true
+		}
+		enc := base64.StdEncoding.EncodeToString(pending)
+		pending = pending[:0]
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", enc); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-ticker.C:
+			if !flush() {
+				return
+			}
 		case c := <-chunks:
 			if len(c.data) > 0 {
-				enc := base64.StdEncoding.EncodeToString(c.data)
-				if _, err := fmt.Fprintf(w, "data: %s\n\n", enc); err != nil {
+				pending = append(pending, c.data...)
+				if len(pending) >= maxCoalesce && !flush() {
 					return
 				}
-				flusher.Flush()
 			}
 			if c.err != nil {
-				// ssh/tmux ended (session stopped, disconnect). Tell the browser.
+				// ssh/tmux ended (session stopped, disconnect). Flush whatever is
+				// buffered first, so the last line before the end isn't swallowed.
+				flush()
 				_, _ = io.WriteString(w, "event: end\ndata: \n\n")
 				flusher.Flush()
 				return
