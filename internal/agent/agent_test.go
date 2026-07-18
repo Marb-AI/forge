@@ -261,9 +261,23 @@ func TestWriteClaudeConfigInstallsActivityHooks(t *testing.T) {
 			t.Fatalf("hooks.%s missing: %v", ev, hooks)
 		}
 	}
-	cmd := firstHookCommand(t, hooks, "Stop")
-	if !strings.Contains(cmd, "forge-activity") || !strings.Contains(cmd, agentproto.ActivityIdle) {
-		t.Errorf("Stop hook doesn't record idle to the activity file: %q", cmd)
+	// Stop must write idle to the activity file — but gated: it inspects
+	// background_tasks and reports busy instead when work is still running, so a
+	// parked-mid-orchestration turn doesn't light the tab up.
+	stop := firstHookCommand(t, hooks, "Stop")
+	for _, want := range []string{"forge-activity", agentproto.ActivityIdle, "background_tasks", agentproto.ActivityBusy} {
+		if !strings.Contains(stop, want) {
+			t.Errorf("Stop hook missing %q: %q", want, stop)
+		}
+	}
+	// Notification carries the same gate, reporting waiting (not idle) when free.
+	notif := firstHookCommand(t, hooks, "Notification")
+	if !strings.Contains(notif, "background_tasks") || !strings.Contains(notif, agentproto.ActivityWaiting) {
+		t.Errorf("Notification hook not gated / not waiting: %q", notif)
+	}
+	// UserPromptSubmit is unconditional busy — no need to inspect anything.
+	if ups := firstHookCommand(t, hooks, "UserPromptSubmit"); !strings.Contains(ups, agentproto.ActivityBusy) {
+		t.Errorf("UserPromptSubmit hook doesn't record busy: %q", ups)
 	}
 }
 
@@ -293,11 +307,16 @@ func TestActivityHooksMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	seeded, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if !strings.Contains(string(seeded), "forge-activity") {
-		t.Errorf("seeded settings.json lacks the marker: %s", seeded)
+	// ensureActivityHooks re-seeds unless it finds "background_tasks" — the marker
+	// for the current, gated hooks. A config carrying only the older ungated hooks
+	// (which mention forge-activity but not background_tasks) must NOT match, so it
+	// gets upgraded rather than left with the false-positive version.
+	if !strings.Contains(string(seeded), "background_tasks") {
+		t.Errorf("seeded settings.json lacks the current-version marker: %s", seeded)
 	}
-	if strings.Contains(`{"permissions":{"defaultMode":"bypassPermissions"}}`, "forge-activity") {
-		t.Error("a config without our hooks must not match the marker")
+	oldUngated := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"printf idle > $HOME/.claude/forge-activity"}]}]}}`
+	if strings.Contains(oldUngated, "background_tasks") {
+		t.Error("the older ungated hooks must not match the current marker (they'd never upgrade)")
 	}
 }
 

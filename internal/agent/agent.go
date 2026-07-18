@@ -372,9 +372,11 @@ func parseActivity(data []byte) (agentproto.Activity, bool) {
 // poll must not fail because one workspace's config is odd or unreadable.
 func ensureActivityHooks(name string) {
 	settings := filepath.Join(baseDir, name, ".claude", "settings.json")
-	// The hook commands all mention the activity file; its bare name is a stable
-	// marker (unaffected by JSON quoting) that the hooks are already installed.
-	if data, err := os.ReadFile(settings); err == nil && strings.Contains(string(data), "forge-activity") {
+	// "background_tasks" is the marker for the CURRENT hooks (the gated Stop/
+	// Notification commands mention it). Checking for it rather than the older
+	// "forge-activity" means a workspace still carrying the first, ungated version
+	// gets upgraded on the next poll instead of being left with false-positive hooks.
+	if data, err := os.ReadFile(settings); err == nil && strings.Contains(string(data), "background_tasks") {
 		return
 	}
 	if err := mergeJSON(settings, setActivityHooks); err != nil {
@@ -387,13 +389,30 @@ func ensureActivityHooks(name string) {
 // activityFile is where the hooks record state, under the workspace's ~/.claude.
 // $HOME is set for hook commands (Claude runs them through a shell) and resolves
 // to the workspace user's home — the same path readActivity reads.
-const activityFile = `"$HOME/.claude/forge-activity"`
+// busyHookCmd fires on UserPromptSubmit: you just gave Claude work, so it's
+// unambiguously busy — no need to inspect anything.
+const busyHookCmd = `printf 'busy %s\n' "$(date +%s)" > "$HOME/.claude/forge-activity"`
 
-// setActivityHooks installs the three Claude Code hooks that report attention
-// state. UserPromptSubmit = you gave Claude work (busy); Stop = Claude finished
-// and is waiting for you (idle); Notification = Claude needs a decision (waiting).
-// Each stamps the state and the current second so the UI can dismiss a seen
-// episode and light up again on the next one.
+// gatedHookCmd fires on Stop/Notification: the turn ended (or Claude notified),
+// but that is NOT the same as "waiting for you". If Claude left background work
+// running — a background shell or a background subagent — it will resume on its
+// own, so the tab must not light up. Claude Code hands the hook a background_tasks
+// list on stdin (each entry has a "status"); if anything there is still running we
+// report busy, otherwise the real end-state. This is what kills the false positive
+// during multi-agent orchestration, where Stop/Notification fire repeatedly while
+// agents are still churning.
+func gatedHookCmd(endState string) string {
+	return `python3 -c 'import sys,json,time,os
+try: d=json.loads(sys.stdin.read() or "{}")
+except Exception: d={}
+r=any((t or {}).get("status")=="running" for t in (d.get("background_tasks") or []))
+open(os.path.expanduser("~/.claude/forge-activity"),"w").write(("busy" if r else "` + endState + `")+" %d\n"%int(time.time()))'`
+}
+
+// setActivityHooks installs the Claude Code hooks that report attention state.
+// UserPromptSubmit → busy; Stop → idle (unless background work is running);
+// Notification → waiting (same gate). Each stamps the current second so the UI can
+// dismiss a seen episode and light up again on the next one.
 //
 // Forge's matcher is APPENDED to any hooks the user already has for that event,
 // never replacing them — a workspace user's own Stop hook keeps running. Re-seeding
@@ -401,10 +420,9 @@ const activityFile = `"$HOME/.claude/forge-activity"`
 // re-appended, so the list can't grow a duplicate each time.
 func setActivityHooks(m map[string]any) {
 	hooks := childMap(m, "hooks")
-	install := func(event, state string) {
-		cmd := fmt.Sprintf(`mkdir -p "$(dirname %[1]s)"; printf '%%s %%s\n' %[2]s "$(date +%%s)" > %[1]s`, activityFile, state)
+	install := func(event, command string) {
 		ours := map[string]any{
-			"hooks": []any{map[string]any{"type": "command", "command": cmd}},
+			"hooks": []any{map[string]any{"type": "command", "command": command}},
 		}
 		var kept []any
 		if existing, ok := hooks[event].([]any); ok {
@@ -416,9 +434,9 @@ func setActivityHooks(m map[string]any) {
 		}
 		hooks[event] = append(kept, ours)
 	}
-	install("UserPromptSubmit", agentproto.ActivityBusy)
-	install("Stop", agentproto.ActivityIdle)
-	install("Notification", agentproto.ActivityWaiting)
+	install("UserPromptSubmit", busyHookCmd)
+	install("Stop", gatedHookCmd(agentproto.ActivityIdle))
+	install("Notification", gatedHookCmd(agentproto.ActivityWaiting))
 }
 
 // isForgeActivityMatcher reports whether a hook matcher is one WE wrote — its
