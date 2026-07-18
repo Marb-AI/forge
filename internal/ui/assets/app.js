@@ -92,8 +92,19 @@ async function loadWorkspaces() {
     renderStage();
     return;
   }
-  if (!state.active) selectWs(state.workspaces[0].name);
+  if (!state.active) selectWs(initialWorkspace());
   else renderStage();
+}
+
+// Where to land on a fresh page load: the tab you left, if it is still here.
+// A refresh should drop you back where you were working, not at whichever
+// workspace happens to sort first. If the remembered one is gone — deleted, or
+// this is a first visit — fall back to the front of the list.
+const ACTIVE_KEY = "forge-active-tab";
+function initialWorkspace() {
+  const saved = localStorage.getItem(ACTIVE_KEY);
+  if (saved && state.workspaces.some((w) => w.name === saved)) return saved;
+  return state.workspaces[0].name;
 }
 
 
@@ -352,6 +363,8 @@ document.getElementById("tabs").addEventListener("keydown", (e) => {
 function selectWs(name) {
   if (state.active === name && state.claude) return;
   state.active = name;
+  // Remember it so a refresh comes back here (see initialWorkspace).
+  localStorage.setItem(ACTIVE_KEY, name);
   renderTabs();
   resetFiles();
   // The ssh shell belongs to one workspace, so switching tabs drops it rather
