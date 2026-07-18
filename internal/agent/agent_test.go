@@ -301,6 +301,47 @@ func TestActivityHooksMarker(t *testing.T) {
 	}
 }
 
+// The activity hooks must be ADDED to a user's existing hooks, not clobber them,
+// and re-seeding must not pile up duplicate forge matchers.
+func TestActivityHooksAppendAndDedupe(t *testing.T) {
+	m := map[string]any{}
+	// A user already has their own Stop hook.
+	userStop := map[string]any{
+		"hooks": []any{map[string]any{"type": "command", "command": "echo mine"}},
+	}
+	childMap(m, "hooks")["Stop"] = []any{userStop}
+
+	setActivityHooks(m)
+	stop := m["hooks"].(map[string]any)["Stop"].([]any)
+	if len(stop) != 2 {
+		t.Fatalf("Stop should keep the user's hook and add ours, got %d matchers: %v", len(stop), stop)
+	}
+	if !isForgeActivityMatcher(stop[1]) || isForgeActivityMatcher(stop[0]) {
+		t.Errorf("user's hook was clobbered or ours not appended: %v", stop)
+	}
+
+	// Round-trip through JSON (as mergeJSON does on re-seed) and seed again.
+	data, _ := json.Marshal(m)
+	var m2 map[string]any
+	if err := json.Unmarshal(data, &m2); err != nil {
+		t.Fatal(err)
+	}
+	setActivityHooks(m2)
+	stop2 := m2["hooks"].(map[string]any)["Stop"].([]any)
+	if len(stop2) != 2 {
+		t.Errorf("re-seeding must be idempotent (user + one forge), got %d: %v", len(stop2), stop2)
+	}
+	forge := 0
+	for _, e := range stop2 {
+		if isForgeActivityMatcher(e) {
+			forge++
+		}
+	}
+	if forge != 1 {
+		t.Errorf("expected exactly one forge matcher after re-seed, got %d", forge)
+	}
+}
+
 func TestParseActivity(t *testing.T) {
 	cases := []struct {
 		in    string

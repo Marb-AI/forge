@@ -34,6 +34,10 @@ func TestActivityEndpointReturnsMap(t *testing.T) {
 	if got["api"].State != "idle" || got["api"].TS != 1784386328 {
 		t.Errorf("activity not passed through: %+v", got)
 	}
+	// Polled endpoint: must forbid caching so marks can't go stale.
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
 }
 
 // A host we can't reach must dim tabs, not 500 the whole poll.

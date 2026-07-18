@@ -389,23 +389,60 @@ func ensureActivityHooks(name string) {
 // to the workspace user's home — the same path readActivity reads.
 const activityFile = `"$HOME/.claude/forge-activity"`
 
-// setActivityHooks writes the three Claude Code hooks that report attention state.
-// UserPromptSubmit = you gave Claude work (busy); Stop = Claude finished and is
-// waiting for you (idle); Notification = Claude needs a decision (waiting). Each
-// stamps the state and the current second so the UI can dismiss a seen episode
-// and light up again on the next one. Merged into any existing hooks rather than
-// replacing them.
+// setActivityHooks installs the three Claude Code hooks that report attention
+// state. UserPromptSubmit = you gave Claude work (busy); Stop = Claude finished
+// and is waiting for you (idle); Notification = Claude needs a decision (waiting).
+// Each stamps the state and the current second so the UI can dismiss a seen
+// episode and light up again on the next one.
+//
+// Forge's matcher is APPENDED to any hooks the user already has for that event,
+// never replacing them — a workspace user's own Stop hook keeps running. Re-seeding
+// stays idempotent: a forge matcher from a previous run is dropped before ours is
+// re-appended, so the list can't grow a duplicate each time.
 func setActivityHooks(m map[string]any) {
 	hooks := childMap(m, "hooks")
-	write := func(state string) []any {
+	install := func(event, state string) {
 		cmd := fmt.Sprintf(`mkdir -p "$(dirname %[1]s)"; printf '%%s %%s\n' %[2]s "$(date +%%s)" > %[1]s`, activityFile, state)
-		return []any{map[string]any{
+		ours := map[string]any{
 			"hooks": []any{map[string]any{"type": "command", "command": cmd}},
-		}}
+		}
+		var kept []any
+		if existing, ok := hooks[event].([]any); ok {
+			for _, e := range existing {
+				if !isForgeActivityMatcher(e) {
+					kept = append(kept, e)
+				}
+			}
+		}
+		hooks[event] = append(kept, ours)
 	}
-	hooks["UserPromptSubmit"] = write(agentproto.ActivityBusy)
-	hooks["Stop"] = write(agentproto.ActivityIdle)
-	hooks["Notification"] = write(agentproto.ActivityWaiting)
+	install("UserPromptSubmit", agentproto.ActivityBusy)
+	install("Stop", agentproto.ActivityIdle)
+	install("Notification", agentproto.ActivityWaiting)
+}
+
+// isForgeActivityMatcher reports whether a hook matcher is one WE wrote — its
+// command touches the activity file. Used to drop a stale forge matcher before
+// re-appending, so re-seeding doesn't accumulate duplicates.
+func isForgeActivityMatcher(e any) bool {
+	matcher, ok := e.(map[string]any)
+	if !ok {
+		return false
+	}
+	inner, ok := matcher["hooks"].([]any)
+	if !ok {
+		return false
+	}
+	for _, h := range inner {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "forge-activity") {
+			return true
+		}
+	}
+	return false
 }
 
 func seedSSH(home, name string, pubkey []byte) error {

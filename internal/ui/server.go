@@ -60,6 +60,9 @@ type Deps struct {
 	ListWorkspaces func() ([]WorkspaceInfo, error)
 	// WorkspaceActivity returns each workspace's Claude attention state, keyed by
 	// name. Polled by the UI to light up tabs where Claude is waiting for you.
+	// Optional — deliberately NOT in validate(): handleActivity nil-checks it and
+	// falls back to an empty map, so a caller that doesn't wire it just reports no
+	// activity rather than failing to start.
 	WorkspaceActivity func() (map[string]Activity, error)
 	// HostFor resolves a workspace name to the host it lives on, or nil.
 	HostFor func(name string) *config.Host
@@ -328,6 +331,8 @@ func (s *server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 // The UI polls this on a short interval; a host we can't reach just contributes
 // nothing, so a slow or down host dims its tabs rather than failing the request.
 func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	// Polled every few seconds; a cached copy would leave attention marks stale.
+	w.Header().Set("Cache-Control", "no-store")
 	act := map[string]Activity{}
 	if s.deps.WorkspaceActivity != nil {
 		if a, err := s.deps.WorkspaceActivity(); err == nil && a != nil {

@@ -360,12 +360,16 @@ function ackActivity(ws) {
 }
 // Claude wants you here: it finished (idle) or needs a decision (waiting), and
 // this is a newer moment than the one you last acknowledged. The active tab never
-// flags — looking at it IS acknowledging it.
+// flags — looking at it IS acknowledging it. A workspace you've never
+// acknowledged always flags, so a missing timestamp (ts 0 — the hooks normally
+// stamp one, but tolerate its absence) still lights the tab once instead of
+// staying dark forever because 0 isn't greater than 0.
 function wantsYou(ws) {
   if (ws === state.active) return false;
   const a = state.activity[ws];
   if (!a || (a.state !== "idle" && a.state !== "waiting")) return false;
-  return a.ts > (activityAcks()[ws] || 0);
+  const acked = activityAcks()[ws];
+  return acked === undefined || a.ts > acked;
 }
 function attnSignature() {
   return state.workspaces.filter((w) => wantsYou(w.name)).map((w) => w.name).join("|");
