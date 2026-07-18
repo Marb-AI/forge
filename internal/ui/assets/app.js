@@ -95,6 +95,13 @@ async function loadWorkspaces() {
   }
   // A workspace deleted from another machine takes its (now-dead) shell with it.
   pruneSSH();
+  // If the tab we were on vanished from the refreshed list (deleted elsewhere,
+  // host removed), don't cling to it: nothing would match state.active, the rail
+  // would sit disabled, and the restored ssh wouldn't line up. Drop it so the
+  // remembered-or-first workspace is selected instead.
+  if (state.active && !state.workspaces.some((w) => w.name === state.active)) {
+    state.active = null;
+  }
   if (!state.active) selectWs(initialWorkspace());
   else renderStage();
 }
@@ -572,7 +579,13 @@ function restoreSSH(ws) {
   const panel = document.getElementById("sshpanel");
   const railBtn = document.querySelector('.rail-btn[data-action="ssh"]');
 
-  if (sess && sess.panelOpen) {
+  // Only reopen the panel for a workspace the host can actually reach. If it went
+  // missing/unreachable while you were away, keep panelOpen remembered but leave
+  // the panel closed — so it comes back on its own once the host answers again,
+  // and until then you can't type into a shell the rest of the UI has disabled.
+  const wsObj = state.workspaces.find((w) => w.name === ws);
+  const usable = !!wsObj && isUsable(wsObj.status);
+  if (sess && sess.panelOpen && usable) {
     sess.host.hidden = false;
     panel.hidden = false;
     railBtn.classList.add("active");
