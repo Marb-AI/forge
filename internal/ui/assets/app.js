@@ -16,7 +16,9 @@ const state = {
   hosts: [],       // registered servers, cached so Settings paints instantly
   active: null,   // workspace name
   claude: null,   // the Claude terminal session (main stage)
-  ssh: null,      // the ssh shell session (overlay panel) — survives hiding
+  ssh: null,      // the ssh session currently shown in the overlay panel, or null
+  sshByWs: {},    // ws name -> its ssh session; each survives tab switches, so a
+                  // shell you leave is exactly where you left it when you return
   reconnectOnEnd: false, // after restart/checkpoint the session ends then comes back
   openFiles: [],  // [{path, name}] open in the read-only viewer
   activeFile: null, // path shown in the viewer, or null (terminal visible)
@@ -83,8 +85,7 @@ async function loadWorkspaces() {
   // action that makes sense instead.
   if (!state.workspaces.length) {
     teardownTerminal();
-    teardownSSH();
-    hideSSHPanel();
+    teardownAllSSH();
     resetFiles();
     state.active = null;
     state.stopped = false;
@@ -92,6 +93,8 @@ async function loadWorkspaces() {
     renderStage();
     return;
   }
+  // A workspace deleted from another machine takes its (now-dead) shell with it.
+  pruneSSH();
   if (!state.active) selectWs(initialWorkspace());
   else renderStage();
 }
@@ -367,10 +370,11 @@ function selectWs(name) {
   localStorage.setItem(ACTIVE_KEY, name);
   renderTabs();
   resetFiles();
-  // The ssh shell belongs to one workspace, so switching tabs drops it rather
-  // than silently leaving you in the previous workspace's shell.
-  teardownSSH();
-  hideSSHPanel();
+  // The ssh shell used to be dropped on every tab switch, resetting you to a
+  // fresh prompt each time you came back. Now each workspace keeps its own shell
+  // alive in the background; switching just shows the one that belongs to this
+  // tab, exactly as you left it (panel open or not).
+  restoreSSH(name);
 
   // The terminal stream attaches-or-creates (like `forge workspace <name> claude`),
   // so opening it on a stopped workspace would quietly resurrect the session you
@@ -400,7 +404,7 @@ function termTheme() {
     : { background: "#ffffff", foreground: "#1a1a1a", cursor: "#1a1a1a" };
 }
 function applyTermTheme() {
-  for (const sess of [state.claude, state.ssh]) {
+  for (const sess of [state.claude, ...Object.values(state.sshByWs)]) {
     if (sess) sess.term.options.theme = termTheme();
   }
 }
@@ -530,21 +534,85 @@ function teardownTerminal() {
 }
 
 // ---- the SSH shell (overlay panel) -----------------------------------------
-// Hiding the panel does NOT close the shell — the stream stays open, so you keep
-// your shell (and its cwd, and any running command). That's the Warp gripe fixed.
+// Every workspace gets its own shell, kept alive across tab switches. Hiding the
+// panel — or switching to another tab — does NOT close it: the stream stays open,
+// so the shell (its cwd, its scrollback, any running command) is right where you
+// left it when you come back. Each shell renders into its own host element inside
+// #sshterm; only the active workspace's is shown, the rest wait hidden.
 function ensureSSH(ws) {
-  if (state.ssh && state.ssh.ws === ws && !state.ssh.ended) return;
-  disposeTerminal(state.ssh);
-  setSSHNote(null);
-  state.ssh = makeTerminal(ws, "ssh", document.getElementById("sshterm"), () => {
-    setSSHNote("Shell exited. Hide and reopen the panel to start a new one.");
+  let sess = state.sshByWs[ws];
+  if (sess && !sess.ended) return sess;
+  if (sess) disposeSSHSession(ws); // the shell exited — replace it with a fresh one
+
+  const host = document.createElement("div");
+  host.className = "sshhost";
+  host.dataset.ws = ws;
+  document.getElementById("sshterm").appendChild(host);
+
+  sess = makeTerminal(ws, "ssh", host, () => {
+    const s = state.sshByWs[ws];
+    if (s) s.note = "Shell exited. Hide and reopen the panel to start a new one.";
+    if (state.active === ws) setSSHNote(s ? s.note : null);
   });
+  sess.host = host;
+  sess.panelOpen = false;
+  sess.note = null;
+  state.sshByWs[ws] = sess;
+  return sess;
 }
 
-function teardownSSH() {
-  disposeTerminal(state.ssh);
+// Show the active workspace's shell (if its panel was open) and hide the rest.
+// Called on every tab switch — the shells themselves are never touched, only
+// which one is on screen.
+function restoreSSH(ws) {
+  for (const s of Object.values(state.sshByWs)) if (s.host) s.host.hidden = true;
+
+  const sess = state.sshByWs[ws] || null;
+  state.ssh = sess;
+  const panel = document.getElementById("sshpanel");
+  const railBtn = document.querySelector('.rail-btn[data-action="ssh"]');
+
+  if (sess && sess.panelOpen) {
+    sess.host.hidden = false;
+    panel.hidden = false;
+    railBtn.classList.add("active");
+    document.getElementById("ssh-ws").textContent = ws;
+    setSSHNote(sess.note);
+    // It was display:none until now, so xterm couldn't measure itself — refit
+    // once it has a real box, and only if we're still on this workspace.
+    requestAnimationFrame(() => {
+      if (state.ssh !== sess || sess.disposed) return;
+      try { sess.fit.fit(); } catch (e) {}
+      sess.term.focus();
+    });
+  } else {
+    panel.hidden = true;
+    railBtn.classList.remove("active");
+    setSSHNote(null);
+  }
+}
+
+function disposeSSHSession(ws) {
+  const sess = state.sshByWs[ws];
+  if (!sess) return;
+  disposeTerminal(sess);
+  if (sess.host) sess.host.remove();
+  delete state.sshByWs[ws];
+  if (state.ssh === sess) state.ssh = null;
+}
+
+function teardownAllSSH() {
+  for (const ws of Object.keys(state.sshByWs)) disposeSSHSession(ws);
   state.ssh = null;
+  hideSSHPanel();
   setSSHNote(null);
+}
+
+// Drop shells whose workspace no longer exists (deleted from another machine).
+function pruneSSH() {
+  for (const ws of Object.keys(state.sshByWs)) {
+    if (!state.workspaces.some((w) => w.name === ws)) disposeSSHSession(ws);
+  }
 }
 
 function setSSHNote(msg) {
@@ -642,22 +710,32 @@ function toggleSSH(force) {
   const panel = document.getElementById("sshpanel");
   const open = force !== undefined ? force : panel.hidden;
   if (open && !state.active) return; // nothing to open a shell into
+  const ws = state.active;
 
   panel.hidden = !open;
   document.querySelector('.rail-btn[data-action="ssh"]').classList.toggle("active", open);
 
   if (open) {
-    document.getElementById("ssh-ws").textContent = state.active;
-    ensureSSH(state.active);
+    document.getElementById("ssh-ws").textContent = ws;
+    const sess = ensureSSH(ws);
+    sess.panelOpen = true;
+    state.ssh = sess;
+    // Show this workspace's shell, hide any other left over from another tab.
+    for (const s of Object.values(state.sshByWs)) if (s.host) s.host.hidden = s !== sess;
+    setSSHNote(sess.note);
     // The panel was display:none, so xterm couldn't measure itself — refit now
     // that it has a real box.
     requestAnimationFrame(() => {
-      if (!state.ssh) return;
-      try { state.ssh.fit.fit(); } catch (e) {}
-      state.ssh.term.focus();
+      if (state.ssh !== sess || sess.disposed) return;
+      try { sess.fit.fit(); } catch (e) {}
+      sess.term.focus();
     });
-  } else if (state.claude) {
-    state.claude.term.focus(); // hidden, not closed: the shell keeps running
+  } else {
+    // Hidden, not closed: remember it was closed for this tab, keep the shell
+    // running, and hand focus back to Claude.
+    const sess = state.sshByWs[ws];
+    if (sess) sess.panelOpen = false;
+    if (state.claude) state.claude.term.focus();
   }
 }
 document.getElementById("rail").addEventListener("click", (e) => {
@@ -798,9 +876,10 @@ async function confirmDeleteWorkspace(name) {
     if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
 
     setSettingsMsg(`Deleted "${name}".`);
+    // Its shell is gone with the user — drop it whether or not it was the tab we're on.
+    disposeSSHSession(name);
     if (state.active === name) {
       teardownTerminal();
-      teardownSSH();
       hideSSHPanel();
       resetFiles();
       state.active = null;

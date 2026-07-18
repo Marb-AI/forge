@@ -337,6 +337,10 @@ button.big { padding: 10px 20px; font-size: 13px; }
    makes FitAddon overcount rows and clip the bottom line. */
 #sshbody { flex: 1; min-height: 0; display: flex; padding: 6px 8px; }
 #sshterm { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+/* One host per workspace, stacked in the same box; only the active one is shown,
+   the rest keep their shell and scrollback alive off-screen. */
+.sshhost { position: absolute; inset: 0; }
+.sshhost[hidden] { display: none; }
 #sshterm .xterm { height: 100%; }
 #ssh-note { border-top: 1px solid var(--border); font-size: 11.5px; }
 #ssh-note[hidden] { display: none; }
