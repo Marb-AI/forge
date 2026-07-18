@@ -35,6 +35,30 @@ type ListResult struct {
 	Workspaces []Workspace `json:"workspaces"`
 }
 
+// Activity states — Claude's attention state within a workspace, as reported by
+// the Claude Code hooks the agent installs. The whole vocabulary in one place,
+// because the browser UI switches on these strings too.
+const (
+	ActivityBusy    = "busy"    // Claude is working on your prompt
+	ActivityIdle    = "idle"    // Claude finished responding and is waiting for you
+	ActivityWaiting = "waiting" // Claude needs your input or a decision
+)
+
+// Activity is one workspace's attention state plus the unix second the hook that
+// set it fired. The timestamp is what lets the UI tell a fresh "waiting for you"
+// from one it has already shown and dismissed.
+type Activity struct {
+	State string `json:"state"`
+	TS    int64  `json:"ts"`
+}
+
+// ActivityResult is returned by `forge-agent workspace-activity`: one entry per
+// workspace that has an activity state on record (workspaces whose Claude has not
+// run since the hooks were installed simply have no entry).
+type ActivityResult struct {
+	Activity map[string]Activity `json:"activity"`
+}
+
 // CreateResult is returned by `forge-agent workspace-create`.
 type CreateResult struct {
 	Workspace Workspace `json:"workspace"`

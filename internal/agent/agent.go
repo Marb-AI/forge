@@ -36,7 +36,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 // Main is the forge-agent entrypoint; returns a process exit code.
 func Main(args []string) int {
 	if len(args) == 0 {
-		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status>")
+		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity>")
 	}
 	switch args[0] {
 	case "workspace-create":
@@ -47,6 +47,8 @@ func Main(args []string) int {
 		return opList()
 	case "workspace-status":
 		return opStatus(args[1:])
+	case "workspace-activity":
+		return opActivity()
 	default:
 		return emitError("unknown op %q", args[0])
 	}
@@ -314,6 +316,135 @@ func sessionStatus(name string) string {
 	return agentproto.StatusRunning
 }
 
+// opActivity reports each workspace's Claude attention state (busy/idle/waiting),
+// which the Claude Code hooks record in ~/.claude/forge-activity. It also lazily
+// installs those hooks into any workspace still missing them, so a workspace made
+// before this existed starts reporting on its own — no re-provision needed. A
+// workspace whose Claude has not run since the hooks landed simply has no entry.
+func opActivity() int {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return emit(agentproto.ActivityResult{Activity: map[string]agentproto.Activity{}})
+		}
+		return emitError("read %s: %v", baseDir, err)
+	}
+	res := agentproto.ActivityResult{Activity: map[string]agentproto.Activity{}}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		ensureActivityHooks(name)
+		if a, ok := readActivity(name); ok {
+			res.Activity[name] = a
+		}
+	}
+	return emit(res)
+}
+
+// readActivity reads ~/.claude/forge-activity for a workspace. Absent (Claude
+// hasn't run since the hooks landed) → not ok.
+func readActivity(name string) (agentproto.Activity, bool) {
+	data, err := os.ReadFile(filepath.Join(baseDir, name, ".claude", "forge-activity"))
+	if err != nil {
+		return agentproto.Activity{}, false
+	}
+	return parseActivity(data)
+}
+
+// parseActivity reads the hooks' "<state> <unix-seconds>" line. Empty → not ok.
+func parseActivity(data []byte) (agentproto.Activity, bool) {
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return agentproto.Activity{}, false
+	}
+	a := agentproto.Activity{State: fields[0]}
+	if len(fields) > 1 {
+		a.TS, _ = strconv.ParseInt(fields[1], 10, 64)
+	}
+	return a, true
+}
+
+// ensureActivityHooks installs the activity hooks into a workspace that predates
+// them. Idempotent and cheap: the marker check short-circuits once seeded, so the
+// write (and chown) happens at most once per workspace. Best-effort — a status
+// poll must not fail because one workspace's config is odd or unreadable.
+func ensureActivityHooks(name string) {
+	settings := filepath.Join(baseDir, name, ".claude", "settings.json")
+	// The hook commands all mention the activity file; its bare name is a stable
+	// marker (unaffected by JSON quoting) that the hooks are already installed.
+	if data, err := os.ReadFile(settings); err == nil && strings.Contains(string(data), "forge-activity") {
+		return
+	}
+	if err := mergeJSON(settings, setActivityHooks); err != nil {
+		return
+	}
+	// The workspace user owns its config; the agent runs as root.
+	_, _ = run("chown", name+":"+name, settings)
+}
+
+// activityFile is where the hooks record state, under the workspace's ~/.claude.
+// $HOME is set for hook commands (Claude runs them through a shell) and resolves
+// to the workspace user's home — the same path readActivity reads.
+const activityFile = `"$HOME/.claude/forge-activity"`
+
+// setActivityHooks installs the three Claude Code hooks that report attention
+// state. UserPromptSubmit = you gave Claude work (busy); Stop = Claude finished
+// and is waiting for you (idle); Notification = Claude needs a decision (waiting).
+// Each stamps the state and the current second so the UI can dismiss a seen
+// episode and light up again on the next one.
+//
+// Forge's matcher is APPENDED to any hooks the user already has for that event,
+// never replacing them — a workspace user's own Stop hook keeps running. Re-seeding
+// stays idempotent: a forge matcher from a previous run is dropped before ours is
+// re-appended, so the list can't grow a duplicate each time.
+func setActivityHooks(m map[string]any) {
+	hooks := childMap(m, "hooks")
+	install := func(event, state string) {
+		cmd := fmt.Sprintf(`mkdir -p "$(dirname %[1]s)"; printf '%%s %%s\n' %[2]s "$(date +%%s)" > %[1]s`, activityFile, state)
+		ours := map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": cmd}},
+		}
+		var kept []any
+		if existing, ok := hooks[event].([]any); ok {
+			for _, e := range existing {
+				if !isForgeActivityMatcher(e) {
+					kept = append(kept, e)
+				}
+			}
+		}
+		hooks[event] = append(kept, ours)
+	}
+	install("UserPromptSubmit", agentproto.ActivityBusy)
+	install("Stop", agentproto.ActivityIdle)
+	install("Notification", agentproto.ActivityWaiting)
+}
+
+// isForgeActivityMatcher reports whether a hook matcher is one WE wrote — its
+// command touches the activity file. Used to drop a stale forge matcher before
+// re-appending, so re-seeding doesn't accumulate duplicates.
+func isForgeActivityMatcher(e any) bool {
+	matcher, ok := e.(map[string]any)
+	if !ok {
+		return false
+	}
+	inner, ok := matcher["hooks"].([]any)
+	if !ok {
+		return false
+	}
+	for _, h := range inner {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			continue
+		}
+		if cmd, _ := hm["command"].(string); strings.Contains(cmd, "forge-activity") {
+			return true
+		}
+	}
+	return false
+}
+
 func seedSSH(home, name string, pubkey []byte) error {
 	sshDir := filepath.Join(home, ".ssh")
 	if err := os.MkdirAll(sshDir, 0o700); err != nil {
@@ -540,6 +671,7 @@ func writeClaudeConfig(home string) error {
 	}
 	return mergeJSON(filepath.Join(claudeDir, "settings.json"), func(m map[string]any) {
 		childMap(m, "permissions")["defaultMode"] = "bypassPermissions"
+		setActivityHooks(m) // report Claude's attention state to the UI
 	})
 }
 

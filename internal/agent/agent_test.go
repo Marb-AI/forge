@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Marb-AI/forge/internal/agentproto"
 )
 
 func TestNameValidation(t *testing.T) {
@@ -232,6 +234,133 @@ func TestWriteClaudeConfigPreservesExisting(t *testing.T) {
 	}
 	if _, ok := perms["allow"]; !ok {
 		t.Errorf("sibling key under permissions dropped: %v", perms)
+	}
+}
+
+// The activity hooks are what make the UI's idle indicator possible: on Stop
+// (Claude finished) the workspace records "idle", which the browser turns into a
+// "waiting for you" mark on the tab. If the hook isn't written, or writes the
+// wrong file, the indicator silently never lights up.
+func TestWriteClaudeConfigInstallsActivityHooks(t *testing.T) {
+	home := t.TempDir()
+	if err := writeClaudeConfig(home); err != nil {
+		t.Fatalf("writeClaudeConfig: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("settings.json is not valid JSON: %v", err)
+	}
+	// hooks.Stop[0].hooks[0].command must fire and write "idle" to the activity file.
+	hooks, _ := m["hooks"].(map[string]any)
+	for _, ev := range []string{"UserPromptSubmit", "Stop", "Notification"} {
+		if _, ok := hooks[ev]; !ok {
+			t.Fatalf("hooks.%s missing: %v", ev, hooks)
+		}
+	}
+	cmd := firstHookCommand(t, hooks, "Stop")
+	if !strings.Contains(cmd, "forge-activity") || !strings.Contains(cmd, agentproto.ActivityIdle) {
+		t.Errorf("Stop hook doesn't record idle to the activity file: %q", cmd)
+	}
+}
+
+func firstHookCommand(t *testing.T, hooks map[string]any, event string) string {
+	t.Helper()
+	matchers, ok := hooks[event].([]any)
+	if !ok || len(matchers) == 0 {
+		t.Fatalf("hooks.%s not a non-empty array: %v", event, hooks[event])
+	}
+	first, _ := matchers[0].(map[string]any)
+	inner, ok := first["hooks"].([]any)
+	if !ok || len(inner) == 0 {
+		t.Fatalf("hooks.%s[0].hooks not a non-empty array: %v", event, first)
+	}
+	h0, _ := inner[0].(map[string]any)
+	cmd, _ := h0["command"].(string)
+	return cmd
+}
+
+// ensureActivityHooks uses the bare string "forge-activity" in settings.json as
+// its "already installed" marker. Confirm a seeded config carries it and a bare
+// one doesn't — if the marker were wrong, self-healing would rewrite the config
+// (and chown it) on every single poll.
+func TestActivityHooksMarker(t *testing.T) {
+	home := t.TempDir()
+	if err := writeClaudeConfig(home); err != nil {
+		t.Fatal(err)
+	}
+	seeded, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if !strings.Contains(string(seeded), "forge-activity") {
+		t.Errorf("seeded settings.json lacks the marker: %s", seeded)
+	}
+	if strings.Contains(`{"permissions":{"defaultMode":"bypassPermissions"}}`, "forge-activity") {
+		t.Error("a config without our hooks must not match the marker")
+	}
+}
+
+// The activity hooks must be ADDED to a user's existing hooks, not clobber them,
+// and re-seeding must not pile up duplicate forge matchers.
+func TestActivityHooksAppendAndDedupe(t *testing.T) {
+	m := map[string]any{}
+	// A user already has their own Stop hook.
+	userStop := map[string]any{
+		"hooks": []any{map[string]any{"type": "command", "command": "echo mine"}},
+	}
+	childMap(m, "hooks")["Stop"] = []any{userStop}
+
+	setActivityHooks(m)
+	stop := m["hooks"].(map[string]any)["Stop"].([]any)
+	if len(stop) != 2 {
+		t.Fatalf("Stop should keep the user's hook and add ours, got %d matchers: %v", len(stop), stop)
+	}
+	if !isForgeActivityMatcher(stop[1]) || isForgeActivityMatcher(stop[0]) {
+		t.Errorf("user's hook was clobbered or ours not appended: %v", stop)
+	}
+
+	// Round-trip through JSON (as mergeJSON does on re-seed) and seed again.
+	data, _ := json.Marshal(m)
+	var m2 map[string]any
+	if err := json.Unmarshal(data, &m2); err != nil {
+		t.Fatal(err)
+	}
+	setActivityHooks(m2)
+	stop2 := m2["hooks"].(map[string]any)["Stop"].([]any)
+	if len(stop2) != 2 {
+		t.Errorf("re-seeding must be idempotent (user + one forge), got %d: %v", len(stop2), stop2)
+	}
+	forge := 0
+	for _, e := range stop2 {
+		if isForgeActivityMatcher(e) {
+			forge++
+		}
+	}
+	if forge != 1 {
+		t.Errorf("expected exactly one forge matcher after re-seed, got %d", forge)
+	}
+}
+
+func TestParseActivity(t *testing.T) {
+	cases := []struct {
+		in    string
+		ok    bool
+		state string
+		ts    int64
+	}{
+		{"idle 1784386328", true, "idle", 1784386328},
+		{"busy 42\n", true, "busy", 42},
+		{"waiting", true, "waiting", 0}, // no timestamp yet: state still usable
+		{"", false, "", 0},
+		{"   \n", false, "", 0},
+	}
+	for _, c := range cases {
+		a, ok := parseActivity([]byte(c.in))
+		if ok != c.ok || a.State != c.state || a.TS != c.ts {
+			t.Errorf("parseActivity(%q) = (%+v, %v), want (state=%q ts=%d, ok=%v)",
+				c.in, a, ok, c.state, c.ts, c.ok)
+		}
 	}
 }
 

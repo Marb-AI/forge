@@ -167,6 +167,38 @@ func listWorkspaces() ([]WorkspaceStatus, error) {
 	return mergeWorkspaceStatus(cfg.Workspaces, sessions), nil
 }
 
+// workspacesActivity asks each host once for the Claude attention state of the
+// workspaces on it, and keeps only the ones this client owns (same rule as
+// listWorkspaces — the host's directory may hold workspaces that aren't ours). A
+// host we can't reach simply contributes nothing.
+func workspacesActivity() (map[string]agentproto.Activity, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	needed := map[string]bool{}
+	for _, alias := range cfg.Workspaces {
+		needed[alias] = true
+	}
+	out := map[string]agentproto.Activity{}
+	for alias := range needed {
+		host := cfg.Hosts[alias]
+		if host == nil {
+			continue
+		}
+		var res agentproto.ActivityResult
+		if err := callAgent(host, &res, "workspace-activity"); err != nil {
+			continue // unreachable: its tabs just stay dim
+		}
+		for name, a := range res.Activity {
+			if cfg.Workspaces[name] == alias { // ours, on this host
+				out[name] = a
+			}
+		}
+	}
+	return out, nil
+}
+
 // mergeWorkspaceStatus is the decision, separated from the SSH so it can be tested:
 // given the workspaces our config claims (name -> host alias) and what each host
 // reported (alias -> name -> session status), what do we show?

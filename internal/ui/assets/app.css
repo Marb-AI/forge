@@ -101,6 +101,13 @@ button:hover { background: var(--bg-3); }
 .tab.dragging.active:hover { background: var(--tab-active); }
 .tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-dim); }
 .tab.running .dot { background: #3ecf6a; }
+/* "Claude is waiting for you" — an amber mark, gently pulsing so it catches the
+   eye without shouting. A tab that wants you also lifts its label out of the
+   dim colour, so the name reads as live even at a glance. */
+.tab .attn-mark { color: #f5a623; font-size: 11px; line-height: 1; animation: attn-pulse 1.6s ease-in-out infinite; }
+.tab.attn { color: var(--fg); }
+@keyframes attn-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .tab .attn-mark { animation: none; } }
 #add-tab { width: 24px; height: 24px; font-size: 15px; line-height: 1; }
 .spacer { flex: 1; }
 #theme-toggle { width: 26px; height: 24px; }
