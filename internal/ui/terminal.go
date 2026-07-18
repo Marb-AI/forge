@@ -260,11 +260,14 @@ func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 		if len(pending) == 0 {
 			return true
 		}
-		enc := base64.StdEncoding.EncodeToString(pending)
-		pending = pending[:0]
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", enc); err != nil {
+		// Clear pending only once the write has succeeded: if it fails we keep the
+		// bytes rather than dropping them, so "only ever join, never lose" holds even
+		// on the write itself. (In practice a failure here means the connection is
+		// gone and we return anyway — but the buffer stays honest.)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", base64.StdEncoding.EncodeToString(pending)); err != nil {
 			return false
 		}
+		pending = pending[:0]
 		flusher.Flush()
 		return true
 	}
@@ -288,10 +291,13 @@ func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 			}
 			if c.err != nil {
 				// ssh/tmux ended (session stopped, disconnect). Flush whatever is
-				// buffered first, so the last line before the end isn't swallowed.
-				flush()
-				_, _ = io.WriteString(w, "event: end\ndata: \n\n")
-				flusher.Flush()
+				// buffered first, so the last line before the end isn't swallowed. If
+				// that flush fails the client is already gone, so skip the end event
+				// too — same as the ticker/max-buffer paths, which return on failure.
+				if flush() {
+					_, _ = io.WriteString(w, "event: end\ndata: \n\n")
+					flusher.Flush()
+				}
 				return
 			}
 		}
