@@ -100,7 +100,7 @@ async function loadWorkspaces() {
 // A refresh should drop you back where you were working, not at whichever
 // workspace happens to sort first. If the remembered one is gone — deleted, or
 // this is a first visit — fall back to the front of the list.
-const ACTIVE_KEY = "forge-active";
+const ACTIVE_KEY = "forge-active-tab";
 function initialWorkspace() {
   const saved = localStorage.getItem(ACTIVE_KEY);
   if (saved && state.workspaces.some((w) => w.name === saved)) return saved;
