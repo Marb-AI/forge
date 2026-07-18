@@ -344,6 +344,7 @@ function renderTabs() {
     tabs.appendChild(tab);
   }
   attnSig = attnSignature();
+  paintBrowserTab();
 }
 
 // ---- Claude activity: the idle indicator -----------------------------------
@@ -375,7 +376,11 @@ function ackActivity(ws) {
 // stamp one, but tolerate its absence) still lights the tab once instead of
 // staying dark forever because 0 isn't greater than 0.
 function wantsYou(ws) {
-  if (ws === state.active) return false;
+  // The active tab doesn't flag — looking at it IS acknowledging it. But once the
+  // whole forge tab is hidden you aren't looking at ANY of them, so even the active
+  // workspace becomes eligible: that's how "I left forge and my session finished"
+  // reaches the browser tab and an OS toast.
+  if (ws === state.active && !document.hidden) return false;
   const a = state.activity[ws];
   if (!a || (a.state !== "idle" && a.state !== "waiting")) return false;
   const acked = activityAcks()[ws];
@@ -384,24 +389,91 @@ function wantsYou(ws) {
 function attnSignature() {
   return state.workspaces.filter((w) => wantsYou(w.name)).map((w) => w.name).join("|");
 }
+function wanters() {
+  return state.workspaces.filter((w) => wantsYou(w.name)).map((w) => w.name);
+}
+
+// ---- browser-tab attention -------------------------------------------------
+// Carry the "Claude wants you" signal all the way out to the browser tab, so you
+// can be off on another tab (or another app) and still notice. Three layers:
+// the tab title gets a dot, the favicon gets a badge, and — if you've allowed it —
+// an OS notification pops when a workspace finishes while you're looking elsewhere.
+const faviconLink = document.querySelector('link[rel="icon"]');
+const faviconPlainHref = faviconLink ? faviconLink.getAttribute("href") : null;
+let faviconBadgedHref = null;
+
+// Build the badged favicon from the real anvil (fetched, so it tracks the actual
+// icon instead of a copy): drop an amber dot in the corner, same colour as the ✳.
+(async function buildBadgedFavicon() {
+  if (!faviconPlainHref) return;
+  try {
+    const svg = await fetch(faviconPlainHref).then((r) => r.text());
+    const dot = '<circle cx="24" cy="8" r="7" fill="#f5a623" stroke="#0a0a0a" stroke-width="1.5"/>';
+    faviconBadgedHref = "data:image/svg+xml," + encodeURIComponent(svg.replace("</svg>", dot + "</svg>"));
+  } catch {}
+})();
+
+// Title + favicon reflect whether ANY workspace wants you. Idempotent and cheap,
+// so it's safe to call from every tab repaint.
+function paintBrowserTab() {
+  const n = wanters().length;
+  document.title = n ? (n > 1 ? `● Forge (${n})` : "● Forge") : "Forge";
+  if (faviconLink && faviconBadgedHref) {
+    faviconLink.setAttribute("href", n ? faviconBadgedHref : faviconPlainHref);
+  }
+}
+
+// One-time, on the first click (a user gesture — browsers require one): if you
+// haven't decided yet, ask whether Forge may show OS notifications. Deny and the
+// title/favicon still work; nothing else changes.
+document.addEventListener("click", () => {
+  if ("Notification" in window && Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}, { once: true });
+
+// Edge-triggered OS toast: notify only for a workspace that has NEWLY started
+// wanting you since the last poll, and only while you're looking elsewhere (a
+// visible forge tab already shows the mark). Clicking the toast brings you here
+// and opens that workspace.
+let prevWanters = new Set();
+function maybeNotify() {
+  const now = wanters();
+  if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
+    for (const ws of now) {
+      if (!prevWanters.has(ws)) {
+        const note = new Notification("Claude is waiting for you", { body: ws, tag: "forge-" + ws });
+        note.onclick = () => { window.focus(); selectWs(ws); note.close(); };
+      }
+    }
+  }
+  prevWanters = new Set(now);
+}
 
 let attnSig = "";
 async function pollActivity() {
-  // A hidden tab SSHing every few seconds is the background churn we're avoiding;
-  // the browser throttles hidden timers anyway, so make the intent explicit.
-  if (document.visibilityState !== "visible" || !state.workspaces.length) return;
+  // Poll even while the tab is hidden — that's exactly when the OS toast earns its
+  // keep (you're off on another tab and a workspace finishes). The browser throttles
+  // hidden-tab timers to about once a minute on its own, so the SSH churn while away
+  // stays small; when visible it runs at the full interval.
+  if (!state.workspaces.length) return;
   let act;
   try {
     act = await fetch("/api/activity").then((r) => (r.ok ? r.json() : null));
   } catch { return; }
   if (!act) return;
   state.activity = act;
-  if (state.active) ackActivity(state.active); // you're looking at it
-  // Only repaint the tabs when the set of flagged ones actually changed, and
-  // never mid-drag — a reorder in progress owns the strip.
+  if (state.active && !document.hidden) ackActivity(state.active); // you're looking at it
+  // Repaint the tabs only when the flagged set changed, and never mid-drag — a
+  // reorder owns the strip. paintBrowserTab rides along inside renderTabs; call it
+  // directly too so the title/favicon still update on a hidden tab that isn't
+  // otherwise re-rendering.
   if (attnSignature() !== attnSig && !document.querySelector(".tab.dragging")) {
     renderTabs();
+  } else {
+    paintBrowserTab();
   }
+  maybeNotify();
 }
 setInterval(pollActivity, 4000);
 document.addEventListener("visibilitychange", () => {
