@@ -407,9 +407,15 @@ let faviconBadgedHref = null;
 (async function buildBadgedFavicon() {
   if (!faviconPlainHref) return;
   try {
-    const svg = await fetch(faviconPlainHref).then((r) => r.text());
+    const res = await fetch(faviconPlainHref);
+    if (!res.ok) return; // a 404/HTML page would make a garbage data-URI icon
+    const svg = await res.text();
+    // Insert before the closing tag, matched case-insensitively; if there isn't a
+    // recognisable </svg>, leave the badge off rather than build a broken icon.
+    if (!/<\/svg\s*>/i.test(svg)) return;
     const dot = '<circle cx="24" cy="8" r="7" fill="#f5a623" stroke="#0a0a0a" stroke-width="1.5"/>';
-    faviconBadgedHref = "data:image/svg+xml," + encodeURIComponent(svg.replace("</svg>", dot + "</svg>"));
+    const badged = svg.replace(/<\/svg\s*>/i, dot + "</svg>");
+    faviconBadgedHref = "data:image/svg+xml," + encodeURIComponent(badged);
   } catch {}
 })();
 
@@ -427,9 +433,14 @@ function paintBrowserTab() {
 // haven't decided yet, ask whether Forge may show OS notifications. Deny and the
 // title/favicon still work; nothing else changes.
 document.addEventListener("click", () => {
-  if ("Notification" in window && Notification.permission === "default") {
-    Notification.requestPermission().catch(() => {});
-  }
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  // Older implementations return undefined (callback style) or can throw rather
+  // than reject, so don't assume a Promise — guard the .catch and the call itself,
+  // or a denied/legacy browser would break this click handler.
+  try {
+    const req = Notification.requestPermission();
+    if (req && typeof req.catch === "function") req.catch(() => {});
+  } catch {}
 }, { once: true });
 
 // Edge-triggered OS toast: notify only for a workspace that has NEWLY started
