@@ -261,9 +261,23 @@ func TestWriteClaudeConfigInstallsActivityHooks(t *testing.T) {
 			t.Fatalf("hooks.%s missing: %v", ev, hooks)
 		}
 	}
-	cmd := firstHookCommand(t, hooks, "Stop")
-	if !strings.Contains(cmd, "forge-activity") || !strings.Contains(cmd, agentproto.ActivityIdle) {
-		t.Errorf("Stop hook doesn't record idle to the activity file: %q", cmd)
+	// Stop must write idle to the activity file — but gated: it inspects
+	// background_tasks and reports busy instead when work is still running, so a
+	// parked-mid-orchestration turn doesn't light the tab up.
+	stop := firstHookCommand(t, hooks, "Stop")
+	for _, want := range []string{"forge-activity", agentproto.ActivityIdle, "background_tasks", agentproto.ActivityBusy} {
+		if !strings.Contains(stop, want) {
+			t.Errorf("Stop hook missing %q: %q", want, stop)
+		}
+	}
+	// Notification carries the same gate, reporting waiting (not idle) when free.
+	notif := firstHookCommand(t, hooks, "Notification")
+	if !strings.Contains(notif, "background_tasks") || !strings.Contains(notif, agentproto.ActivityWaiting) {
+		t.Errorf("Notification hook not gated / not waiting: %q", notif)
+	}
+	// UserPromptSubmit is unconditional busy — no need to inspect anything.
+	if ups := firstHookCommand(t, hooks, "UserPromptSubmit"); !strings.Contains(ups, agentproto.ActivityBusy) {
+		t.Errorf("UserPromptSubmit hook doesn't record busy: %q", ups)
 	}
 }
 
@@ -292,13 +306,32 @@ func TestActivityHooksMarker(t *testing.T) {
 	if err := writeClaudeConfig(home); err != nil {
 		t.Fatal(err)
 	}
-	seeded, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if !strings.Contains(string(seeded), "forge-activity") {
-		t.Errorf("seeded settings.json lacks the marker: %s", seeded)
+	// ensureActivityHooks re-seeds unless it finds BOTH the activity file and the
+	// background_tasks gate — the fingerprint of the current hooks. Requiring both
+	// keeps an unrelated user hook that happens to mention one word from blocking
+	// our seeding, and still forces an upgrade from the older ungated version.
+	seeded := string(mustRead(t, filepath.Join(home, ".claude", "settings.json")))
+	if !strings.Contains(seeded, "forge-activity") || !strings.Contains(seeded, "background_tasks") {
+		t.Errorf("seeded settings.json lacks the current-version marker: %s", seeded)
 	}
-	if strings.Contains(`{"permissions":{"defaultMode":"bypassPermissions"}}`, "forge-activity") {
-		t.Error("a config without our hooks must not match the marker")
+	marked := func(s string) bool {
+		return strings.Contains(s, "forge-activity") && strings.Contains(s, "background_tasks")
 	}
+	if marked(`{"hooks":{"Stop":[{"hooks":[{"command":"printf idle > $HOME/.claude/forge-activity"}]}]}}`) {
+		t.Error("the older ungated hooks (forge-activity, no gate) must not match — they'd never upgrade")
+	}
+	if marked(`{"hooks":{"Stop":[{"hooks":[{"command":"echo my background_tasks helper"}]}]}}`) {
+		t.Error("an unrelated hook mentioning only background_tasks must not match — we'd never seed")
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 // The activity hooks must be ADDED to a user's existing hooks, not clobber them,
