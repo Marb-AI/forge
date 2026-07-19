@@ -372,12 +372,15 @@ func parseActivity(data []byte) (agentproto.Activity, bool) {
 // poll must not fail because one workspace's config is odd or unreadable.
 func ensureActivityHooks(name string) {
 	settings := filepath.Join(baseDir, name, ".claude", "settings.json")
-	// "background_tasks" is the marker for the CURRENT hooks (the gated Stop/
-	// Notification commands mention it). Checking for it rather than the older
-	// "forge-activity" means a workspace still carrying the first, ungated version
-	// gets upgraded on the next poll instead of being left with false-positive hooks.
-	if data, err := os.ReadFile(settings); err == nil && strings.Contains(string(data), "background_tasks") {
-		return
+	// Our current hooks are the only thing that mentions BOTH the activity file and
+	// the background_tasks gate, so requiring both as the marker won't collide with
+	// an unrelated user hook that happens to contain one word — and still forces an
+	// upgrade from the first, ungated version (which has forge-activity but no gate).
+	if data, err := os.ReadFile(settings); err == nil {
+		s := string(data)
+		if strings.Contains(s, "forge-activity") && strings.Contains(s, "background_tasks") {
+			return
+		}
 	}
 	if err := mergeJSON(settings, setActivityHooks); err != nil {
 		return
@@ -386,12 +389,14 @@ func ensureActivityHooks(name string) {
 	_, _ = run("chown", name+":"+name, settings)
 }
 
-// activityFile is where the hooks record state, under the workspace's ~/.claude.
-// $HOME is set for hook commands (Claude runs them through a shell) and resolves
-// to the workspace user's home — the same path readActivity reads.
+// The hooks write a "<state> <unix-seconds>" line to ~/.claude/forge-activity —
+// the same path readActivity reads. They run under a shell with $HOME set to the
+// workspace user's home, and the mkdir keeps them working even if ~/.claude was
+// removed.
+//
 // busyHookCmd fires on UserPromptSubmit: you just gave Claude work, so it's
 // unambiguously busy — no need to inspect anything.
-const busyHookCmd = `printf 'busy %s\n' "$(date +%s)" > "$HOME/.claude/forge-activity"`
+const busyHookCmd = `mkdir -p "$HOME/.claude"; printf 'busy %s\n' "$(date +%s)" > "$HOME/.claude/forge-activity"`
 
 // gatedHookCmd fires on Stop/Notification: the turn ended (or Claude notified),
 // but that is NOT the same as "waiting for you". If Claude left background work
@@ -405,8 +410,11 @@ func gatedHookCmd(endState string) string {
 	return `python3 -c 'import sys,json,time,os
 try: d=json.loads(sys.stdin.read() or "{}")
 except Exception: d={}
-r=any((t or {}).get("status")=="running" for t in (d.get("background_tasks") or []))
-open(os.path.expanduser("~/.claude/forge-activity"),"w").write(("busy" if r else "` + endState + `")+" %d\n"%int(time.time()))'`
+bt=d.get("background_tasks")
+r=any(isinstance(t,dict) and t.get("status")=="running" for t in bt) if isinstance(bt,list) else False
+p=os.path.expanduser("~/.claude/forge-activity")
+os.makedirs(os.path.dirname(p),exist_ok=True)
+open(p,"w").write(("busy" if r else "` + endState + `")+" %d\n"%int(time.time()))'`
 }
 
 // setActivityHooks installs the Claude Code hooks that report attention state.

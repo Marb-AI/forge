@@ -306,18 +306,32 @@ func TestActivityHooksMarker(t *testing.T) {
 	if err := writeClaudeConfig(home); err != nil {
 		t.Fatal(err)
 	}
-	seeded, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	// ensureActivityHooks re-seeds unless it finds "background_tasks" — the marker
-	// for the current, gated hooks. A config carrying only the older ungated hooks
-	// (which mention forge-activity but not background_tasks) must NOT match, so it
-	// gets upgraded rather than left with the false-positive version.
-	if !strings.Contains(string(seeded), "background_tasks") {
+	// ensureActivityHooks re-seeds unless it finds BOTH the activity file and the
+	// background_tasks gate — the fingerprint of the current hooks. Requiring both
+	// keeps an unrelated user hook that happens to mention one word from blocking
+	// our seeding, and still forces an upgrade from the older ungated version.
+	seeded := string(mustRead(t, filepath.Join(home, ".claude", "settings.json")))
+	if !strings.Contains(seeded, "forge-activity") || !strings.Contains(seeded, "background_tasks") {
 		t.Errorf("seeded settings.json lacks the current-version marker: %s", seeded)
 	}
-	oldUngated := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"printf idle > $HOME/.claude/forge-activity"}]}]}}`
-	if strings.Contains(oldUngated, "background_tasks") {
-		t.Error("the older ungated hooks must not match the current marker (they'd never upgrade)")
+	marked := func(s string) bool {
+		return strings.Contains(s, "forge-activity") && strings.Contains(s, "background_tasks")
 	}
+	if marked(`{"hooks":{"Stop":[{"hooks":[{"command":"printf idle > $HOME/.claude/forge-activity"}]}]}}`) {
+		t.Error("the older ungated hooks (forge-activity, no gate) must not match — they'd never upgrade")
+	}
+	if marked(`{"hooks":{"Stop":[{"hooks":[{"command":"echo my background_tasks helper"}]}]}}`) {
+		t.Error("an unrelated hook mentioning only background_tasks must not match — we'd never seed")
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 // The activity hooks must be ADDED to a user's existing hooks, not clobber them,
