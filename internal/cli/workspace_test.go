@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestHasMarkerLine(t *testing.T) {
@@ -101,4 +103,42 @@ func TestWaitForMarker(t *testing.T) {
 			t.Error("reported a marker that was never printed")
 		}
 	})
+}
+
+// What Claude writes to the topic file is model output on its way into a shell
+// command and a session name, so it gets reduced to one short plain line.
+func TestSanitizeTopic(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"auth refactor and token expiry", "auth refactor and token expiry"},
+		{"", ""},
+		{"   \n\n", ""},
+		// The first non-empty line wins: a chatty model may add more below.
+		{"payment webhook retries\nAlso I updated the tests.\n", "payment webhook retries"},
+		{"\n\n  fixing the SSE reconnect  \n", "fixing the SSE reconnect"},
+		// Models like to dress a short answer up.
+		{`"quota accounting rewrite"`, "quota accounting rewrite"},
+		{"**billing edge cases**", "billing edge cases"},
+		{"`tmux pane capture`", "tmux pane capture"},
+		// Control characters and stray escapes must not reach a name.
+		{"deploy\tpipeline\x07 fixes\r", "deploy pipeline fixes"},
+		{"a\x1b[31mred\x1b[0m name", "a[31mred[0m name"},
+		// Too long: cut at a word boundary, never mid-rune.
+		{strings.Repeat("verylongword", 20), strings.Repeat("verylongword", 20)[:maxTopicLen]},
+		{"one two three four five six seven eight nine ten eleven twelve thirteen",
+			"one two three four five six seven eight nine ten eleven"},
+		{"úprava účtování kvót a další věci které jsou opravdu hodně dlouhé a nevejdou se",
+			"úprava účtování kvót a další věci které jsou"},
+	}
+	for _, c := range cases {
+		got := sanitizeTopic(c.in)
+		if got != c.want {
+			t.Errorf("sanitizeTopic(%q) =\n  %q\nwant\n  %q", c.in, got, c.want)
+		}
+		if len(got) > maxTopicLen {
+			t.Errorf("sanitizeTopic(%q) is %d bytes, over the %d cap", c.in, len(got), maxTopicLen)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("sanitizeTopic(%q) produced invalid UTF-8: %q", c.in, got)
+		}
+	}
 }

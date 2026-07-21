@@ -4,8 +4,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -306,5 +308,152 @@ func TestCheckpointGuardIsSingleFlight(t *testing.T) {
 	s.endCheckpoint("ws")
 	if !s.beginCheckpoint("ws") {
 		t.Error("after finishing, a new checkpoint should be allowed again")
+	}
+}
+
+// A reconnect storm is many UI tabs asking "is my session still alive?" at once,
+// and answering costs an SSH round trip per host. If every asker got its own
+// call, an outage would produce a burst of simultaneous handshakes — exactly what
+// sshd's MaxStartups refuses, so the storm would keep itself from recovering.
+// Callers that arrive while a call is in flight must share its answer.
+func TestConcurrentWorkspaceListsShareOneCall(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	s := &server{deps: Deps{
+		ListWorkspaces: func() ([]WorkspaceInfo, error) {
+			calls.Add(1)
+			<-release // hold the call open so the others pile up behind it
+			return []WorkspaceInfo{{Name: "w17-01", Host: "h", Status: "running"}}, nil
+		},
+	}}
+
+	const askers = 20
+	var wg sync.WaitGroup
+	got := make([][]WorkspaceInfo, askers)
+	for i := range askers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			list, err := s.listWorkspacesShared(0)
+			if err != nil {
+				t.Errorf("asker %d: %v", i, err)
+			}
+			got[i] = list
+		}()
+	}
+	// Let them all arrive before the first call is allowed to finish.
+	for s.inFlight() == nil {
+		runtime.Gosched()
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if n := calls.Load(); n != 1 {
+		t.Errorf("%d tabs asking at once produced %d SSH calls, want 1", askers, n)
+	}
+	// Sharing is only correct if everyone actually gets the answer.
+	for i, list := range got {
+		if len(list) != 1 || list[0].Name != "w17-01" {
+			t.Errorf("asker %d got %v, want the shared result", i, list)
+		}
+	}
+
+	// And the sharing must not turn into a cache: a later ask re-measures.
+	release = make(chan struct{})
+	close(release)
+	if _, err := s.listWorkspacesShared(0); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("a call after the first settled made %d total calls, want 2 (no caching)", n)
+	}
+}
+
+// inFlight exposes the shared-call slot for the test above.
+func (s *server) inFlight() *wsListCall {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	return s.wsInFlight
+}
+
+// Connectivity is a property of the server, not of each workspace on it: twenty
+// tabs watching the same host through an outage are asking one question. A probe
+// may therefore reuse a recent answer — but only a probe, and only a successful
+// one, and never past the window.
+func TestProbesReuseARecentListButActionsMeasure(t *testing.T) {
+	var calls atomic.Int32
+	fail := false
+	clock := time.Unix(0, 0)
+	s := &server{
+		now: func() time.Time { return clock },
+		deps: Deps{ListWorkspaces: func() ([]WorkspaceInfo, error) {
+			calls.Add(1)
+			if fail {
+				return nil, io.ErrUnexpectedEOF
+			}
+			return []WorkspaceInfo{{Name: "w17-01", Host: "h", Status: "running"}}, nil
+		}},
+	}
+	probe := func() { _, _ = s.listWorkspacesShared(10 * time.Second) }
+
+	probe()
+	if calls.Load() != 1 {
+		t.Fatalf("first probe made %d calls, want 1", calls.Load())
+	}
+	// Twenty tabs, spread over the window rather than simultaneous — so this is
+	// the reuse window doing the work, not the single-flight.
+	for range 20 {
+		clock = clock.Add(400 * time.Millisecond)
+		probe()
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("20 probes within the window made %d SSH calls, want 1", n)
+	}
+
+	// Past the window, a probe measures again.
+	clock = clock.Add(10 * time.Second)
+	probe()
+	if n := calls.Load(); n != 2 {
+		t.Errorf("a probe past the window made %d total calls, want 2", n)
+	}
+
+	// An action never reuses: it is about to be acted on.
+	before := calls.Load()
+	if _, err := s.listWorkspacesShared(0); err != nil {
+		t.Fatal(err)
+	}
+	if n := calls.Load(); n != before+1 {
+		t.Error("maxAge=0 must always measure — a status you act on cannot be remembered")
+	}
+
+	// A failure must not be reused: the server would keep being reported down for
+	// the whole window after it had already come back.
+	fail = true
+	clock = clock.Add(time.Minute)
+	probe()
+	fail = false
+	before = calls.Load()
+	probe()
+	if n := calls.Load(); n != before+1 {
+		t.Error("a failed probe was reused; a recovered server would look down until it expired")
+	}
+}
+
+// The window is a promise about staleness, so an oversized (or junk) request for
+// one must not be honoured verbatim.
+func TestMaxAgeIsClamped(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":       0,
+		"junk":   0,
+		"0":      0,
+		"-5":     0,
+		"10":     10 * time.Second,
+		"999999": maxAgeCap,
+	}
+	for in, want := range cases {
+		if got := parseMaxAge(in); got != want {
+			t.Errorf("parseMaxAge(%q) = %v, want %v", in, got, want)
+		}
 	}
 }

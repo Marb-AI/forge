@@ -24,6 +24,14 @@ const state = {
   activeFile: null, // path shown in the viewer, or null (terminal visible)
   showHidden: false, // show dotfiles at the tree root
   stopped: false, // the active workspace has no Claude session running
+  // Why the terminal went away, which decides what the card says. The stream ends
+  // the same way whether tmux died or the ssh link dropped, so an end we did not
+  // ask for starts as "checking" and only becomes a verdict once we've asked the
+  // host: "stopped" (Claude is really gone) or "lost" (Claude is fine, we aren't).
+  endCause: "stopped", // "stopped" | "checking" | "lost"
+  // The reattach loop that runs while the link is down. `busy` is what keeps a
+  // slow attempt from overlapping the next one — see scheduleReconnect.
+  reconnect: { timer: null, tries: 0, busy: false, pending: false },
   activity: {},   // ws name -> {state, ts}: Claude's attention state, polled
 };
 
@@ -66,7 +74,14 @@ function b64decodeBytes(b64) {
 }
 
 // ---- workspaces / tabs -----------------------------------------------------
-async function loadWorkspaces() {
+// maxAge (seconds) says a recent answer is good enough. Only the reconnect probe
+// passes it: it asks on a loop, and connectivity is a property of the SERVER, so
+// the twentieth tab asking "is it back yet?" within the same few seconds should
+// reuse the answer rather than buy another SSH handshake. Everything else — page
+// load, and every refresh after you stop/start/restart something — leaves it off
+// and gets a freshly measured status, because that is what you are about to act on.
+async function loadWorkspaces({ maxAge = 0 } = {}) {
+  const wsURL = maxAge > 0 ? `/api/workspaces?maxAge=${maxAge}` : "/api/workspaces";
   // Both, in parallel. /api/hosts is a local file and answers in about 5ms;
   // /api/workspaces goes over SSH to ask which Claude sessions are up and takes
   // half a second. Fetching the cheap one here keeps state.hosts warm, so Settings
@@ -74,7 +89,7 @@ async function loadWorkspaces() {
   // and correcting itself half a second later — which is exactly the few-pixel
   // reflow this used to cause.
   const [ws, hosts] = await Promise.all([
-    fetch("/api/workspaces").then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    fetch(wsURL).then((r) => (r.ok ? r.json() : [])).catch(() => []),
     fetch("/api/hosts").then((r) => (r.ok ? r.json() : [])).catch(() => []),
   ]);
   state.workspaces = orderWorkspaces(ws);
@@ -141,15 +156,41 @@ function renderStage() {
   }
 }
 
-// The card that stands in for the terminal. It has to say which of three different
-// things is actually true — offering "Start Claude" for a workspace the host no
-// longer has would only ssh into a user that doesn't exist.
+// The card that stands in for the terminal. It has to say which of several
+// different things is actually true — offering "Start Claude" for a workspace the
+// host no longer has would only ssh into a user that doesn't exist, and offering
+// it for a session that is still running would be flatly wrong.
 function paintStoppedCard() {
   const ws = state.workspaces.find((w) => w.name === state.active);
   const status = ws ? ws.status : "stopped";
   const title = document.getElementById("stopped-title");
   const text = document.getElementById("stopped-text");
   const start = document.getElementById("stopped-start");
+  start.dataset.action = "start";
+  start.textContent = "▶  Start Claude";
+
+  // The stream just dropped and we haven't heard back from the host yet. Claiming
+  // "stopped" here is a guess, and the wrong one whenever the link is what broke.
+  if (state.endCause === "checking") {
+    title.textContent = "Connection lost";
+    text.textContent = `The connection to "${state.active}" dropped. ` +
+      `Checking whether Claude is still running…`;
+    start.hidden = true;
+    return;
+  }
+  // The host says the session is up: it was the link between this browser and the
+  // server that went — a network blip, or the laptop sleeping. Nothing was
+  // interrupted, so reattach; do NOT offer to "start" what never stopped.
+  if (state.endCause === "lost") {
+    title.textContent = "Connection lost";
+    text.textContent = `Claude is still running in "${state.active}" — it was the connection ` +
+      `from this browser that dropped, not the session. Nothing was interrupted; ` +
+      `reattaching automatically.`;
+    start.dataset.action = "reconnect";
+    start.textContent = "⟲  Reconnect now";
+    start.hidden = false;
+    return;
+  }
 
   if (status === "missing") {
     title.textContent = "Not on the server";
@@ -164,8 +205,15 @@ function paintStoppedCard() {
     const host = ws ? ws.host : "it";
     title.textContent = "Server unreachable";
     text.textContent = `Can't reach "${host}", the server "${state.active}" lives on, ` +
-      `so there is no telling whether Claude is running. Nothing has been changed.`;
-    start.hidden = true;
+      `so there is no telling whether Claude is running. Nothing has been changed.` +
+      // A server that is down comes back, and when it does we reattach on our own.
+      // Saying so is the difference between "wait" and "go and fix something".
+      (reconnecting() ? ` Retrying until it answers.` : ``);
+    // Retrying, so offer to skip the wait — but never a "Start", which would be a
+    // claim about a session no one can currently see.
+    start.dataset.action = "reconnect";
+    start.textContent = "⟲  Retry now";
+    start.hidden = !reconnecting();
     return;
   }
   title.textContent = "Session stopped";
@@ -547,6 +595,8 @@ function selectWs(name) {
   // just stopped. Show the Start card instead and let the choice be yours.
   const ws = state.workspaces.find((w) => w.name === name);
   state.stopped = !ws || ws.status !== "running";
+  state.endCause = "stopped"; // a fresh tab's card describes the host's status, not a drop
+  cancelReconnect(); // the loop belonged to the workspace you just left
   teardownTerminal();
   if (!state.stopped) openTerminal(name);
   renderStage();
@@ -636,7 +686,19 @@ function connectStream(sess, onEnd) {
     `?cols=${sess.term.cols}&rows=${sess.term.rows}`;
   const es = new EventSource(url);
   sess.es = es;
-  es.onmessage = (ev) => { if (ev.data) sess.term.write(b64decodeBytes(ev.data)); };
+  es.onmessage = (ev) => {
+    // A byte arriving is the only proof the link actually works — an ssh that
+    // connects and is then refused looks like success right up until it isn't.
+    // So the backoff resets here, on evidence, rather than when we merely decide
+    // to try again; otherwise a reattach that dies on arrival would restart the
+    // curve at one second every time and hammer a server that is already
+    // struggling.
+    if (!sess.gotData) {
+      sess.gotData = true;
+      if (sess.kind === "claude") cancelReconnect();
+    }
+    if (ev.data) sess.term.write(b64decodeBytes(ev.data));
+  };
   es.addEventListener("end", () => {
     es.close();
     sess.ended = true;
@@ -684,15 +746,154 @@ function openTerminal(ws) {
       setStatus("Reconnecting to the fresh session…");
       setTimeout(() => { if (state.active === ws) openTerminal(ws); }, 1000);
     } else {
-      // The session is gone (stopped here, or killed from elsewhere). Say so with
-      // the Start card rather than a status line nobody reads.
+      // The stream ended and we didn't ask for it. That looks identical whether
+      // tmux died or the ssh link did, so don't guess: show "Connection lost"
+      // while we ask the host which it was.
       teardownTerminal();
       state.stopped = true;
+      state.endCause = "checking";
       setStatus(null);
       renderStage();
+      diagnoseEnd(ws);
     }
   });
 }
+
+// Did the session die, or just our connection to it? Only the host can say, so
+// ask it. A workspace still "running" means tmux is alive and it was the link
+// that broke — the case that used to be reported as "Session stopped", telling
+// you your work was gone when Claude was in fact still working.
+//
+// Asking is one status call, which the daemon makes once per HOST for all of its
+// workspaces — so this costs the same whether you keep one workspace or twenty.
+// Reattaching is what costs a fresh ssh handshake, and we only do that once the
+// host has said the session is actually up.
+async function diagnoseEnd(ws) {
+  if (state.reconnect.busy) return; // an attempt is already in flight
+  state.reconnect.busy = true;
+  try {
+    // A probe, not an action: reuse an answer up to the loop's own floor old, so
+    // that N tabs watching the same server cost one round trip, not N.
+    await loadWorkspaces({ maxAge: RECONNECT_CAP_MIN / 1000 });
+  } catch {
+    // Can't even reach our own daemon. Nothing to conclude — just try again.
+  } finally {
+    state.reconnect.busy = false;
+  }
+  // Slow ssh: you may have switched tabs, or started the session again, while we
+  // were asking. Either way this answer is no longer about what's on screen.
+  if (state.active !== ws || !state.stopped) return cancelReconnect();
+
+  const w = state.workspaces.find((x) => x.name === ws);
+  const status = w ? w.status : null;
+
+  // The session is up: it was the link that broke, so reattach on your behalf —
+  // you shouldn't have to click anything because the wifi blinked. It goes
+  // through the same backoff as everything else, which is what stops a reattach
+  // that fails instantly (sshd refusing under MaxStartups) from becoming a tight
+  // loop of handshakes. The first wait is a second, so a blip still heals at once.
+  if (status === "running") {
+    state.endCause = "lost";
+    renderStage();
+    scheduleReconnect(ws, () => reattach(ws));
+    return;
+  }
+  // The host answered, and the session is genuinely gone (or the workspace is).
+  // Stop: the terminal stream attaches-or-CREATES, so retrying here would quietly
+  // resurrect a session you stopped on purpose.
+  if (status === "stopped" || status === "missing") {
+    cancelReconnect();
+    state.endCause = "stopped";
+    renderStage();
+    return;
+  }
+  // Unreachable, or we never got an answer: the server is down or the link still
+  // is. Keep trying — this is the case that comes back on its own.
+  state.endCause = "stopped"; // paints the truthful "Server unreachable" card
+  renderStage();
+  scheduleReconnect(ws, () => diagnoseEnd(ws));
+}
+
+// Put the terminal back. Note we only get here once the host has said the session
+// is running — the stream attaches-or-creates, so reattaching to a session that
+// really stopped would silently start a new Claude.
+function reattach(ws) {
+  if (state.active !== ws || !state.stopped) return;
+  state.stopped = false;
+  state.endCause = "stopped";
+  renderStage();
+  openTerminal(ws);
+}
+
+// How long to wait before the next reattach: 1s, 2s, 4s, 8s, then a random
+// 10–30s forever.
+//
+// Two reasons the tail is random rather than a round number. A fixed interval
+// synchronises every tab and every machine you left the UI open on: the server
+// comes back and they all knock at the same instant, which is exactly when sshd's
+// MaxStartups (10 concurrent unauthenticated connections by default) starts
+// refusing them — a self-inflicted stampede at the worst moment. And an outage
+// long enough to matter is an outage where a per-tab 10s and a per-tab 30s are
+// equally fine, so spreading them costs nothing.
+const RECONNECT_CAP_MIN = 10000;
+const RECONNECT_CAP_MAX = 30000;
+function reconnectDelay(tries) {
+  const step = 1000 * Math.pow(2, tries);
+  if (step < RECONNECT_CAP_MIN) return step;
+  return RECONNECT_CAP_MIN + Math.random() * (RECONNECT_CAP_MAX - RECONNECT_CAP_MIN);
+}
+
+// Arm the next attempt. Scheduling happens only AFTER the previous one resolved,
+// never on a fixed interval: an ssh connect to a machine that is hung (rather
+// than refusing) blocks for the TCP timeout, which is longer than the interval —
+// a repeating timer would stack overlapping connections on top of each other and
+// still be piling them up when the server finally answers.
+function scheduleReconnect(ws, attempt) {
+  clearTimeout(state.reconnect.timer);
+  state.reconnect.attempt = attempt;
+  // A hidden tab is a tab nobody is looking at. Retrying in the background is
+  // pure cost — ssh handshakes for a terminal that isn't on screen — so park the
+  // loop and pick it up the moment the tab is looked at again. This is what keeps
+  // "the UI open in twenty tabs" from meaning twenty reconnect loops: at most the
+  // visible one runs.
+  if (document.hidden) {
+    state.reconnect.pending = true;
+    return;
+  }
+  state.reconnect.pending = false;
+  const delay = reconnectDelay(state.reconnect.tries++);
+  state.reconnect.timer = setTimeout(attempt, delay);
+}
+
+function cancelReconnect() {
+  clearTimeout(state.reconnect.timer);
+  state.reconnect.timer = null;
+  state.reconnect.tries = 0;
+  state.reconnect.pending = false;
+  state.reconnect.attempt = null;
+}
+
+// Is a reattach still coming? The card says so, so that a server that will come
+// back on its own doesn't read like something you have to go and fix.
+function reconnecting() {
+  return !!state.reconnect.timer || state.reconnect.pending || state.reconnect.busy;
+}
+
+// Two signals worth more than any timer, because both mean "the thing that was
+// broken may have just been fixed": the tab coming back to the foreground, and
+// the OS reporting the network is up. Both reset the backoff — the wait so far
+// was about a situation that no longer holds.
+function retryNow() {
+  if (!state.active || !state.stopped || !reconnecting()) return;
+  const attempt = state.reconnect.attempt || (() => diagnoseEnd(state.active));
+  clearTimeout(state.reconnect.timer);
+  state.reconnect.timer = null;
+  state.reconnect.tries = 0;
+  state.reconnect.pending = false;
+  attempt();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) retryNow(); });
+window.addEventListener("online", retryNow);
 
 function teardownTerminal() {
   disposeTerminal(state.claude);
@@ -1223,6 +1424,8 @@ async function doStop() {
   try {
     await post("stop", ws);
     state.stopped = true;
+    state.endCause = "stopped"; // we killed it — no need to go and ask why it ended
+    cancelReconnect(); // and definitely no reattaching: it would start a new one
     setStatus(null);
   } catch (e) {
     // The stop failed, so the session is still alive — put the terminal back
@@ -1242,7 +1445,9 @@ function doStart() {
   if (!state.active) return;
   const ws = state.active;
   state.stopped = false;
+  state.endCause = "stopped";
   state.reconnectOnEnd = false;
+  cancelReconnect(); // you asked directly; the loop's opinion is now irrelevant
   renderStage();
   // No "starting…" message: openTerminal clears the status line anyway, and the
   // terminal itself appearing is the feedback.
@@ -1397,7 +1602,14 @@ const NEW_HOST = "__new__";
 
 document.getElementById("add-tab").addEventListener("click", openWizard);
 document.getElementById("empty-create").addEventListener("click", openWizard);
-document.getElementById("stopped-start").addEventListener("click", doStart);
+// One button, two meanings: it starts a session that is really stopped, and
+// reattaches to one that only lost its connection. Same code path either way —
+// the stream attaches-or-creates — but the label has to match what's true, or it
+// reads as "you have to start Claude again" over a session that never stopped.
+document.getElementById("stopped-start").addEventListener("click", (e) => {
+  if (e.currentTarget.dataset.action === "reconnect") retryNow();
+  else doStart();
+});
 document.getElementById("wiz-close").addEventListener("click", closeWizard);
 document.getElementById("wiz-cancel").addEventListener("click", closeWizard);
 document.getElementById("wiz-create").addEventListener("click", submitWizard);
