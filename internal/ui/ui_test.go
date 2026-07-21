@@ -4,7 +4,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -316,24 +315,36 @@ func TestCheckpointGuardIsSingleFlight(t *testing.T) {
 // call, an outage would produce a burst of simultaneous handshakes — exactly what
 // sshd's MaxStartups refuses, so the storm would keep itself from recovering.
 // Callers that arrive while a call is in flight must share its answer.
+//
+// The synchronisation is exact, not timed. The leader's call blocks on `release`,
+// and each of the other callers signals onJoin the instant it commits to waiting
+// on that call — so the test releases the leader only once all askers-1 of them
+// have joined. There is no sleep to lose a race to, and no spin that can hang: a
+// caller that failed to join would leave `joined` short of its target and trip
+// the bounded wait instead of silently starting a second call.
 func TestConcurrentWorkspaceListsShareOneCall(t *testing.T) {
+	const askers = 20
+
 	var calls atomic.Int32
 	release := make(chan struct{})
-	s := &server{deps: Deps{
-		ListWorkspaces: func() ([]WorkspaceInfo, error) {
+	joined := make(chan struct{}, askers)
+	s := &server{
+		onJoin: func() { joined <- struct{}{} },
+		deps: Deps{ListWorkspaces: func() ([]WorkspaceInfo, error) {
 			calls.Add(1)
-			<-release // hold the call open so the others pile up behind it
+			<-release // hold the leader's call open so the others pile up behind it
 			return []WorkspaceInfo{{Name: "w17-01", Host: "h", Status: "running"}}, nil
-		},
-	}}
+		}},
+	}
 
-	const askers = 20
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	got := make([][]WorkspaceInfo, askers)
 	for i := range askers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start // released together, so they genuinely contend
 			list, err := s.listWorkspacesShared(0)
 			if err != nil {
 				t.Errorf("asker %d: %v", i, err)
@@ -341,11 +352,12 @@ func TestConcurrentWorkspaceListsShareOneCall(t *testing.T) {
 			got[i] = list
 		}()
 	}
-	// Let them all arrive before the first call is allowed to finish.
-	for s.inFlight() == nil {
-		runtime.Gosched()
-	}
-	time.Sleep(20 * time.Millisecond)
+	close(start)
+
+	// Wait for exactly the askers-1 joiners (one asker is the leader running the
+	// call). Bounded, so a regression that lets callers start their own call hangs
+	// here for a second and fails, rather than spinning forever.
+	waitJoins(t, joined, askers-1, 2*time.Second)
 	close(release)
 	wg.Wait()
 
@@ -370,11 +382,18 @@ func TestConcurrentWorkspaceListsShareOneCall(t *testing.T) {
 	}
 }
 
-// inFlight exposes the shared-call slot for the test above.
-func (s *server) inFlight() *wsListCall {
-	s.wsMu.Lock()
-	defer s.wsMu.Unlock()
-	return s.wsInFlight
+// waitJoins blocks until n signals arrive on ch, or fails the test at the
+// deadline — the bounded counterpart to spinning until some condition holds.
+func waitJoins(t *testing.T, ch <-chan struct{}, n int, within time.Duration) {
+	t.Helper()
+	deadline := time.After(within)
+	for range n {
+		select {
+		case <-ch:
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d callers to join the in-flight call", n)
+		}
+	}
 }
 
 // Connectivity is a property of the server, not of each workspace on it: twenty

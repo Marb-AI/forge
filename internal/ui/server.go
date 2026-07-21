@@ -130,6 +130,7 @@ type server struct {
 	wsLast     *wsListCall      // the last call that completed, for maxAge to reuse
 	wsLastAt   time.Time        // when wsLast finished
 	now        func() time.Time // overridable in tests
+	onJoin     func()           // test seam: a caller just joined an in-flight call
 }
 
 // wsListCall is one in-flight ListWorkspaces, and the result everyone waiting on
@@ -394,6 +395,13 @@ func (s *server) listWorkspacesShared(maxAge time.Duration) ([]WorkspaceInfo, er
 		return c.list, c.err
 	}
 	if c := s.wsInFlight; c != nil {
+		// Signalled while still holding the lock: once this fires, the caller has
+		// committed to waiting on c, so it can never start a second call — which is
+		// what lets a test release the leader deterministically after N joins rather
+		// than after a hopeful sleep. Nil in production.
+		if s.onJoin != nil {
+			s.onJoin()
+		}
 		s.wsMu.Unlock()
 		<-c.done
 		return c.list, c.err
