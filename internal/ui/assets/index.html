@@ -20,9 +20,39 @@
 
     <div id="body">
       <aside id="filepane">
+        <div id="track-banner" hidden>
+          <div class="track-clocks">
+            <span class="track-clock"
+                  title="Session — time since this Claude session began. Kept across a checkpoint; reset on stop or restart.">
+              <svg class="track-ico" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>
+              </svg>
+              <span id="track-session">0:00</span>
+            </span>
+            <span class="track-clock" id="track-active-wrap"
+                  title="Active — time you've actually spent at this workspace during the session.">
+              <svg class="track-ico" viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">
+                <circle cx="12" cy="12" r="5"></circle>
+              </svg>
+              <span id="track-active">0:00</span>
+            </span>
+          </div>
+          <div class="track-btns">
+            <button id="track-pause" title="Pause activity tracking">⏸</button>
+            <button id="track-copy" title="Copy session &amp; active time">⧉</button>
+            <button id="track-hide" title="Hide the tracking banner">✕</button>
+          </div>
+        </div>
         <div class="pane-head">
           <span>Files</span>
           <span class="pane-actions">
+            <button id="track-toggle" title="Show session tracking" hidden>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>
+              </svg>
+            </button>
             <button id="files-hidden" title="Show hidden files (root only)">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -119,6 +149,7 @@
         </div>
       </div>
       <div class="modal-foot">
+        <button id="cf-copy" hidden>Copy times</button>
         <button id="cf-cancel">Cancel</button>
         <button id="cf-ok" class="primary">Confirm</button>
       </div>

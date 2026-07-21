@@ -539,6 +539,229 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") pollActivity();
 });
 
+// ---- session + activity tracking -------------------------------------------
+// Two per-workspace clocks in a banner above the file tree.
+//
+// Session clock: how long the active workspace's Claude session has run. The
+// server owns it (tmux session_created, held across a checkpoint, reset on stop/
+// restart); we just tick wall-time from the start it reports.
+//
+// Activity clock: how long YOU have been present at the active workspace this
+// session. We accumulate it here — a second per second while the conditions hold —
+// and flush the arrears to the server so it survives a reload or a dropped link.
+// It only ever runs for the active workspace, and only while its session is up:
+// user activity is a subset of the Claude session.
+//
+// It counts while: the workspace is active AND its session is running AND the forge
+// tab is visible AND the window is focused AND you haven't paused. Switching
+// workspace hands the clock to the other one; leaving the page (tab/window/app) or
+// the pause button stops it. ANY interaction on the page clears a manual pause —
+// the button is a one-shot "I'm stepping away", and your next click resumes it.
+const TRACK_HIDE_KEY = "forge-hide-tracking";
+const track = {
+  data: {},                                   // ws -> {session_start, active_seconds} (server)
+  pending: {},                                // ws -> locally accrued, not-yet-flushed seconds
+  paused: false,                              // manual pause; any interaction clears it
+  hasFocus: typeof document !== "undefined" ? document.hasFocus() : true,
+  hidden: localStorage.getItem(TRACK_HIDE_KEY) === "1",
+};
+
+// Whether the activity clock is accruing right now, for the active workspace. It
+// needs a session the server is actually tracking (track.data) — so a host whose
+// agent predates this feature never silently piles up seconds it can't flush.
+function trackingLive() {
+  return !!state.active && !state.stopped && !!track.data[state.active] &&
+    !document.hidden && track.hasFocus && !track.paused;
+}
+
+function fmtDur(s) {
+  s = Math.max(0, Math.floor(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
+// The displayed numbers for a workspace: session = wall-time since start; active =
+// the server's count plus whatever we've accrued locally since the last flush.
+function trackNumbers(ws) {
+  const d = ws ? track.data[ws] : null;
+  if (!d || !d.session_start) return null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  return {
+    session: Math.max(0, nowSec - d.session_start),
+    active: (d.active_seconds || 0) + (track.pending[ws] || 0),
+  };
+}
+
+function trackCopyText() {
+  const n = trackNumbers(state.active);
+  if (!n) return "";
+  const now = new Date();
+  const pad = (x) => String(x).padStart(2, "0");
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  // No workspace name: the names are internal pseudonyms and don't travel; the copy
+  // is what makes the numbers portable into a task in Linear/Jira/etc.
+  return `Session ${fmtDur(n.session)} · Active ${fmtDur(n.active)} · ${date}`;
+}
+
+function renderTrackBanner() {
+  const banner = document.getElementById("track-banner");
+  const toggle = document.getElementById("track-toggle");
+  const n = trackNumbers(state.active);
+  const have = !!n;                            // there's a running session to show
+  const show = have && !track.hidden;
+  banner.hidden = !show;
+  // The header toggle only means something when there's a session; it lights when
+  // the banner is showing, and lets you bring it back after hiding it.
+  toggle.hidden = !have;
+  toggle.classList.toggle("active", show);
+  if (!show) return;
+  banner.classList.toggle("live", trackingLive());
+  banner.classList.toggle("paused", track.paused);
+  document.getElementById("track-session").textContent = fmtDur(n.session);
+  document.getElementById("track-active").textContent = fmtDur(n.active);
+  const pause = document.getElementById("track-pause");
+  pause.textContent = track.paused ? "▶" : "⏸";
+  pause.title = track.paused ? "Resume activity tracking" : "Pause activity tracking";
+}
+
+// Merge a fresh server poll, keeping the activity count monotonic within a session:
+// a poll that raced ahead of an in-flight flush must not make the clock tick
+// backwards. A changed session_start (a restart) legitimately resets it.
+function mergeTrack(next) {
+  const out = next || {};
+  for (const ws in out) {
+    const prev = track.data[ws];
+    if (prev && prev.session_start === out[ws].session_start) {
+      out[ws].active_seconds = Math.max(out[ws].active_seconds, prev.active_seconds);
+    }
+  }
+  track.data = out;
+}
+
+async function pollTrack() {
+  if (!state.workspaces.length) return;
+  try {
+    const t = await fetch("/api/track").then((r) => (r.ok ? r.json() : null));
+    if (t) mergeTrack(t);
+  } catch { /* unreachable host: clocks just don't advance their base this round */ }
+  renderTrackBanner();
+}
+
+// Flush accrued activity for a workspace. Optimistically fold it into the local
+// base so the clock doesn't dip between the flush landing and the next poll; on
+// failure keep the arrears and let the next flush carry them.
+async function flushTrack(ws) {
+  const n = ws ? (track.pending[ws] | 0) : 0;
+  if (!ws || n <= 0) return;
+  try {
+    const res = await fetch(`/api/track/${encodeURIComponent(ws)}/inc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seconds: n }),
+    });
+    if (!res.ok) return;
+    track.pending[ws] -= n;
+    if (track.data[ws]) track.data[ws].active_seconds += n;
+  } catch { /* keep pending, retry next flush */ }
+}
+function flushActive() { return flushTrack(state.active); }
+
+// On leaving the page, the arrears would be lost to an in-flight fetch the browser
+// cancels — sendBeacon is the one thing that survives unload.
+function beaconFlush(ws) {
+  const n = ws ? (track.pending[ws] | 0) : 0;
+  if (!ws || n <= 0 || !navigator.sendBeacon) return;
+  try {
+    const blob = new Blob([JSON.stringify({ seconds: n })], { type: "application/json" });
+    if (navigator.sendBeacon(`/api/track/${encodeURIComponent(ws)}/inc`, blob)) {
+      track.pending[ws] -= n;
+    }
+  } catch {}
+}
+
+// One-second tick: bank a second for the active workspace when live, and repaint
+// (so the session clock advances even when nothing is accruing).
+function trackTick() {
+  if (trackingLive()) {
+    track.pending[state.active] = (track.pending[state.active] | 0) + 1;
+  }
+  renderTrackBanner();
+}
+
+// Clear a workspace's tracking locally — used when we stop or restart it, so the
+// banner doesn't linger on a session that's gone before the next poll catches up.
+function clearTrack(ws) {
+  delete track.pending[ws];
+  delete track.data[ws];
+  renderTrackBanner();
+}
+
+function setTrackHidden(v) {
+  track.hidden = v;
+  localStorage.setItem(TRACK_HIDE_KEY, v ? "1" : "0");
+  renderTrackBanner();
+}
+
+// Any interaction clears a manual pause — but not one on the pause button itself,
+// which is a toggle (mousedown there would otherwise cancel the very pause it sets).
+function trackInteraction(e) {
+  if (e && e.target && e.target.closest && e.target.closest("#track-pause")) return;
+  if (track.paused) { track.paused = false; renderTrackBanner(); }
+}
+for (const ev of ["mousedown", "keydown", "wheel", "touchstart"]) {
+  document.addEventListener(ev, trackInteraction, { passive: true });
+}
+
+// Focus/visibility gate the activity clock and are good moments to flush.
+window.addEventListener("focus", () => { track.hasFocus = true; renderTrackBanner(); });
+window.addEventListener("blur", () => { track.hasFocus = false; flushActive(); renderTrackBanner(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) flushActive();
+  renderTrackBanner();
+});
+window.addEventListener("pagehide", () => beaconFlush(state.active));
+
+document.getElementById("track-pause").addEventListener("click", () => {
+  track.paused = !track.paused;
+  if (track.paused) flushActive(); // bank what you've done before stepping away
+  renderTrackBanner();
+});
+document.getElementById("track-copy").addEventListener("click", (e) =>
+  copyToClipboard(trackCopyText(), e.currentTarget));
+document.getElementById("track-hide").addEventListener("click", () => setTrackHidden(true));
+document.getElementById("track-toggle").addEventListener("click", () => setTrackHidden(!track.hidden));
+
+setInterval(trackTick, 1000);
+setInterval(flushActive, 15000);
+setInterval(pollTrack, 5000);
+
+// ---- clipboard -------------------------------------------------------------
+function flashCopied(btn) {
+  if (!btn) return;
+  btn.classList.add("ok");
+  setTimeout(() => btn.classList.remove("ok"), 1000);
+}
+async function copyToClipboard(text, btn) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text); // localhost is a secure context
+    flashCopied(btn);
+    return;
+  } catch {}
+  try { // fallback for a browser that blocks the async clipboard API
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    flashCopied(btn);
+  } catch {}
+}
+
 // Arrow keys move between workspaces, Home/End jump to the ends — the keyboard
 // contract a tablist promises.
 document.getElementById("tabs").addEventListener("keydown", (e) => {
@@ -578,6 +801,7 @@ document.getElementById("tabs").addEventListener("keydown", (e) => {
 
 function selectWs(name) {
   if (state.active === name && state.claude) return;
+  flushTrack(state.active); // bank the outgoing workspace's activity before we switch
   state.active = name;
   // Remember it so a refresh comes back here (see initialWorkspace).
   localStorage.setItem(ACTIVE_KEY, name);
@@ -605,6 +829,9 @@ function selectWs(name) {
   if (ws && isUsable(ws.status)) loadTree(name);
   else document.getElementById("filetree").innerHTML =
     '<div class="muted">No files to show.</div>';
+
+  renderTrackBanner(); // reflect the new workspace's clocks immediately
+  pollTrack();         // and fetch its start/active without waiting for the interval
 }
 
 function hideSSHPanel() {
@@ -1334,7 +1561,7 @@ document.getElementById("set-port-save").addEventListener("click", saveUIPort);
 // Returns a promise that resolves true only if the user really confirmed.
 let cfResolve = null;
 
-function confirmAction({ title, body, confirmLabel = "Confirm", destructive = false, requireWord = null }) {
+function confirmAction({ title, body, confirmLabel = "Confirm", destructive = false, requireWord = null, copyText = "" }) {
   const modal = document.getElementById("confirm");
   // Only one dialog at a time. Opening a second over the first would strand the
   // first promise forever — its caller would sit there awaiting an answer that
@@ -1342,6 +1569,12 @@ function confirmAction({ title, body, confirmLabel = "Confirm", destructive = fa
   if (!modal.hidden) return Promise.resolve(false);
 
   document.getElementById("cf-title").textContent = title;
+
+  // A copy button by the confirm action, so you can grab the session's final times
+  // and paste them into a task before you close the session for good.
+  const copyBtn = document.getElementById("cf-copy");
+  copyBtn.hidden = !copyText;
+  copyBtn.onclick = copyText ? () => copyToClipboard(copyText, copyBtn) : null;
 
   const bodyEl = document.getElementById("cf-body");
   bodyEl.textContent = "";
@@ -1420,6 +1653,7 @@ async function doStop() {
     ],
     confirmLabel: "Stop session",
     destructive: true,
+    copyText: trackCopyText(),
   });
   if (!ok) return;
 
@@ -1433,6 +1667,7 @@ async function doStop() {
     state.stopped = true;
     state.endCause = "stopped"; // we killed it — no need to go and ask why it ended
     cancelReconnect(); // and definitely no reattaching: it would start a new one
+    clearTrack(ws); // the session's clocks end with it (the server cleared the file)
     setStatus(null);
   } catch (e) {
     // The stop failed, so the session is still alive — put the terminal back
@@ -1474,6 +1709,7 @@ async function doRestart() {
     ],
     confirmLabel: "Restart session",
     destructive: true,
+    copyText: trackCopyText(),
   });
   if (!ok) return;
 
@@ -1483,6 +1719,7 @@ async function doRestart() {
   setStatus("Restarting…");
   try {
     await post("restart", ws);
+    clearTrack(ws); // a hard restart is a new session — its clocks start over
     loadWorkspaces();
   } catch (e) {
     state.reconnectOnEnd = false;
@@ -1500,6 +1737,7 @@ async function doCheckpoint() {
       { text: "Do this while Claude is idle — if it's mid-task the checkpoint refuses rather than interrupt it.", warn: false },
     ],
     confirmLabel: "Checkpoint",
+    copyText: trackCopyText(),
   });
   if (!ok) return;
 
