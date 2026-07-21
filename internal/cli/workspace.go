@@ -322,6 +322,21 @@ func workspaceClaude(target sshx.Target, rest []string) int {
 // inside the (echoed) prompt — mid-sentence — doesn't count.
 const checkpointMarker = "FORGE_CHECKPOINT_SAVED"
 
+// topicFile is where Claude is asked to leave a few words about what the session
+// was about, for the resumed session to be named after.
+//
+// A file rather than a line on screen, deliberately. The pane also contains the
+// echo of the prompt we typed — which necessarily mentions whatever token we
+// would look for — so parsing the topic off the screen means telling Claude's
+// answer apart from our own question, using text that wraps at whatever width the
+// pane happens to be. A file has one writer and no echo.
+const topicFile = "$HOME/.forge/checkpoint-topic"
+
+// maxTopicLen bounds what ends up in a session name (and, before that, in a shell
+// command). Claude is asked for a handful of words; this is the guard for when it
+// answers with a paragraph.
+const maxTopicLen = 60
+
 // workspaceCheckpoint asks the running Claude session to write a handoff to its
 // memory, waits for it to finish, then restarts the session so it continues from
 // memory with a fresh context window. Run it from another terminal while the
@@ -356,12 +371,19 @@ func runCheckpoint(target sshx.Target, session string, log func(string)) error {
 			"(forge workspace <name> claude stop && forge workspace <name> claude, or the restart button in forge ui)")
 	}
 
+	// Clear any topic left by an earlier checkpoint before asking for a new one, so
+	// a Claude that ignores the request leaves us with nothing rather than with a
+	// stale description of work that finished days ago.
+	_ = runCapture(target.Args("mkdir -p \"$HOME/.forge\" && rm -f \"" + topicFile + "\""))
+
 	// The marker is embedded mid-sentence (words before and after) so its echo in
 	// the typed prompt can't wrap into a standalone marker line and false-positive;
 	// Claude's own output prints it alone on a line, which is what we match.
 	prompt := "Write a concise handoff to your memory right now — what we're working on, " +
 		"the current state, and the exact next steps — so a brand-new session can continue " +
-		"seamlessly. Do not ask me anything; just do it. After the memory is fully written — " +
+		"seamlessly. Do not ask me anything; just do it. Then write a single short line — " +
+		"three to six words naming what this session is about, no punctuation at the end — " +
+		"to the file " + topicFile + ", overwriting it. After the memory is fully written — " +
 		"including any index or pointer file it needs — print the token " + checkpointMarker +
 		" alone on its own line, as the very last thing you output, and then stop."
 	log("→ asking Claude to write a handoff to memory…")
@@ -384,12 +406,72 @@ func runCheckpoint(target sshx.Target, session string, log func(string)) error {
 		return fmt.Errorf("Claude kept working after the marker — left the session running, nothing killed")
 	}
 
+	// Read the topic before killing the session — after that the workspace is still
+	// there, but there is no reason to leave it to chance.
+	label := readTopic(target)
+	if label == "" {
+		// Claude didn't leave one (older session, or it just didn't). A timestamp
+		// still distinguishes this checkpoint from the last one, which is the whole
+		// point of naming them.
+		label = time.Now().Format("2006-01-02 15:04")
+	}
 	log("→ handoff saved; restarting the session from memory…")
 	_ = runCapture(target.Args("tmux", "kill-session", "-t", session))
-	if err := runCapture(target.Args(agentproto.ResumeClaude)); err != nil {
+	// target.User is the workspace name (WorkspaceTarget logs in as it).
+	resume := agentproto.ResumeClaude(target.User, label)
+	if err := runCapture(target.Args(resume)); err != nil {
 		return fmt.Errorf("restart: %w (start it manually with: forge workspace <name> claude)", err)
 	}
 	return nil
+}
+
+// readTopic fetches the few words Claude left about what the session was about,
+// and returns "" if there is nothing usable. Every failure here is soft: a
+// checkpoint that worked must not be reported as failed because the session ended
+// up with a duller name.
+func readTopic(target sshx.Target) string {
+	out, err := sshx.Capture(target.Args("cat \"" + topicFile + "\" 2>/dev/null || true")...)
+	if err != nil {
+		return ""
+	}
+	return sanitizeTopic(string(out))
+}
+
+// sanitizeTopic reduces whatever is in the file to one short, plain line. What
+// Claude writes there is model output, and it is on its way into a shell command
+// and a session name — so this keeps the first non-empty line, drops control
+// characters, collapses runs of whitespace, and trims it to length.
+func sanitizeTopic(s string) string {
+	line := ""
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			line = l
+			break
+		}
+	}
+	// Control characters (an ANSI escape, a stray CR) have no business in a name.
+	line = strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, line)
+	line = strings.Join(strings.Fields(line), " ")
+	// Models like to wrap a short answer in quotes or backticks; a name shouldn't
+	// inherit them.
+	line = strings.Trim(line, "\"'`*_#-— ")
+	if len(line) > maxTopicLen {
+		// Cut on a rune boundary, and prefer a word boundary when there is one near.
+		line = strings.ToValidUTF8(line[:maxTopicLen], "")
+		if i := strings.LastIndex(line, " "); i > maxTopicLen/2 {
+			line = line[:i]
+		}
+		line = strings.TrimRight(line, " ")
+	}
+	return line
 }
 
 // sendText types text into the tmux session and presses Enter. The text is piped

@@ -118,3 +118,61 @@ func TestStatusIsLabelledAsTheClaudeSession(t *testing.T) {
 		t.Error("a raw status is being rendered next to a workspace name; use sessionLabel()")
 	}
 }
+
+// The stream ends the same way whether the Claude session died or the ssh link
+// carrying it did — handleTermStream writes one "end" event for both. So an end
+// the browser did not ask for is not evidence the session stopped, and reporting
+// "Session stopped" for a dropped connection tells you your work is gone at the
+// exact moment Claude is still working. The browser has to go and ask the host.
+func TestUnexpectedStreamEndIsDiagnosedNotAssumedStopped(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+
+	if !strings.Contains(js, "function diagnoseEnd(") {
+		t.Fatal("no diagnoseEnd(): a dropped connection would be reported as a stopped session")
+	}
+	// It must reach the verdict from the host's status, not from the end event.
+	if !strings.Contains(js, `"lost"`) || !strings.Contains(js, `"checking"`) {
+		t.Error("diagnoseEnd should resolve an unexplained end into checking -> lost/stopped")
+	}
+	// A session the host still calls running must never be offered a "start": it
+	// never stopped, and the button has to say so.
+	if !strings.Contains(js, "Reconnect") {
+		t.Error("a lost connection to a running session must offer Reconnect, not Start")
+	}
+	if !strings.Contains(js, `state.endCause = "checking"`) {
+		t.Error("the stream's end handler must mark the cause unknown before the host answers")
+	}
+}
+
+// The reattach loop runs forever, so its shape is what keeps a server outage from
+// turning into a self-inflicted denial of service: no ControlMaster means every
+// attempt is a full SSH handshake, and sshd refuses new ones past MaxStartups.
+func TestReconnectBackoffCannotStampede(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+
+	if !strings.Contains(js, "function scheduleReconnect(") {
+		t.Fatal("no scheduleReconnect(): retries would have no backoff")
+	}
+	// A repeating timer is the bug: an SSH connect to a hung host blocks for the
+	// TCP timeout, which outlasts any sane interval, so attempts would stack.
+	if regexp.MustCompile(`setInterval\([^)]*(reconnect|diagnose|reattach)`).MatchString(js) {
+		t.Error("reconnect must re-arm after each attempt settles, not run on setInterval")
+	}
+	if !strings.Contains(js, "state.reconnect.busy") {
+		t.Error("nothing prevents a slow attempt from overlapping the next one")
+	}
+	// The tail must be random, or every tab and every machine knocks in unison the
+	// instant the server returns — precisely when MaxStartups starts refusing.
+	if !strings.Contains(js, "Math.random()") {
+		t.Error("the backoff tail must be jittered so tabs don't synchronise")
+	}
+	// A backgrounded tab is the multiplier: without this, twenty open tabs are
+	// twenty loops.
+	if !strings.Contains(js, "document.hidden") {
+		t.Error("a hidden tab must park its loop rather than keep handshaking")
+	}
+	// Backoff must reset on evidence the link works, not on the decision to retry.
+	if !strings.Contains(js, "sess.gotData") {
+		t.Error("the backoff should reset when a byte actually arrives, not on attach")
+	}
+}

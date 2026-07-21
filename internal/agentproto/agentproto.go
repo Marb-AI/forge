@@ -4,6 +4,8 @@
 // binaries from drifting apart.
 package agentproto
 
+import "strings"
+
 // Status values for a workspace's Claude session — the whole vocabulary, in one
 // place, because the browser UI switches on these strings too and a rename that
 // only happened here would silently mislabel every workspace.
@@ -100,11 +102,46 @@ const (
 	// nobody is attached yet.
 	StartClaude = SourceEnv + "tmux new -d -s " + TmuxSession + " claude"
 
-	// ResumeClaude starts a fresh session detached and tells Claude to pick up
-	// from the handoff it just wrote. This is the tail of a checkpoint.
-	ResumeClaude = SourceEnv + "tmux new -d -s " + TmuxSession + ` 'claude "continue from memory"'`
-
 	// KillClaude ends the session if it exists and succeeds either way, so only a
 	// connection failure surfaces as an error.
 	KillClaude = "tmux kill-session -t " + TmuxSession + " 2>/dev/null || true"
 )
+
+// ResumeClaude starts a fresh session detached and tells Claude to pick up from
+// the handoff it just wrote. This is the tail of a checkpoint.
+//
+// The session is given an explicit name, because a checkpoint used to leave
+// nothing to tell one resumable chat from another. Every checkpoint launched
+// Claude with the identical first message, and an unnamed session takes its title
+// from a summary of that message — so the resume picker filled up with rows that
+// all read "Continue from memory", in the one place you need to tell them apart.
+// The name carries the workspace and the moment: "marbai-01 2026-07-20 14:03".
+//
+// -n is recent, and these commands run on servers provisioned whenever the user
+// happened to provision them. An unknown flag would make Claude exit at once,
+// leaving the checkpoint with a killed session and nothing in its place — the
+// handoff is safe in memory, but the workspace looks dead. So the flag is used
+// only where it exists, and the fallback still gets a distinguishable title the
+// old way: by leading the prompt with the same words the name would have used.
+func ResumeClaude(workspace, stamp string) string {
+	name := workspace + " " + stamp
+	prompt := name + " — continue from memory: read the handoff you just wrote and carry on from it."
+
+	named := "claude -n " + shellQuote(name) + " " + shellQuote(prompt)
+	plain := "claude " + shellQuote(prompt)
+	// Asking Claude what it supports beats guessing from a version string, and it
+	// costs one local --help on a path that already takes minutes.
+	inner := "if claude --help 2>/dev/null | grep -q -- --name; then " + named + "; else " + plain + "; fi"
+
+	return SourceEnv + "tmux new -d -s " + TmuxSession + " " + shellQuote(inner)
+}
+
+// shellQuote wraps s so a POSIX shell reads it back as one literal argument.
+// These commands are assembled here and run verbatim on the server, through two
+// shells (ssh's, then the one tmux starts), so each layer has to be quoted on the
+// way in — an em dash or an apostrophe in a prompt must not become syntax.
+func shellQuote(s string) string {
+	// A single quote can't appear inside single quotes, so each one closes the
+	// string, contributes an escaped quote, and opens it again: ' -> '\''
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}

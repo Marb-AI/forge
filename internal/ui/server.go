@@ -124,6 +124,21 @@ type server struct {
 
 	jobMu sync.Mutex      // guards jobs
 	jobs  map[string]*job // long-running operations, followed over SSE
+
+	wsMu       sync.Mutex       // guards the fields below
+	wsInFlight *wsListCall      // the ListWorkspaces call callers are currently sharing
+	wsLast     *wsListCall      // the last call that completed, for maxAge to reuse
+	wsLastAt   time.Time        // when wsLast finished
+	now        func() time.Time // overridable in tests
+	onJoin     func()           // test seam: a caller just joined an in-flight call
+}
+
+// wsListCall is one in-flight ListWorkspaces, and the result everyone waiting on
+// it will get. See handleWorkspaces for why they share.
+type wsListCall struct {
+	done chan struct{}
+	list []WorkspaceInfo
+	err  error
 }
 
 // PIDPath returns the ui daemon's pidfile location (sibling to the supervisor's).
@@ -186,6 +201,7 @@ func Serve(dir string, port int, deps Deps) error {
 		terms:     newTermRegistry(),
 		ckRunning: map[string]bool{},
 		jobs:      map[string]*job{},
+		now:       time.Now,
 	}
 
 	if err := os.WriteFile(PIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
@@ -315,8 +331,28 @@ func noCache(next http.Handler) http.Handler {
 	})
 }
 
+// handleWorkspaces reports every workspace and the state of its Claude session.
+//
+// One SSH round trip per host answers for every workspace on it, because that is
+// the shape of the question: whether Claude is up in a particular workspace is
+// per-workspace, but whether the machine answers at all is per-SERVER, and it is
+// the second one the browser asks about over and over while a connection is down.
+// Twenty workspaces on one server are still one server's connectivity.
+//
+// Two mechanisms keep that from becoming a storm of handshakes:
+//
+//   - Concurrent callers share one call. This is not a cache; everyone still gets
+//     a freshly-measured status.
+//   - ?maxAge=<seconds> says "an answer this recent is good enough for me", so a
+//     caller that is merely probing reuses the last one instead of paying for a
+//     new round trip.
+//
+// maxAge is opt-in for exactly this reason: a status you are about to ACT on must
+// be measured, not remembered. So the reconnect probe passes it and everything
+// else — page load, and every refresh after a stop/start/restart — does not, and
+// is answered by a real round trip.
 func (s *server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
-	list, err := s.deps.ListWorkspaces()
+	list, err := s.listWorkspacesShared(parseMaxAge(r.URL.Query().Get("maxAge")))
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, err)
 		return
@@ -325,6 +361,66 @@ func (s *server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 		list = []WorkspaceInfo{}
 	}
 	writeJSON(w, list)
+}
+
+// maxAgeCap bounds what a caller may ask to reuse. A probe wants roughly the
+// reconnect loop's own floor — asking the server more often than it retries buys
+// nothing — and beyond half a minute a "current" status stops being one.
+const maxAgeCap = 30 * time.Second
+
+func parseMaxAge(v string) time.Duration {
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0 // absent, junk, or explicitly none: measure it
+	}
+	d := time.Duration(n) * time.Second
+	return min(d, maxAgeCap)
+}
+
+// listWorkspacesShared runs ListWorkspaces, subject to two ways of not running it:
+// a result younger than maxAge is reused, and a call already in flight is joined
+// rather than duplicated. The first caller in does the work; the rest read its
+// result.
+func (s *server) listWorkspacesShared(maxAge time.Duration) ([]WorkspaceInfo, error) {
+	s.wsMu.Lock()
+	// Recent enough for this caller? Only successful calls are reusable — caching
+	// a failure would report a server as unreachable for as long as the window
+	// lasts, after it had already come back.
+	if s.now == nil {
+		s.now = time.Now
+	}
+	if maxAge > 0 && s.wsLast != nil && s.wsLast.err == nil && s.now().Sub(s.wsLastAt) < maxAge {
+		c := s.wsLast
+		s.wsMu.Unlock()
+		return c.list, c.err
+	}
+	if c := s.wsInFlight; c != nil {
+		// Signalled while still holding the lock: once this fires, the caller has
+		// committed to waiting on c, so it can never start a second call — which is
+		// what lets a test release the leader deterministically after N joins rather
+		// than after a hopeful sleep. Nil in production.
+		if s.onJoin != nil {
+			s.onJoin()
+		}
+		s.wsMu.Unlock()
+		<-c.done
+		return c.list, c.err
+	}
+	c := &wsListCall{done: make(chan struct{})}
+	s.wsInFlight = c
+	s.wsMu.Unlock()
+
+	c.list, c.err = s.deps.ListWorkspaces()
+
+	// Clear before closing, so a caller woken by the close starts a fresh call
+	// rather than joining the one that just finished.
+	s.wsMu.Lock()
+	s.wsInFlight = nil
+	s.wsLast, s.wsLastAt = c, s.now()
+	s.wsMu.Unlock()
+	close(c.done)
+
+	return c.list, c.err
 }
 
 // handleActivity returns each workspace's Claude attention state, keyed by name.
