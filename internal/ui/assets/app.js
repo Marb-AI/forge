@@ -634,6 +634,13 @@ function makeTerminal(ws, kind, el, onEnd) {
     cursorBlink: true,
     scrollback: 5000,
     theme: termTheme(),
+    // When Claude's TUI turns on mouse tracking, a plain drag is forwarded to the
+    // session (so clicking Claude's options works) and xterm suppresses its own
+    // text selection. To still let you select — including dragging up into the
+    // scrollback — xterm honours a "force selection" modifier: Shift off the Mac,
+    // but on the Mac only Option, and only when this flag is on (it defaults off,
+    // which left Mac users with no way to select at all). So: ⌥-drag to select.
+    macOptionClickForcesSelection: true,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
