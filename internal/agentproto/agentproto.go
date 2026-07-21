@@ -61,6 +61,23 @@ type ActivityResult struct {
 	Activity map[string]Activity `json:"activity"`
 }
 
+// Track is one workspace's session tracking: SessionStart is the unix second the
+// current Claude session began (held across a checkpoint, reset on stop/restart),
+// and ActiveSeconds is how long the user has been present at this workspace during
+// that session. The agent reads both from ~/.forge-session.json; when that file is
+// absent it falls back to the tmux session's own creation time so a plain running
+// session still reports a start.
+type Track struct {
+	SessionStart  int64 `json:"session_start"`
+	ActiveSeconds int64 `json:"active_seconds"`
+}
+
+// TrackResult is returned by `forge-agent workspace-track`: one entry per running
+// workspace (a stopped session — whose marker file was removed — has no entry).
+type TrackResult struct {
+	Sessions map[string]Track `json:"sessions"`
+}
+
 // CreateResult is returned by `forge-agent workspace-create`.
 type CreateResult struct {
 	Workspace Workspace `json:"workspace"`
@@ -106,6 +123,26 @@ const (
 	// connection failure surfaces as an error.
 	KillClaude = "tmux kill-session -t " + TmuxSession + " 2>/dev/null || true"
 )
+
+// SessionFile is the per-workspace session-tracking file, in the workspace home.
+// It holds {session_start, active_seconds}; its presence means a session is being
+// tracked. The agent reads it (workspace-track); the workspace user's own commands
+// below create and clear it. A hidden dotfile so it stays out of the file tree.
+const SessionFile = ".forge-session.json"
+
+// ClearSession removes the tracking file, run as the workspace user. Appended to
+// the stop and restart commands so a stopped or hard-restarted session starts its
+// clocks over — unlike a checkpoint, which deliberately keeps them.
+const ClearSession = `rm -f "$HOME/` + SessionFile + `" 2>/dev/null || true`
+
+// FreezeSession pins the current session's start into the tracking file if it is
+// not there yet, run as the workspace user just before a checkpoint kills the tmux
+// session. Without it, the fresh session created by the checkpoint would report its
+// own (later) creation time and the session clock would jump. Create-if-absent: a
+// file already tracking activity keeps its earlier start untouched.
+const FreezeSession = `sc=$(tmux display -p -t ` + TmuxSession + ` '#{session_created}' 2>/dev/null); ` +
+	`f="$HOME/` + SessionFile + `"; ` +
+	`{ [ -n "$sc" ] && [ ! -f "$f" ] && printf '{"session_start":%s,"active_seconds":0}\n' "$sc" > "$f"; } || true`
 
 // ResumeClaude starts a fresh session detached and tells Claude to pick up from
 // the handoff it just wrote. This is the tail of a checkpoint.

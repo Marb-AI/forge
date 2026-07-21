@@ -26,8 +26,15 @@ import (
 	"github.com/Marb-AI/forge/internal/agentproto"
 )
 
-// baseDir is where workspace home directories live.
-const baseDir = "/home/workspaces"
+// baseDir is where workspace home directories live. A variable, not a constant, so
+// tests can point it at a fixture (the same seam as procRoot).
+var baseDir = "/home/workspaces"
+
+// metadataFile is the per-workspace metadata file (name, owner, created_at). A
+// hidden dotfile so it stays out of the browser's file tree — nothing reads it at
+// runtime; it is written once at creation. Older workspaces have the pre-rename
+// visible name and are moved in place on the next sweep (see migrateMetadata).
+const metadataFile = ".workspace.json"
 
 // nameRe restricts workspace names to safe Linux usernames — these become paths
 // and command arguments, so we validate strictly.
@@ -36,7 +43,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 // Main is the forge-agent entrypoint; returns a process exit code.
 func Main(args []string) int {
 	if len(args) == 0 {
-		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity>")
+		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc>")
 	}
 	switch args[0] {
 	case "workspace-create":
@@ -49,6 +56,10 @@ func Main(args []string) int {
 		return opStatus(args[1:])
 	case "workspace-activity":
 		return opActivity()
+	case "workspace-track":
+		return opTrack()
+	case "workspace-track-inc":
+		return opTrackInc(args[1:])
 	default:
 		return emitError("unknown op %q", args[0])
 	}
@@ -336,6 +347,7 @@ func opActivity() int {
 		}
 		name := e.Name()
 		ensureActivityHooks(name)
+		migrateMetadata(name) // piggy-back the metadata-file hide on the frequent sweep
 		if a, ok := readActivity(name); ok {
 			res.Activity[name] = a
 		}
@@ -364,6 +376,98 @@ func parseActivity(data []byte) (agentproto.Activity, bool) {
 		a.TS, _ = strconv.ParseInt(fields[1], 10, 64)
 	}
 	return a, true
+}
+
+// opTrack reports each running workspace's session tracking: when the current
+// Claude session began and how long the user has been present at it. The numbers
+// live in ~/.forge-session.json (written by opTrackInc and the workspace's own
+// freeze/clear commands); a workspace whose session is stopped — its file removed —
+// simply has no entry, the same shape as opActivity.
+func opTrack() int {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return emit(agentproto.TrackResult{Sessions: map[string]agentproto.Track{}})
+		}
+		return emitError("read %s: %v", baseDir, err)
+	}
+	res := agentproto.TrackResult{Sessions: map[string]agentproto.Track{}}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if t, ok := readTrack(e.Name()); ok {
+			res.Sessions[e.Name()] = t
+		}
+	}
+	return emit(res)
+}
+
+// readTrack returns a workspace's session tracking. The file is authoritative when
+// present. When it is absent we fall back to the tmux session's creation time, so a
+// plain running session (no activity flushed yet, no checkpoint yet) still reports a
+// start; with no file and no session there is nothing to track and ok is false.
+func readTrack(name string) (agentproto.Track, bool) {
+	var t agentproto.Track
+	if data, err := os.ReadFile(filepath.Join(baseDir, name, agentproto.SessionFile)); err == nil {
+		_ = json.Unmarshal(data, &t) // tolerate garbage: fall through to the tmux start
+	}
+	if t.SessionStart == 0 {
+		sc := sessionCreated(name)
+		if sc == 0 {
+			return agentproto.Track{}, false
+		}
+		t.SessionStart = sc
+	}
+	return t, true
+}
+
+// sessionCreated returns the unix second the workspace's Claude tmux session was
+// created, or 0 if there is none (run as the workspace user, whose tmux server it
+// is — the same runuser dance as sessionStatus).
+func sessionCreated(name string) int64 {
+	out, err := run("runuser", "-l", name, "-c",
+		fmt.Sprintf("tmux display -p -t %s '#{session_created}'", agentproto.TmuxSession))
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	return n
+}
+
+// opTrackInc adds seconds of user-present time to a workspace's session tracking,
+// creating the file — and pinning session_start to the current session's creation
+// time — on first write. The browser flushes its accumulated activity here every so
+// often (and on leaving), so the count survives a reload or a dropped connection.
+func opTrackInc(args []string) int {
+	fs := flag.NewFlagSet("workspace-track-inc", flag.ContinueOnError)
+	name := fs.String("name", "", "workspace name")
+	seconds := fs.Int("seconds", 0, "seconds of activity to add")
+	if err := fs.Parse(args); err != nil {
+		return emitError("bad arguments")
+	}
+	if !nameRe.MatchString(*name) {
+		return emitError("invalid workspace name %q", *name)
+	}
+	if *seconds <= 0 {
+		return emit(agentproto.OK{OK: true}) // nothing to add; not an error
+	}
+	path := filepath.Join(baseDir, *name, agentproto.SessionFile)
+	err := mergeJSON(path, func(m map[string]any) {
+		if n, _ := m["session_start"].(float64); n == 0 {
+			if sc := sessionCreated(*name); sc > 0 {
+				m["session_start"] = sc
+			}
+		}
+		cur, _ := m["active_seconds"].(float64)
+		m["active_seconds"] = int64(cur) + int64(*seconds)
+	})
+	if err != nil {
+		return emitError("write tracking: %v", err)
+	}
+	// The workspace user owns its home; the agent wrote the file as root.
+	_, _ = run("chown", *name+":"+*name, path)
+	return emit(agentproto.OK{OK: true})
 }
 
 // ensureActivityHooks installs the activity hooks into a workspace that predates
@@ -739,7 +843,24 @@ func writeMetadata(home, name string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(home, "workspace.json"), data, 0o644)
+	return os.WriteFile(filepath.Join(home, metadataFile), data, 0o644)
+}
+
+// migrateMetadata renames a workspace's pre-rename visible workspace.json to the
+// hidden .workspace.json. Idempotent and best-effort: it skips once the dotfile
+// exists and does nothing if there is no old file, so a status sweep never fails on
+// it. Safe because nothing reads the metadata at runtime — the rename keeps the same
+// inode and owner, it only stops the file cluttering the file tree.
+func migrateMetadata(name string) {
+	dot := filepath.Join(baseDir, name, metadataFile)
+	if _, err := os.Stat(dot); err == nil {
+		return
+	}
+	old := filepath.Join(baseDir, name, "workspace.json")
+	if _, err := os.Stat(old); err != nil {
+		return
+	}
+	_ = os.Rename(old, dot)
 }
 
 // run executes a command and returns combined output for error context.

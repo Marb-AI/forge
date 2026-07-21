@@ -53,6 +53,15 @@ type Activity struct {
 	TS    int64  `json:"ts"`
 }
 
+// Track is a workspace's session tracking for the browser: SessionStart is the unix
+// second the current Claude session began (held across a checkpoint, reset on stop/
+// restart) and ActiveSeconds how long the user has been present at it. The cli
+// package fills it in from the agent (the ui package must not import agentproto).
+type Track struct {
+	SessionStart  int64 `json:"session_start"`
+	ActiveSeconds int64 `json:"active_seconds"`
+}
+
 // Deps are the Forge operations the UI needs, injected by the cli package so the
 // ui package stays free of the agent/command machinery (and of import cycles).
 type Deps struct {
@@ -64,6 +73,15 @@ type Deps struct {
 	// falls back to an empty map, so a caller that doesn't wire it just reports no
 	// activity rather than failing to start.
 	WorkspaceActivity func() (map[string]Activity, error)
+	// WorkspaceTrack returns each workspace's session tracking (when the session
+	// began, how long the user has been present), keyed by name. Polled by the UI to
+	// drive the tracking banner's two clocks. Optional, like WorkspaceActivity:
+	// handleTrack nil-checks it and reports no tracking rather than failing.
+	WorkspaceTrack func() (map[string]Track, error)
+	// TrackInc adds seconds of user-present time to a workspace's tracking. The UI
+	// flushes its accumulated activity here periodically. Optional: handleTrackInc
+	// nil-checks it, so a caller that doesn't wire it just doesn't persist activity.
+	TrackInc func(name string, seconds int) error
 	// HostFor resolves a workspace name to the host it lives on, or nil.
 	HostFor func(name string) *config.Host
 	// Checkpoint saves a handoff to memory and restarts the session from it. It
@@ -253,6 +271,8 @@ func (s *server) handler() http.Handler {
 	mux.Handle("GET /assets/", noCache(assets))
 	mux.HandleFunc("GET /api/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("GET /api/activity", s.handleActivity)
+	mux.HandleFunc("GET /api/track", s.handleTrack)
+	mux.HandleFunc("POST /api/track/{ws}/inc", s.handleTrackInc)
 	mux.HandleFunc("GET /api/term/{ws}/{kind}/stream", s.handleTermStream)
 	mux.HandleFunc("POST /api/term/{ws}/{kind}/input", s.handleTermInput)
 	mux.HandleFunc("POST /api/term/{ws}/{kind}/resize", s.handleTermResize)
@@ -436,6 +456,20 @@ func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, act)
+}
+
+// handleTrack returns each workspace's session tracking, keyed by name. Like
+// handleActivity it is polled on a short interval and degrades quietly: a host we
+// can't reach just doesn't update its clocks this round.
+func (s *server) handleTrack(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	tr := map[string]Track{}
+	if s.deps.WorkspaceTrack != nil {
+		if t, err := s.deps.WorkspaceTrack(); err == nil && t != nil {
+			tr = t
+		}
+	}
+	writeJSON(w, tr)
 }
 
 // loopbackHost reports whether the request's Host header names the loopback
