@@ -80,11 +80,64 @@ func TestWriteMetadata(t *testing.T) {
 	if err := writeMetadata(home, "crm"); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := os.ReadFile(filepath.Join(home, "workspace.json"))
+	data, _ := os.ReadFile(filepath.Join(home, metadataFile))
 	for _, want := range []string{`"name": "crm"`, `"tmux_session": "claude"`, "created_at"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("metadata missing %q in %s", want, data)
 		}
+	}
+}
+
+func TestMigrateMetadata(t *testing.T) {
+	base := t.TempDir()
+	defer func(old string) { baseDir = old }(baseDir)
+	baseDir = base
+
+	home := filepath.Join(base, "crm")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Old visible file present, dotfile absent → it should be renamed in place.
+	if err := os.WriteFile(filepath.Join(home, "workspace.json"), []byte(`{"name":"crm"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	migrateMetadata("crm")
+	if _, err := os.Stat(filepath.Join(home, "workspace.json")); !os.IsNotExist(err) {
+		t.Errorf("old workspace.json should be gone after migration")
+	}
+	if _, err := os.Stat(filepath.Join(home, metadataFile)); err != nil {
+		t.Errorf("dotfile metadata missing after migration: %v", err)
+	}
+
+	// Idempotent: running again (dotfile now present, no old file) is a no-op, not an
+	// error, and doesn't clobber the dotfile.
+	migrateMetadata("crm")
+	if _, err := os.Stat(filepath.Join(home, metadataFile)); err != nil {
+		t.Errorf("dotfile metadata should survive a second migration: %v", err)
+	}
+}
+
+func TestReadTrackFile(t *testing.T) {
+	base := t.TempDir()
+	defer func(old string) { baseDir = old }(baseDir)
+	baseDir = base
+
+	home := filepath.Join(base, "crm")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A present file is authoritative: no tmux fallback is consulted, so this stays a
+	// pure filesystem test.
+	if err := os.WriteFile(filepath.Join(home, agentproto.SessionFile),
+		[]byte(`{"session_start":1000,"active_seconds":42}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := readTrack("crm")
+	if !ok {
+		t.Fatal("readTrack: not ok with a present file")
+	}
+	if got.SessionStart != 1000 || got.ActiveSeconds != 42 {
+		t.Errorf("readTrack = %+v, want {SessionStart:1000 ActiveSeconds:42}", got)
 	}
 }
 

@@ -199,6 +199,54 @@ func workspacesActivity() (map[string]agentproto.Activity, error) {
 	return out, nil
 }
 
+// workspacesTrack asks each host once for the session tracking of the workspaces on
+// it — when the current Claude session began and how long the user has been present
+// at it — and keeps only the ones this client owns. Same host fan-out and ownership
+// filter as workspacesActivity; an unreachable host contributes nothing.
+func workspacesTrack() (map[string]agentproto.Track, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	needed := map[string]bool{}
+	for _, alias := range cfg.Workspaces {
+		needed[alias] = true
+	}
+	out := map[string]agentproto.Track{}
+	for alias := range needed {
+		host := cfg.Hosts[alias]
+		if host == nil {
+			continue
+		}
+		var res agentproto.TrackResult
+		if err := callAgent(host, &res, "workspace-track"); err != nil {
+			continue // unreachable: its clocks just don't update this round
+		}
+		for name, t := range res.Sessions {
+			if cfg.Workspaces[name] == alias { // ours, on this host
+				out[name] = t
+			}
+		}
+	}
+	return out, nil
+}
+
+// trackInc adds seconds of user-present time to a workspace's session tracking, via
+// the agent on its host. The browser flushes accumulated activity here; a flush that
+// can't reach the host simply doesn't land and the next one carries the arrears.
+func trackInc(name string, seconds int) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	host := cfg.HostFor(name)
+	if host == nil {
+		return fmt.Errorf("unknown workspace %q", name)
+	}
+	return callAgent(host, nil, "workspace-track-inc",
+		"-name", name, "-seconds", strconv.Itoa(seconds))
+}
+
 // mergeWorkspaceStatus is the decision, separated from the SSH so it can be tested:
 // given the workspaces our config claims (name -> host alias) and what each host
 // reported (alias -> name -> session status), what do we show?
@@ -416,6 +464,10 @@ func runCheckpoint(target sshx.Target, session string, log func(string)) error {
 		label = time.Now().Format("2006-01-02 15:04")
 	}
 	log("→ handoff saved; restarting the session from memory…")
+	// Pin the session's start into the tracking file before the kill: a checkpoint is
+	// context compression, not a new session, so its clock must survive the restart
+	// rather than adopting the fresh tmux session's creation time.
+	_ = runCapture(target.Args(agentproto.FreezeSession))
 	_ = runCapture(target.Args("tmux", "kill-session", "-t", session))
 	// target.User is the workspace name (WorkspaceTarget logs in as it).
 	resume := agentproto.ResumeClaude(target.User, label)

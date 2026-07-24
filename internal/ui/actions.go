@@ -38,7 +38,12 @@ func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 	// session is a no-op) while leaving a genuine failure — an unreachable host —
 	// as an error. Swallowing every error would report "stopped" for a server we
 	// never even reached.
-	if _, err := sshx.Capture(target.Args(agentproto.KillClaude)...); err != nil {
+	//
+	// Clearing the tracking file in the same round trip ends the session's clocks: a
+	// stop is the end of the session, so its start and time-present are gone (a fresh
+	// session starts them over). A checkpoint, by contrast, keeps them.
+	remote := agentproto.KillClaude + "; " + agentproto.ClearSession
+	if _, err := sshx.Capture(target.Args(remote)...); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("stop: %w", err))
 		return
 	}
@@ -54,11 +59,42 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Kill then relaunch in one round trip; the kill tolerates "no session", so a
-	// restart also works as a start.
-	remote := agentproto.KillClaude + "; " + agentproto.StartClaude
+	// restart also works as a start. Clear the tracking file too: a hard restart is a
+	// new session with a new task, so its clocks start over (unlike a checkpoint).
+	remote := agentproto.KillClaude + "; " + agentproto.ClearSession + "; " + agentproto.StartClaude
 	if _, err := sshx.Capture(target.Args(remote)...); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("restart: %w", err))
 		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleTrackInc adds seconds of user-present time to a workspace's session
+// tracking. The browser accumulates activity locally and flushes it here on a timer
+// and when you leave, so the count survives a reload or a dropped connection. Best-
+// effort: it never blocks the UI, and a workspace with no host just 404s.
+func (s *server) handleTrackInc(w http.ResponseWriter, r *http.Request) {
+	ws := r.PathValue("ws")
+	if s.deps.HostFor(ws) == nil {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
+		return
+	}
+	var req struct {
+		Seconds int `json:"seconds"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("bad request"))
+		return
+	}
+	if req.Seconds <= 0 {
+		writeJSON(w, map[string]bool{"ok": true}) // nothing to add
+		return
+	}
+	if s.deps.TrackInc != nil {
+		if err := s.deps.TrackInc(ws, req.Seconds); err != nil {
+			writeJSONError(w, http.StatusBadGateway, fmt.Errorf("track: %w", err))
+			return
+		}
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }

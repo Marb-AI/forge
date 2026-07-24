@@ -197,6 +197,8 @@ func runUI(_ []string) int {
 	deps := ui.Deps{
 		ListWorkspaces:    listWorkspacesInfo,
 		WorkspaceActivity: workspaceActivityInfo,
+		WorkspaceTrack:    workspaceTrackInfo,
+		TrackInc:          trackInc,
 		HostFor: func(name string) *config.Host {
 			// Reload each time so workspaces added while the daemon runs resolve.
 			c, err := config.Load()
@@ -266,6 +268,20 @@ func workspaceActivityInfo() (map[string]ui.Activity, error) {
 	out := make(map[string]ui.Activity, len(act))
 	for name, a := range act {
 		out[name] = ui.Activity{State: a.State, TS: a.TS}
+	}
+	return out, nil
+}
+
+// workspaceTrackInfo adapts the agent's session-tracking map into the ui package's
+// own type, so ui need not import agentproto (same split as workspaceActivityInfo).
+func workspaceTrackInfo() (map[string]ui.Track, error) {
+	tr, err := workspacesTrack()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]ui.Track, len(tr))
+	for name, t := range tr {
+		out[name] = ui.Track{SessionStart: t.SessionStart, ActiveSeconds: t.ActiveSeconds}
 	}
 	return out, nil
 }
