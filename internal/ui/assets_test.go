@@ -144,6 +144,114 @@ func TestUnexpectedStreamEndIsDiagnosedNotAssumedStopped(t *testing.T) {
 	}
 }
 
+// jsFunc returns the body of a top-level function in app.js, relying on the
+// file's formatting: a declaration starts at column 0 and its closing brace is
+// the next line that is a lone "}" at column 0.
+func jsFunc(t *testing.T, js, name string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?ms)^function ` + regexp.QuoteMeta(name) + `\(.*?^\}`)
+	body := re.FindString(js)
+	if body == "" {
+		t.Fatalf("app.js has no top-level function %s()", name)
+	}
+	return body
+}
+
+// Sending a prompt is two things that must arrive in one order — the text, then
+// the Enter that submits it — and the input endpoint is fetch(), which has none.
+// Posted separately, the Enter can land first: Claude submits an empty prompt and
+// the text arrives after, into whatever it showed next.
+func TestPromptIsSentAsASingleInputWrite(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	body := jsFunc(t, js, "sendPrompt")
+
+	if n := strings.Count(body, "postInput("); n != 1 {
+		t.Errorf("sendPrompt makes %d input posts; the text and its Enter must go in one, "+
+			"or they can arrive out of order", n)
+	}
+	if !strings.Contains(body, `+ "\r"`) {
+		t.Error("sendPrompt should append the submitting CR to the same payload")
+	}
+}
+
+// A prompt worth saving is usually several lines. Typed as-is, every newline is
+// an Enter — so a four-line prompt would be sent as four half-finished ones.
+// Bracketed paste is what makes it arrive as a single message.
+func TestMultiLinePromptIsSentAsOneMessage(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	body := jsFunc(t, js, "sendPrompt")
+
+	if !strings.Contains(body, `\x1b[200~`) || !strings.Contains(body, `\x1b[201~`) {
+		t.Error("sendPrompt must wrap the text in a bracketed paste, or its newlines submit it line by line")
+	}
+	// Only when the session actually has the mode on: wrapping a plain shell's
+	// input in brackets it never enabled would type the escape codes themselves.
+	if !strings.Contains(body, "bracketedPasteMode") {
+		t.Error("the bracketed-paste wrapper must be conditional on the session having the mode enabled")
+	}
+}
+
+// The popover hangs off the rail, and the rail sits beside the shell overlay —
+// so a popover painting below that overlay would be invisible exactly when a
+// shell is open. It must still stay under the modals, and under the confirm
+// dialog, which is what asks before it deletes a prompt.
+func TestPromptsPopoverPaintsAboveTheShellPanelAndBelowTheModals(t *testing.T) {
+	css := embeddedAsset(t, "app.css")
+
+	prompts := zIndexOf(t, css, "#prompts")
+	if ssh := zIndexOf(t, css, "#sshpanel"); prompts <= ssh {
+		t.Errorf("#prompts (z-index %d) must paint above #sshpanel (z-index %d)", prompts, ssh)
+	}
+	for _, above := range []string{"#settings", "#confirm"} {
+		if z := zIndexOf(t, css, above); prompts >= z {
+			t.Errorf("#prompts (z-index %d) must stay below %s (z-index %d) — %s opens over it",
+				prompts, above, z, above)
+		}
+	}
+}
+
+// The rail is markup on one side and a switch on the other, with nothing but a
+// string between them: a button whose action no case handles is a button that
+// silently does nothing.
+func TestEveryRailActionHasAHandler(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	index := embeddedAsset(t, "index.html")
+
+	rail := regexp.MustCompile(`(?s)<aside id="rail">.*?</aside>`).FindString(index)
+	if rail == "" {
+		t.Fatal("index.html has no rail")
+	}
+	actions := regexp.MustCompile(`data-action="([a-z]+)"`).FindAllStringSubmatch(rail, -1)
+	if len(actions) == 0 {
+		t.Fatal("the rail has no buttons")
+	}
+	for _, m := range actions {
+		if !strings.Contains(js, `case "`+m[1]+`"`) {
+			t.Errorf("rail button %q has no case in the rail's click handler", m[1])
+		}
+	}
+	// The one this test was written for.
+	if !strings.Contains(rail, `data-action="prompts"`) {
+		t.Error("the rail has no prompts button")
+	}
+}
+
+// Prompts describe how their author works, so they belong to the person and not
+// to a browser profile: kept in the daemon's config they are the same list in
+// every tab, on every workspace, and on the phone pointed at the same daemon.
+// localStorage would give each browser its own, and lose them all when someone
+// clears site data.
+func TestPromptsAreStoredByTheDaemonNotTheBrowser(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+
+	if !strings.Contains(js, `"/api/prompts"`) {
+		t.Error("app.js never fetches /api/prompts — the library would not be shared or persisted")
+	}
+	if regexp.MustCompile(`localStorage\.(get|set)Item\("forge-prompts`).MatchString(js) {
+		t.Error("prompts must not live in localStorage; they belong to the person, not to one browser")
+	}
+}
+
 // The reattach loop runs forever, so its shape is what keeps a server outage from
 // turning into a self-inflicted denial of service: no ControlMaster means every
 // attempt is a full SSH handshake, and sshd refuses new ones past MaxStartups.

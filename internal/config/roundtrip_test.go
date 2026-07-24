@@ -98,6 +98,64 @@ func TestOldConfigWithoutUIPortLoads(t *testing.T) {
 	}
 }
 
+// Saved prompts are the one thing in here the user typed by hand, so losing them
+// to a round trip is losing work — and their ORDER is theirs too, which is why
+// they are a slice and not a map.
+func TestPromptsRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	c, _ := Load()
+	if len(c.Prompts) != 0 {
+		t.Fatalf("a fresh config should hold no prompts, got %+v", c.Prompts)
+	}
+	c.Prompts = []Prompt{
+		{ID: "a1", Title: "review the diff", Text: "Review the diff and tell me\nwhat you'd change."},
+		{ID: "b2", Title: "run the tests", Text: "Run the tests and fix what breaks."},
+	}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Prompts) != 2 {
+		t.Fatalf("prompts not persisted: %+v", got.Prompts)
+	}
+	if got.Prompts[0].ID != "a1" || got.Prompts[1].ID != "b2" {
+		t.Errorf("prompt order not preserved: %+v", got.Prompts)
+	}
+	// A prompt is usually several lines; a round trip that flattened one would
+	// change what gets typed into the session.
+	if got.Prompts[0].Text != "Review the diff and tell me\nwhat you'd change." {
+		t.Errorf("prompt text not preserved verbatim: %q", got.Prompts[0].Text)
+	}
+}
+
+// A config written by a forge that had no prompts must still load — and come
+// back with an empty library, not an error.
+func TestOldConfigWithoutPromptsLoads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".forge")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"hosts":{},"forwards":{},"workspaces":{},"ui_port":8099}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("an older config must still load: %v", err)
+	}
+	if len(c.Prompts) != 0 {
+		t.Errorf("expected no prompts, got %+v", c.Prompts)
+	}
+}
+
 func TestSetPortsEmptyRemoves(t *testing.T) {
 	c := &Config{Ports: map[string]map[string][]int{}}
 	c.SetPorts("h", "w", []int{1, 2})

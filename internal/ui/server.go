@@ -98,6 +98,12 @@ type HostStat struct {
 	Uptime     int64   `json:"uptime"`
 }
 
+// Prompt is one saved prompt — a title and the text it types into Claude. It is
+// config.Prompt outright: what the browser sends and what the config stores are
+// the same three fields, and a second type would buy a conversion and nothing
+// else.
+type Prompt = config.Prompt
+
 // Deps are the Forge operations the UI needs, injected by the cli package so the
 // ui package stays free of the agent/command machinery (and of import cycles).
 type Deps struct {
@@ -145,6 +151,12 @@ type Deps struct {
 	RemoveHost func(alias string) error
 	// SetUIPort records the port the UI binds to. Takes effect on the next start.
 	SetUIPort func(port int) error
+	// Prompts returns the saved prompts, in order. SetPrompts replaces the whole
+	// list — the handlers own the add/edit/delete on it (see prompts.go), so the
+	// store stays a plain load/save and moving it elsewhere later is these two
+	// functions and nothing more.
+	Prompts    func() ([]Prompt, error)
+	SetPrompts func(list []Prompt) error
 }
 
 // validate reports the first operation the caller forgot to wire. Every field is
@@ -161,6 +173,8 @@ func (d Deps) validate() error {
 		"DeleteWorkspace": d.DeleteWorkspace,
 		"RemoveHost":      d.RemoveHost,
 		"SetUIPort":       d.SetUIPort,
+		"Prompts":         d.Prompts,
+		"SetPrompts":      d.SetPrompts,
 	} {
 		if reflect.ValueOf(fn).IsNil() {
 			return fmt.Errorf("ui: Deps.%s is not wired", name)
@@ -180,6 +194,10 @@ type server struct {
 
 	ckMu      sync.Mutex      // guards ckRunning
 	ckRunning map[string]bool // workspaces with a checkpoint in flight
+
+	// Serialises the read-modify-write of the saved prompts, so two tabs editing
+	// at once can't have one's save drop the other's prompt.
+	promptMu sync.Mutex
 
 	jobMu sync.Mutex      // guards jobs
 	jobs  map[string]*job // long-running operations, followed over SSE
@@ -341,6 +359,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /api/workspaces", s.handleCreateWorkspace)
 	mux.HandleFunc("POST /api/hosts/prepare", s.handlePrepareHost)
 	mux.HandleFunc("GET /api/jobs/{id}/stream", s.handleJobStream)
+	mux.HandleFunc("GET /api/prompts", s.handlePromptsList)
+	mux.HandleFunc("POST /api/prompts", s.handlePromptCreate)
+	mux.HandleFunc("PUT /api/prompts/{id}", s.handlePromptUpdate)
+	mux.HandleFunc("DELETE /api/prompts/{id}", s.handlePromptDelete)
 	mux.HandleFunc("DELETE /api/workspaces/{ws}", s.handleDeleteWorkspace)
 	mux.HandleFunc("DELETE /api/hosts/{alias}", s.handleRemoveHost)
 	mux.HandleFunc("PUT /api/config/ui-port", s.handleSetUIPort)
