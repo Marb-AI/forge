@@ -76,8 +76,14 @@ func createWorkspace(name, alias string) error {
 		return err
 	}
 
-	cfg.AddWorkspace(name, alias)
-	return cfg.Save()
+	// Record it in its own step, and only it. The load above is minutes old by now
+	// (creating the user on the server is an SSH round trip), so saving that whole
+	// copy back would undo anything else written meanwhile — a prompt, the UI port,
+	// another workspace created from a second tab.
+	return config.Update(func(c *config.Config) error {
+		c.AddWorkspace(name, alias)
+		return nil
+	})
 }
 
 func workspaceDelete(args []string) int {
@@ -108,8 +114,10 @@ func deleteWorkspace(name string) error {
 	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
 		return err
 	}
-	cfg.RemoveWorkspace(name)
-	return cfg.Save()
+	return config.Update(func(c *config.Config) error {
+		c.RemoveWorkspace(name)
+		return nil
+	})
 }
 
 // WorkspaceStatus is one workspace of ours, and the state of the Claude session in

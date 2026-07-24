@@ -117,13 +117,13 @@ func runHostPrepare(sshTarget, alias string, firewall, harden, dockerPrune, prun
 		return fmt.Errorf("cannot read host key %s.pub: %w", hostKeyPath, err)
 	}
 
-	// 4) Register the host now that it is ready.
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	cfg.Hosts[alias] = &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
-	if err := cfg.Save(); err != nil {
+	// 4) Register the host now that it is ready. Its own step: preparing a server
+	//    takes minutes, and a config loaded before all that would be stale enough
+	//    to undo anything else written in the meantime.
+	if err := config.Update(func(c *config.Config) error {
+		c.Hosts[alias] = &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
+		return nil
+	}); err != nil {
 		return err
 	}
 

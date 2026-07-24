@@ -149,6 +149,9 @@
         <button class="rail-btn" data-action="host" title="Open a shell on the server as its login user">
           <span class="ico">@</span><span class="cap" id="host-cap">host</span>
         </button>
+        <button class="rail-btn" data-action="prompts" title="Prompts you send Claude often — click one to send it">
+          <span class="ico">≡</span><span class="cap">prompts</span>
+        </button>
         <button class="rail-btn" data-action="settings" title="Settings">
           <span class="ico">⚙</span><span class="cap">settings</span>
         </button>
@@ -175,6 +178,41 @@
         <button id="cf-cancel">Cancel</button>
         <button id="cf-ok" class="primary">Confirm</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Prompts: the texts you send Claude over and over. A popover off the rail
+       rather than a section in Settings — nothing here changes how Forge behaves,
+       it is content you write, and you open it to USE it, not to configure it. -->
+  <div id="prompts" hidden>
+    <div id="pr-backdrop"></div>
+    <div id="pr-pop" role="dialog" aria-label="Prompts">
+      <div class="pane-head">
+        <span>Prompts</span>
+        <span class="pane-actions">
+          <button id="pr-new" title="New prompt">+</button>
+          <button id="pr-close" title="Close (Esc)">✕</button>
+        </span>
+      </div>
+      <div id="pr-list"></div>
+      <div id="pr-note" class="hint pad" hidden></div>
+      <form id="pr-edit" hidden>
+        <label for="pr-title">Title</label>
+        <input id="pr-title" type="text" autocomplete="off" spellcheck="false"
+               placeholder="e.g. review the diff">
+        <label for="pr-text">Text</label>
+        <textarea id="pr-text" rows="6" spellcheck="false"
+                  placeholder="What you'd type into Claude…"></textarea>
+        <div class="hint">
+          Sent as if you typed it, then Enter. Hit <b>Esc</b> in Claude to stop it —
+          the message comes back into the box, editable.
+        </div>
+        <div id="pr-error" class="err" hidden></div>
+        <div class="pr-foot">
+          <button type="button" id="pr-cancel">Cancel</button>
+          <button type="submit" id="pr-save" class="primary">Save</button>
+        </div>
+      </form>
     </div>
   </div>
 

@@ -154,9 +154,14 @@ function renderStage() {
   const ws = state.workspaces.find((w) => w.name === state.active);
   const usable = !!ws && isUsable(ws.status);
   for (const b of document.querySelectorAll('.rail-btn[data-action]')) {
-    if (b.dataset.action === "settings") continue; // settings always works
+    // Settings always works; so does the prompts library — writing one down is
+    // not something you should need a running session for. Only SENDING one
+    // needs a session, and the rows inside say so themselves.
+    if (b.dataset.action === "settings" || b.dataset.action === "prompts") continue;
     b.disabled = !usable;
   }
+  // Open while the session went away (or came back): the rows have to follow.
+  if (promptsOpen()) renderPrompts();
 
   renderHostShellButton();
 }
@@ -1635,12 +1640,281 @@ document.getElementById("rail").addEventListener("click", (e) => {
   switch (btn.dataset.action) {
     case "ssh": toggleShell("ssh"); break;
     case "host": toggleShell("host"); break;
+    case "prompts": togglePrompts(); break;
     case "settings": openSettings(); break;
     case "checkpoint": doCheckpoint(); break;
     case "restart": doRestart(); break;
     case "stop": doStop(); break;
     case "start": doStart(); break;
   }
+});
+
+// ---- prompts: the texts you send Claude over and over ----------------------
+// A small library behind one rail button. Deliberately NOT a settings section:
+// nothing in it changes how Forge behaves, it is content you write and edit,
+// and you open it to fire one off — which is a thing you do while working, not
+// a thing you go and configure.
+//
+// Sending is typing. The text goes down the very same input endpoint as your
+// keyboard, so there is no server-side "run a prompt" path that could do
+// anything your fingers couldn't — and when a prompt turns out to be the wrong
+// one, Esc in Claude stops it and hands the message back, editable.
+const pr = {
+  list: [],
+  loaded: false,     // the list has been fetched at least once
+  editing: null,     // the prompt being edited, "new", or null (list only)
+  saving: false,
+};
+
+// Spelled out rather than reusing the file tree's SVG_ATTRS: that constant is
+// declared further down the file, and a template literal up here would read it
+// before it exists — which throws at load and takes the whole UI with it.
+const PR_SVG = 'viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+const PR_ICON_EDIT = `<svg ${PR_SVG}><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
+const PR_ICON_DELETE = `<svg ${PR_SVG}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+
+function promptsOpen() { return !document.getElementById("prompts").hidden; }
+
+function togglePrompts() {
+  if (promptsOpen()) closePrompts();
+  else openPrompts();
+}
+
+// openPrompts shows the popover immediately with whatever we last loaded, then
+// refreshes from the daemon. The list is a local file — the wait is milliseconds
+// — but another tab may have changed it, and painting the known list first means
+// the panel never opens empty and fills in.
+async function openPrompts() {
+  document.getElementById("prompts").hidden = false;
+  document.querySelector('.rail-btn[data-action="prompts"]').classList.add("active");
+  cancelPromptEdit();
+  renderPrompts();
+  positionPrompts();
+  await loadPrompts();
+  if (promptsOpen()) { renderPrompts(); positionPrompts(); }
+}
+
+function closePrompts() {
+  document.getElementById("prompts").hidden = true;
+  document.querySelector('.rail-btn[data-action="prompts"]').classList.remove("active");
+  cancelPromptEdit();
+  if (state.claude) state.claude.term.focus();
+}
+
+// Anchored to its rail button, clamped into the window: the popover is taller
+// than one row and the rail button sits low, so a naive top-align would hang off
+// the bottom of a short window.
+function positionPrompts() {
+  const btn = document.querySelector('.rail-btn[data-action="prompts"]');
+  const pop = document.getElementById("pr-pop");
+  if (!btn || !pop) return;
+  const r = btn.getBoundingClientRect();
+  pop.style.right = Math.max(8, window.innerWidth - r.left + 6) + "px";
+  const top = Math.min(r.top, window.innerHeight - pop.offsetHeight - 8);
+  pop.style.top = Math.max(8, top) + "px";
+}
+window.addEventListener("resize", () => { if (promptsOpen()) positionPrompts(); });
+
+async function loadPrompts() {
+  try {
+    const res = await fetch("/api/prompts");
+    if (!res.ok) return;
+    pr.list = await res.json();
+    pr.loaded = true;
+  } catch (e) { /* keep what we have; it is the last thing we knew */ }
+}
+
+// A prompt can only be sent into a live session. The library itself stays usable
+// with no workspace at all — writing one down is not something you should have
+// to start Claude for.
+function promptsSendable() { return !!state.claude && !state.claude.ended && !state.stopped; }
+
+function renderPrompts() {
+  const list = document.getElementById("pr-list");
+  list.textContent = "";
+  if (!pr.list.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted";
+    empty.textContent = pr.loaded
+      ? "Nothing saved yet. Add the things you type over and over — “review the diff”, “run the tests and fix what breaks”."
+      : "Loading…";
+    list.appendChild(empty);
+  }
+  for (const p of pr.list) list.appendChild(promptRow(p));
+
+  const note = document.getElementById("pr-note");
+  const blocked = pr.list.length && !promptsSendable();
+  note.hidden = !blocked;
+  if (blocked) note.textContent = "Claude isn't running here — start the session to send one.";
+}
+
+function promptRow(p) {
+  const row = document.createElement("div");
+  row.className = "prow";
+
+  const send = document.createElement("button");
+  send.className = "prow-send";
+  send.textContent = p.title;
+  // The text itself is the tooltip: two prompts can be titled almost the same,
+  // and what actually gets sent is the thing worth checking before you click.
+  send.title = p.text.length > 400 ? p.text.slice(0, 400) + "…" : p.text;
+  send.disabled = !promptsSendable();
+  send.addEventListener("click", () => sendPrompt(p));
+  row.appendChild(send);
+
+  const acts = document.createElement("span");
+  acts.className = "prow-acts";
+  const edit = document.createElement("button");
+  edit.innerHTML = PR_ICON_EDIT;
+  edit.title = "Edit";
+  edit.addEventListener("click", () => startPromptEdit(p));
+  const del = document.createElement("button");
+  del.className = "destructive";
+  del.innerHTML = PR_ICON_DELETE;
+  del.title = "Delete";
+  del.addEventListener("click", () => confirmDeletePrompt(p));
+  acts.append(edit, del);
+  row.appendChild(acts);
+  return row;
+}
+
+// sendPrompt types the prompt into the Claude session and presses Enter.
+//
+// One POST carries the whole thing — text and the Enter after it — because the
+// input endpoint is fetch(), and two fetches have no ordering: the Enter could
+// arrive first and submit an empty prompt, leaving the text to land in whatever
+// Claude showed next.
+//
+// The text is wrapped as a bracketed paste whenever the session has that mode on
+// (Claude's TUI does). That is what makes a multi-line prompt arrive as ONE
+// message: without the brackets each newline reads as a separate Enter, so a
+// four-line prompt would be sent as four half-finished ones.
+function sendPrompt(p) {
+  if (!promptsSendable()) { flashStatus("Start Claude first"); return; }
+  const sess = state.claude;
+  // A terminal's Enter is CR, and a pasted newline is a CR too. Trailing ones are
+  // dropped: the Enter we add is the one that submits, and a second would send an
+  // empty message straight after it.
+  const body = p.text.replace(/\r?\n/g, "\r").replace(/\r+$/, "");
+  const bracketed = !!(sess.term.modes && sess.term.modes.bracketedPasteMode);
+  const payload = (bracketed ? `\x1b[200~${body}\x1b[201~` : body) + "\r";
+  postInput(sess.ws, "claude", payload);
+  closePrompts();
+  flashStatus(`sent “${p.title}”`);
+}
+
+// ---- prompts: add / edit / delete -------------------------------------------
+function startPromptEdit(p) {
+  pr.editing = p || "new";
+  setPromptError(null);
+  document.getElementById("pr-title").value = p ? p.title : "";
+  document.getElementById("pr-text").value = p ? p.text : "";
+  document.getElementById("pr-edit").hidden = false;
+  positionPrompts();
+  document.getElementById("pr-title").focus();
+}
+
+function cancelPromptEdit() {
+  pr.editing = null;
+  setPromptError(null);
+  document.getElementById("pr-edit").hidden = true;
+  setPromptBusy(false);
+}
+
+function setPromptError(msg) {
+  const el = document.getElementById("pr-error");
+  if (!msg) { el.hidden = true; el.textContent = ""; return; }
+  el.hidden = false;
+  el.textContent = msg;
+  positionPrompts();
+}
+
+function setPromptBusy(busy) {
+  pr.saving = busy;
+  document.getElementById("pr-save").disabled = busy;
+  document.getElementById("pr-save").textContent = busy ? "Saving…" : "Save";
+}
+
+async function savePrompt() {
+  if (pr.saving || !pr.editing) return;
+  const title = document.getElementById("pr-title").value.trim();
+  // Verbatim: the text is going to be typed into a session, so its whitespace is
+  // content — an opening indent, a deliberate blank first line. Trimming is only
+  // how we decide it is empty, never what we store.
+  const text = document.getElementById("pr-text").value;
+  // Say it here rather than making the round trip say it — the daemon validates
+  // the same two things, but the message should arrive as you type, not after.
+  if (!title) { setPromptError("Give it a title — that's how you'll find it in the list."); return; }
+  if (!text.trim()) { setPromptError("A prompt with no text would send nothing."); return; }
+
+  const editing = pr.editing;
+  const isNew = editing === "new";
+  setPromptBusy(true);
+  setPromptError(null);
+  try {
+    const res = await fetch(isNew ? "/api/prompts" : `/api/prompts/${encodeURIComponent(editing.id)}`, {
+      method: isNew ? "POST" : "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, text }),
+    });
+    if (!res.ok) {
+      setPromptError(await errText(res));
+      setPromptBusy(false);
+      return;
+    }
+  } catch (e) {
+    setPromptError("Couldn't reach the Forge UI daemon.");
+    setPromptBusy(false);
+    return;
+  }
+  cancelPromptEdit();
+  await loadPrompts();
+  renderPrompts();
+  positionPrompts();
+}
+
+async function confirmDeletePrompt(p) {
+  const ok = await confirmAction({
+    title: "Delete prompt",
+    body: `Delete “${p.title}”? The text is gone; nothing else is affected.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await fetch(`/api/prompts/${encodeURIComponent(p.id)}`, { method: "DELETE" });
+    if (!res.ok) { setPromptError(await errText(res)); return; }
+  } catch (e) {
+    setPromptError("Couldn't reach the Forge UI daemon.");
+    return;
+  }
+  await loadPrompts();
+  renderPrompts();
+  positionPrompts();
+}
+
+// errText pulls the daemon's message out of a failed response, falling back to
+// the status when there isn't one.
+async function errText(res) {
+  try {
+    const j = await res.json();
+    if (j && j.error) return j.error;
+  } catch (e) { /* not JSON */ }
+  return `Failed (${res.status}).`;
+}
+
+document.getElementById("pr-new").addEventListener("click", () => startPromptEdit(null));
+document.getElementById("pr-close").addEventListener("click", () => closePrompts());
+document.getElementById("pr-cancel").addEventListener("click", () => cancelPromptEdit());
+document.getElementById("pr-backdrop").addEventListener("click", () => closePrompts());
+document.getElementById("pr-edit").addEventListener("submit", (e) => {
+  e.preventDefault();
+  savePrompt();
+});
+// ⌘/Ctrl-Enter saves from inside the textarea, where a plain Enter is a newline.
+document.getElementById("pr-text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); savePrompt(); }
 });
 
 // ---- settings: the administrative, mostly-irreversible stuff ----------------
@@ -2094,10 +2368,18 @@ function lastLine(text) {
 document.getElementById("ssh-close").addEventListener("click", () => closePanel());
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  // Topmost layer wins: the confirm dialog, then the other modals, then ssh.
+  // Topmost layer wins: the confirm dialog, then the modals, then the prompts
+  // popover (it paints over the shell panel), then ssh.
   if (!document.getElementById("confirm").hidden) { closeConfirm(false); return; }
   if (!document.getElementById("wizard").hidden) { closeWizard(); return; }
   if (!document.getElementById("settings").hidden) { closeSettings(); return; }
+  if (promptsOpen()) {
+    // Editing is a layer of its own: Esc backs out of the form to the list, so a
+    // half-written prompt isn't thrown away by the keystroke that closes a panel.
+    if (pr.editing) cancelPromptEdit();
+    else closePrompts();
+    return;
+  }
   if (!document.getElementById("sshpanel").hidden) {
     closePanel();
   }

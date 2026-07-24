@@ -295,6 +295,14 @@ same code, not a reimplementation that quietly drifts.
   so the tree and the rail stay put and Claude never gets reflowed. Hiding it
   **keeps the shell running**: you come back to the same shell, same directory,
   same half-finished command.
+- **Prompts** — the things you type at Claude over and over, saved behind one rail
+  button: click the icon, click the one you want, and it goes into the session as
+  if you had typed it. Multi-line prompts arrive as one message, not as a line per
+  Enter. Add, rename and delete them in the same popover; they live in
+  `~/.forge/config.json`, so the same list is there in every workspace, on every
+  server, in every browser pointed at this daemon — a prompt describes how *you*
+  work, not what one codebase needs. Sent the wrong one? Esc in Claude stops it and
+  hands the message back, editable.
 - **Settings** holds the things you'd otherwise drop to the CLI for, and the ones
   worth thinking about first: deleting a workspace, removing a server, and the UI
   port.

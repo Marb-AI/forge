@@ -30,6 +30,8 @@ func testServer(t *testing.T) (*server, http.Handler) {
 			DeleteWorkspace: func(string) error { return nil },
 			RemoveHost:      func(string) error { return nil },
 			SetUIPort:       func(int) error { return nil },
+			Prompts:         func() ([]Prompt, error) { return nil, nil },
+			SetPrompts:      func([]Prompt) error { return nil },
 		},
 	}
 	return s, s.handler()
