@@ -24,6 +24,7 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 		Firewall    *bool  `json:"firewall"`
 		Harden      *bool  `json:"harden"`
 		DockerPrune *bool  `json:"dockerPrune"`
+		PruneImages *bool  `json:"pruneImages"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("bad request"))
@@ -41,9 +42,12 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	firewall, harden, prune := onByDefault(req.Firewall), onByDefault(req.Harden), onByDefault(req.DockerPrune)
+	// Unlike the three above, the aggressive image sweep is opt-in: absent (or
+	// false) means off, so a forgotten field never deletes a workspace's images.
+	pruneImages := req.PruneImages != nil && *req.PruneImages
 
 	id, err := s.startJob(func(out io.Writer) error {
-		return s.deps.PrepareHost(req.Target, req.Alias, firewall, harden, prune, out)
+		return s.deps.PrepareHost(req.Target, req.Alias, firewall, harden, prune, pruneImages, out)
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)

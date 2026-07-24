@@ -12,11 +12,15 @@ import (
 	"github.com/Marb-AI/forge/internal/config"
 )
 
+type prepareArgs struct {
+	firewall, harden, prune, pruneImages, called bool
+}
+
 // prepareCapture builds a server whose PrepareHost records what it was asked for.
-func prepareCapture(t *testing.T) (http.Handler, func() (firewall, harden, prune bool, called bool)) {
+func prepareCapture(t *testing.T) (http.Handler, func() prepareArgs) {
 	t.Helper()
 	var mu sync.Mutex
-	var fw, hd, pr, called bool
+	var got prepareArgs
 
 	s := &server{
 		token:     "secret-token",
@@ -32,20 +36,20 @@ func prepareCapture(t *testing.T) (http.Handler, func() (firewall, harden, prune
 			DeleteWorkspace: func(string) error { return nil },
 			RemoveHost:      func(string) error { return nil },
 			SetUIPort:       func(int) error { return nil },
-			PrepareHost: func(_, _ string, firewall, harden, prune bool, _ io.Writer) error {
+			PrepareHost: func(_, _ string, firewall, harden, prune, pruneImages bool, _ io.Writer) error {
 				mu.Lock()
-				fw, hd, pr, called = firewall, harden, prune, true
+				got = prepareArgs{firewall, harden, prune, pruneImages, true}
 				mu.Unlock()
 				return nil
 			},
 		},
 	}
-	get := func() (bool, bool, bool, bool) {
+	read := func() prepareArgs {
 		mu.Lock()
 		defer mu.Unlock()
-		return fw, hd, pr, called
+		return got
 	}
-	return s.handler(), get
+	return s.handler(), read
 }
 
 func postPrepare(t *testing.T, h http.Handler, body string) {
@@ -63,23 +67,27 @@ func postPrepare(t *testing.T, h http.Handler, body string) {
 
 // The hardening flags guard a real machine. A request that simply forgets to send
 // one must not quietly provision a server with no firewall — absent has to mean
-// the safe default, exactly as it does on the command line.
+// the safe default, exactly as it does on the command line. The image sweep is the
+// exception: it is opt-in, so absent means off.
 func TestPrepareDefaultsToHardenedWhenFlagsAbsent(t *testing.T) {
 	h, got := prepareCapture(t)
 	postPrepare(t, h, `{"target":"root@1.2.3.4","alias":"box"}`)
 
-	fw, hd, pr, called := waitCalled(t, got)
-	if !called {
+	a := waitCalled(t, got)
+	if !a.called {
 		t.Fatal("PrepareHost was never called")
 	}
-	if !fw {
+	if !a.firewall {
 		t.Error("a request with no firewall field must still install the firewall")
 	}
-	if !hd {
+	if !a.harden {
 		t.Error("a request with no harden field must still harden SSH")
 	}
-	if !pr {
+	if !a.prune {
 		t.Error("a request with no dockerPrune field must still schedule the clean-up")
+	}
+	if a.pruneImages {
+		t.Error("a request with no pruneImages field must NOT run the aggressive image sweep — it is opt-in")
 	}
 }
 
@@ -88,21 +96,36 @@ func TestPrepareHonoursExplicitFalse(t *testing.T) {
 	h, got := prepareCapture(t)
 	postPrepare(t, h, `{"target":"root@1.2.3.4","alias":"box","firewall":false,"harden":false,"dockerPrune":false}`)
 
-	fw, hd, pr, called := waitCalled(t, got)
-	if !called {
+	a := waitCalled(t, got)
+	if !a.called {
 		t.Fatal("PrepareHost was never called")
 	}
-	if fw || hd || pr {
-		t.Errorf("explicit false must be honoured, got firewall=%v harden=%v prune=%v", fw, hd, pr)
+	if a.firewall || a.harden || a.prune {
+		t.Errorf("explicit false must be honoured, got firewall=%v harden=%v prune=%v", a.firewall, a.harden, a.prune)
+	}
+}
+
+// The opt-in image sweep is off unless explicitly asked for — and then it must reach
+// the provisioner, or the checkbox does nothing.
+func TestPrepareHonoursExplicitPruneImages(t *testing.T) {
+	h, got := prepareCapture(t)
+	postPrepare(t, h, `{"target":"root@1.2.3.4","alias":"box","pruneImages":true}`)
+
+	a := waitCalled(t, got)
+	if !a.called {
+		t.Fatal("PrepareHost was never called")
+	}
+	if !a.pruneImages {
+		t.Error("pruneImages:true must be passed through to the provisioner")
 	}
 }
 
 // The job runs in a goroutine; give it a moment to land.
-func waitCalled(t *testing.T, got func() (bool, bool, bool, bool)) (bool, bool, bool, bool) {
+func waitCalled(t *testing.T, got func() prepareArgs) prepareArgs {
 	t.Helper()
 	for i := 0; i < 200; i++ {
-		if fw, hd, pr, called := got(); called {
-			return fw, hd, pr, called
+		if a := got(); a.called {
+			return a
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

@@ -5,10 +5,17 @@ import (
 	"testing"
 )
 
-// prepareScriptWith builds the provisioning script with the clean-up on or off.
+// prepareScriptWith builds the provisioning script with the clean-up on or off,
+// at its conservative default (no aggressive image sweep).
 func prepareScriptWith(dockerPrune bool) string {
 	return buildPrepareScript("apt-get", "iproute2", "openssh-client", "amd64", 22, "root",
-		true, false, false, dockerPrune)
+		true, false, false, dockerPrune, false)
+}
+
+// prepareScriptAggressive builds it with the opt-in `--docker-prune-images` tier on.
+func prepareScriptAggressive() string {
+	return buildPrepareScript("apt-get", "iproute2", "openssh-client", "amd64", 22, "root",
+		true, false, false, true, true)
 }
 
 // dockerPruneCmds returns the `docker … prune …` commands the script will actually
@@ -40,14 +47,45 @@ func asksForAll(cmd string) bool {
 	return false
 }
 
-// The invariant the whole feature rests on: `docker image prune -a` deletes every
-// tagged image no container happens to be running — which, across several
-// workspaces, means quietly deleting the images of every project that isn't up
-// tonight. It must never appear, in any spelling.
-func TestImagePruneNeverAsksForAll(t *testing.T) {
+// The invariant the conservative default rests on: `docker image prune -a` deletes
+// every tagged image no container holds — which, across several workspaces, can mean
+// deleting the images of a project that is merely down tonight. By default it must
+// never appear, in any spelling. (The opt-in `--docker-prune-images` tier adds it
+// deliberately; that path is covered separately below.)
+func TestImagePruneNeverAsksForAllByDefault(t *testing.T) {
 	for _, cmd := range dockerPruneCmds(prepareScriptWith(true)) {
 		if strings.Contains(cmd, "image prune") && asksForAll(cmd) {
-			t.Errorf("image prune must never use -a/--all: %s", cmd)
+			t.Errorf("default image prune must never use -a/--all: %s", cmd)
+		}
+	}
+}
+
+// The opt-in tier, and only it, adds the guarded `-a` sweep: it reaps the superseded
+// tagged builds a rebuild-to-a-new-tag leaves behind, filtered to the grace window so
+// every recent rebuild — and so the newest build of any repo — is safe.
+func TestImagePruneOptInAddsGuardedAllSweep(t *testing.T) {
+	var sweep string
+	for _, cmd := range dockerPruneCmds(prepareScriptAggressive()) {
+		if strings.Contains(cmd, "image prune") && asksForAll(cmd) {
+			sweep = cmd
+		}
+	}
+	if sweep == "" {
+		t.Fatal("--docker-prune-images must add an `image prune -a` sweep")
+	}
+	if !strings.Contains(sweep, "until="+pruneImagesGrace) {
+		t.Errorf("the -a sweep must be filtered to the grace window %s: %s", pruneImagesGrace, sweep)
+	}
+}
+
+// Even aggressive, the sweep never touches the things that lose data or force a
+// rebuild of a merely-stopped stack.
+func TestImagePruneOptInStaysClearOfDataAndContainers(t *testing.T) {
+	for _, cmd := range dockerPruneCmds(prepareScriptAggressive()) {
+		for _, forbidden := range []string{"volume prune", "container prune", "system prune"} {
+			if strings.Contains(cmd, forbidden) {
+				t.Errorf("even the opt-in sweep must never run %q: %s", forbidden, cmd)
+			}
 		}
 	}
 }
