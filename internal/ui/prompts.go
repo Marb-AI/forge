@@ -151,11 +151,15 @@ func decodePrompt(r *http.Request) (title, text string, err error) {
 	if err := json.NewDecoder(io.LimitReader(r.Body, 2*maxPromptText)).Decode(&req); err != nil {
 		return "", "", fmt.Errorf("bad request")
 	}
-	title, text = strings.TrimSpace(req.Title), strings.TrimSpace(req.Text)
+	// The text is stored VERBATIM. It is going to be typed into a session, so its
+	// whitespace is content: a prompt that opens with an indented line, or with a
+	// blank one, should arrive that way. Trimming is only how we decide it is
+	// empty. The title has no such claim on it — it is a label in a list.
+	title, text = strings.TrimSpace(req.Title), req.Text
 	if title == "" {
 		return "", "", fmt.Errorf("give it a title — that's how you'll find it in the list")
 	}
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		return "", "", fmt.Errorf("a prompt with no text would send nothing")
 	}
 	if utf8.RuneCountInString(title) > maxPromptTitle {

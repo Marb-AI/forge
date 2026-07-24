@@ -174,18 +174,20 @@ func setUIPort(port int) error {
 	if port < 1 || port > 65535 {
 		return fmt.Errorf("invalid port %d (want 1-65535)", port)
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	cfg.UIPort = port
-	return cfg.Save()
+	return config.Update(func(c *config.Config) error {
+		c.UIPort = port
+		return nil
+	})
 }
 
 // listPrompts and setPrompts are the UI's saved-prompt store. Both reload the
 // config rather than closing over the one the daemon started with: prompts are
 // edited while it runs, and `forge` commands in another terminal write the same
 // file — reusing a stale copy would save an old list back over a new one.
+//
+// setPrompts replaces the prompts and NOTHING else, inside config.Update: a save
+// that wrote back a whole config loaded moments earlier would undo whatever
+// another handler changed in between — the UI port, a workspace just created.
 func listPrompts() ([]config.Prompt, error) {
 	c, err := config.Load()
 	if err != nil {
@@ -195,12 +197,10 @@ func listPrompts() ([]config.Prompt, error) {
 }
 
 func setPrompts(list []config.Prompt) error {
-	c, err := config.Load()
-	if err != nil {
-		return err
-	}
-	c.Prompts = list
-	return c.Save()
+	return config.Update(func(c *config.Config) error {
+		c.Prompts = list
+		return nil
+	})
 }
 
 // runUI is the foreground body of the detached UI daemon. It loads config and

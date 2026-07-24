@@ -194,6 +194,26 @@ func TestPromptTitleIsFlattenedButTextIsNot(t *testing.T) {
 	}
 }
 
+// The text is typed into a session, so its whitespace is content: an opening
+// indent or a deliberate blank first line is part of the prompt, and storing a
+// trimmed version would send something the author never wrote.
+func TestPromptTextIsStoredVerbatim(t *testing.T) {
+	_, h, _ := promptServer(t)
+	const verbatim = "\n    indented first line\nand a second\n\n"
+	p := createPrompt(t, h, "keeps its shape", verbatim)
+	if p.Text != verbatim {
+		t.Errorf("text = %q, want it stored exactly as written (%q)", p.Text, verbatim)
+	}
+	// It has to survive the list too, not just the create response.
+	if got := listPromptsAPI(t, h); got[0].Text != verbatim {
+		t.Errorf("listed text = %q, want %q", got[0].Text, verbatim)
+	}
+	// Trimming is still how emptiness is decided — whitespace alone is no prompt.
+	if rec := authorizedDo(h, "POST", "/api/prompts", `{"title":"t","text":"  \n\t "}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("whitespace-only text = %d, want 400", rec.Code)
+	}
+}
+
 func TestPromptUnknownIDIs404(t *testing.T) {
 	_, h, _ := promptServer(t)
 	body := `{"title":"t","text":"x"}`

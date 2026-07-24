@@ -149,7 +149,7 @@ func TestUnexpectedStreamEndIsDiagnosedNotAssumedStopped(t *testing.T) {
 // the next line that is a lone "}" at column 0.
 func jsFunc(t *testing.T, js, name string) string {
 	t.Helper()
-	re := regexp.MustCompile(`(?ms)^function ` + regexp.QuoteMeta(name) + `\(.*?^\}`)
+	re := regexp.MustCompile(`(?ms)^(?:async )?function ` + regexp.QuoteMeta(name) + `\(.*?^\}`)
 	body := re.FindString(js)
 	if body == "" {
 		t.Fatalf("app.js has no top-level function %s()", name)
@@ -188,6 +188,21 @@ func TestMultiLinePromptIsSentAsOneMessage(t *testing.T) {
 	// input in brackets it never enabled would type the escape codes themselves.
 	if !strings.Contains(body, "bracketedPasteMode") {
 		t.Error("the bracketed-paste wrapper must be conditional on the session having the mode enabled")
+	}
+}
+
+// What you typed into the box is what gets sent, whitespace and all — so the
+// browser must post the textarea's value, not a trimmed copy of it. Trimming is
+// only how it decides the box is empty.
+func TestBrowserSavesPromptTextVerbatim(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	body := jsFunc(t, js, "savePrompt")
+
+	if regexp.MustCompile(`const text = document\.getElementById\("pr-text"\)\.value\.trim\(\)`).MatchString(body) {
+		t.Error("savePrompt trims the prompt text; an opening indent or blank line is content, not noise")
+	}
+	if !strings.Contains(body, `text.trim()`) {
+		t.Error("savePrompt should still use a trimmed copy to decide the box is empty")
 	}
 }
 

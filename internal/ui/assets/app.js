@@ -1839,11 +1839,14 @@ function setPromptBusy(busy) {
 async function savePrompt() {
   if (pr.saving || !pr.editing) return;
   const title = document.getElementById("pr-title").value.trim();
-  const text = document.getElementById("pr-text").value.trim();
+  // Verbatim: the text is going to be typed into a session, so its whitespace is
+  // content — an opening indent, a deliberate blank first line. Trimming is only
+  // how we decide it is empty, never what we store.
+  const text = document.getElementById("pr-text").value;
   // Say it here rather than making the round trip say it — the daemon validates
   // the same two things, but the message should arrive as you type, not after.
   if (!title) { setPromptError("Give it a title — that's how you'll find it in the list."); return; }
-  if (!text) { setPromptError("A prompt with no text would send nothing."); return; }
+  if (!text.trim()) { setPromptError("A prompt with no text would send nothing."); return; }
 
   const editing = pr.editing;
   const isNew = editing === "new";

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Host is a registered remote server. SSH is the only entry point; User is the
@@ -129,8 +130,52 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
+// updateMu serialises read-modify-write cycles on the config file. Save() alone
+// cannot: every mutation is load, change, save, and it is the gap between the
+// load and the save that loses data — two of them interleaved each read the same
+// file and the second save silently drops the first one's change. Load and Save
+// stay lock-free (a plain read never loses anything, and Save is atomic); the
+// lock belongs to the cycle, which is what Update is.
+//
+// This covers one process, which is the one that matters: the UI daemon runs
+// every mutation the browser can reach — a prompt saved in one tab, the UI port
+// in another, a workspace being created in a third. A `forge` command in a
+// terminal is a SEPARATE process and this does not serialise against it; that
+// would need a lock in the filesystem, and the cost of losing that race is a
+// re-typed setting, not a broken file (Save is write-temp-then-rename).
+var updateMu sync.Mutex
+
+// Update applies a change to the config as one atomic step: it loads the current
+// file, hands it to change, and saves the result — with no other Update able to
+// interleave.
+//
+// Keep change SHORT. It runs under the lock, so anything slow in it (an SSH
+// round trip, say) blocks every other config write for as long as it takes. The
+// pattern is: do the slow work first, then Update to record the result.
+func Update(change func(*Config) error) error {
+	updateMu.Lock()
+	defer updateMu.Unlock()
+
+	c, err := Load()
+	if err != nil {
+		return err
+	}
+	if err := change(c); err != nil {
+		return err
+	}
+	return c.Save()
+}
+
 // Save writes the config atomically (write temp + rename) so a crash mid-write
 // can't corrupt it.
+//
+// The temp file gets a unique name. A fixed one (config.json.tmp) is shared
+// state between writers, and Update's lock does not reach the `forge` command
+// you have open in a terminal: two processes saving at the same moment would
+// write the same temp path, and the loser's rename fails with "no such file"
+// after the winner already renamed it away. Losing that race should cost you the
+// last writer's version of the file — not an error on a save that had nothing
+// wrong with it.
 func (c *Config) Save() error {
 	p, err := path()
 	if err != nil {
@@ -140,11 +185,24 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Same directory as the target: rename is only atomic within a filesystem.
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".config-*.json")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	defer os.Remove(tmp.Name()) // a no-op once the rename below has moved it
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), p)
 }
 
 // ParseSSHTarget splits "user@host[:port]" (or "host") into its parts, applying

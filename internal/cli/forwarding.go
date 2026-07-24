@@ -56,6 +56,11 @@ func forwardingStart(args []string) int {
 		}
 	}
 
+	// Scan first, record after: each scan is an SSH round trip, and holding the
+	// config open across all of them would let a slow host's scan undo whatever
+	// else was written while it ran.
+	type found struct{ alias, name string }
+	scanned := map[found][]int{}
 	for name, alias := range targets {
 		host := cfg.Hosts[alias]
 		if host == nil {
@@ -67,11 +72,16 @@ func forwardingStart(args []string) int {
 			fmt.Fprintf(os.Stderr, "  scan %s: %v\n", name, err)
 			continue
 		}
-		cfg.SetPorts(alias, name, ports)
+		scanned[found{alias, name}] = ports
 		fmt.Printf("  %s: %s\n", name, formatPorts(ports))
 	}
 
-	if err := cfg.Save(); err != nil {
+	if err := config.Update(func(c *config.Config) error {
+		for f, ports := range scanned {
+			c.SetPorts(f.alias, f.name, ports)
+		}
+		return nil
+	}); err != nil {
 		return fail("%v", err)
 	}
 

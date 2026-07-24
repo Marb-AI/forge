@@ -83,15 +83,16 @@ func hostAdd(args []string) int {
 		return fail("%v", err)
 	}
 
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
-	if _, exists := cfg.Hosts[alias]; exists {
-		return fail("host %q already exists", alias)
-	}
-	cfg.Hosts[alias] = &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
-	if err := cfg.Save(); err != nil {
+	// The "already exists" check belongs inside the update, not before it: checked
+	// against a copy loaded earlier, two adds of the same alias would both pass it
+	// and the second would overwrite the first.
+	if err := config.Update(func(c *config.Config) error {
+		if _, exists := c.Hosts[alias]; exists {
+			return fmt.Errorf("host %q already exists", alias)
+		}
+		c.Hosts[alias] = &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
+		return nil
+	}); err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("added host %q -> %s@%s:%d\n", alias, user, addr, port)
@@ -137,21 +138,19 @@ func hostRemove(args []string) int {
 // keeps running, and so do its workspaces — Forge just stops knowing about them.
 // Shared by `forge host remove` and the UI's settings panel.
 func removeHost(alias string) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	if _, ok := cfg.Hosts[alias]; !ok {
-		return fmt.Errorf("no such host %q", alias)
-	}
-	delete(cfg.Hosts, alias)
-	delete(cfg.Ports, alias)
-	for ws, host := range cfg.Workspaces {
-		if host == alias {
-			delete(cfg.Workspaces, ws)
+	return config.Update(func(c *config.Config) error {
+		if _, ok := c.Hosts[alias]; !ok {
+			return fmt.Errorf("no such host %q", alias)
 		}
-	}
-	return cfg.Save()
+		delete(c.Hosts, alias)
+		delete(c.Ports, alias)
+		for ws, host := range c.Workspaces {
+			if host == alias {
+				delete(c.Workspaces, ws)
+			}
+		}
+		return nil
+	})
 }
 
 func flush(w *tabwriter.Writer) int {
