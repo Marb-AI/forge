@@ -45,6 +45,14 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	// Unlike the three above, the aggressive image sweep is opt-in: absent (or
 	// false) means off, so a forgotten field never deletes a workspace's images.
 	pruneImages := req.PruneImages != nil && *req.PruneImages
+	// It's a tier of the nightly clean-up, injected into that script — so asking for
+	// it while declining the clean-up would install nothing. Reject the combination
+	// instead of silently doing nothing (the wizard also disables it in that case).
+	if pruneImages && !prune {
+		writeJSONError(w, http.StatusBadRequest,
+			fmt.Errorf("pruneImages needs the nightly clean-up: don't combine it with dockerPrune:false"))
+		return
+	}
 
 	id, err := s.startJob(func(out io.Writer) error {
 		return s.deps.PrepareHost(req.Target, req.Alias, firewall, harden, prune, pruneImages, out)

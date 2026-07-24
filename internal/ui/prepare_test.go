@@ -120,6 +120,29 @@ func TestPrepareHonoursExplicitPruneImages(t *testing.T) {
 	}
 }
 
+// The image sweep is a tier of the nightly clean-up, so asking for it while
+// declining the clean-up is a contradiction that would install nothing — the
+// handler must reject it, not accept a request that silently does nothing.
+func TestPrepareRejectsImageSweepWithoutCleanup(t *testing.T) {
+	h, got := prepareCapture(t)
+	r := httptest.NewRequest("POST", "http://127.0.0.1:47615/api/hosts/prepare",
+		strings.NewReader(`{"target":"root@1.2.3.4","alias":"box","dockerPrune":false,"pruneImages":true}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Origin", "http://127.0.0.1:47615")
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for pruneImages without dockerPrune, got %d: %s", rec.Code, rec.Body)
+	}
+	// And it must not have kicked off a prepare anyway.
+	time.Sleep(20 * time.Millisecond)
+	if got().called {
+		t.Error("a rejected request must not start the provisioner")
+	}
+}
+
 // The job runs in a goroutine; give it a moment to land.
 func waitCalled(t *testing.T, got func() prepareArgs) prepareArgs {
 	t.Helper()

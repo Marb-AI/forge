@@ -1880,6 +1880,17 @@ document.getElementById("wiz-addhost").addEventListener("click", () => {
 });
 wiz.name().addEventListener("keydown", (e) => { if (e.key === "Enter") submitWizard(); });
 
+// The image sweep is a tier of the nightly clean-up, so it can't be on without it:
+// untick and disable it whenever the clean-up is off. The server rejects the combo
+// too — this just keeps the contradiction unbuildable in the UI.
+function syncPruneImages() {
+  const prune = document.getElementById("wiz-prune");
+  const images = document.getElementById("wiz-prune-images");
+  images.disabled = !prune.checked;
+  if (!prune.checked) images.checked = false;
+}
+document.getElementById("wiz-prune").addEventListener("change", syncPruneImages);
+
 function isNewHost() { return wiz.host().value === NEW_HOST; }
 
 // Show the prepare fields exactly when the "new server" option is selected.
@@ -1901,6 +1912,7 @@ async function openWizard() {
   }
   // Opt-in, so it resets to off — the aggressive image sweep is never a default.
   document.getElementById("wiz-prune-images").checked = false;
+  syncPruneImages();
   const log = document.getElementById("wiz-log");
   log.hidden = true;
   log.textContent = "";

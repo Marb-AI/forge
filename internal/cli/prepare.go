@@ -31,6 +31,13 @@ func hostPrepare(args []string) int {
 	pruneImages := hasBoolFlag(rest, "--docker-prune-images")
 	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune", "--docker-prune-images")
 
+	// The image sweep is a tier of the nightly clean-up, not a standalone job — it's
+	// injected into that script. Asking for it while declining the clean-up would
+	// silently install nothing, so reject the contradiction rather than no-op.
+	if noPrune && pruneImages {
+		return fail("--docker-prune-images is part of the nightly clean-up; drop --no-docker-prune to use it")
+	}
+
 	if len(rest) < 1 || alias == "" {
 		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images]")
 	}
