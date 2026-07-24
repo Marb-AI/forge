@@ -78,6 +78,29 @@ type TrackResult struct {
 	Sessions map[string]Track `json:"sessions"`
 }
 
+// HostStats is one server's resource usage at the moment it was asked, and the
+// whole payload of `forge-agent host-stats` (no wrapper: a host speaks for
+// itself). Byte counts rather than percentages, because "83% full" and "12 GB
+// left" are different questions and only the raw numbers answer both.
+//
+// CPUPercent is the busy share of all cores over a short sampling window inside
+// the agent run — /proc/stat is a set of counters since boot, so a single read
+// would report the average since the machine came up, which is not what "cpu
+// usage" means to anyone looking at it.
+type HostStats struct {
+	CPUPercent float64 `json:"cpu_percent"`
+	CPUCores   int     `json:"cpu_cores"`
+	MemTotal   uint64  `json:"mem_total"`
+	MemUsed    uint64  `json:"mem_used"`
+	// DiskPath is the filesystem measured — where workspaces live, falling back to
+	// "/" — reported so the UI can say which disk it is talking about.
+	DiskPath  string `json:"disk_path"`
+	DiskTotal uint64 `json:"disk_total"`
+	DiskUsed  uint64 `json:"disk_used"`
+	// Uptime is how long the machine has been up, in seconds.
+	Uptime int64 `json:"uptime"`
+}
+
 // CreateResult is returned by `forge-agent workspace-create`.
 type CreateResult struct {
 	Workspace Workspace `json:"workspace"`

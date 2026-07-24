@@ -71,6 +71,25 @@
           </span>
         </div>
         <div id="filetree" class="muted">Select a workspace.</div>
+
+        <!-- The servers panel: every registered machine and what it's using
+             right now. Below the tree because it's ambient — you glance at it,
+             you don't work in it. -->
+        <div id="servers">
+          <div class="pane-head" id="servers-head" title="Show/hide server usage">
+            <span>Servers</span>
+            <span class="pane-actions">
+              <span id="servers-count" class="muted"></span>
+              <button id="servers-toggle" title="Collapse">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </button>
+            </span>
+          </div>
+          <div id="serverlist" class="muted">Loading…</div>
+        </div>
       </aside>
 
       <main id="main">

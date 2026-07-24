@@ -286,6 +286,11 @@ same code, not a reimplementation that quietly drifts.
   terminal with syntax highlighting. Read-only is the point: Claude writes the
   code, you inspect it. Dotfiles at the root (plus `.git` and `.claude` anywhere)
   hide behind the eye toggle.
+- **The servers panel** under the tree: every registered machine with its CPU,
+  memory and disk usage, refreshed every ten seconds. It answers the question you
+  otherwise ssh in to ask — which box has room, and why one feels slow — and turns
+  amber at three-quarters full, red at ninety percent. Collapse it and it stops
+  polling; each round costs one SSH round trip per server.
 - **An SSH shell** that opens *over* the terminal — the same box a file opens in,
   so the tree and the rail stay put and Claude never gets reflowed. Hiding it
   **keeps the shell running**: you come back to the same shell, same directory,

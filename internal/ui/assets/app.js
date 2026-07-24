@@ -765,6 +765,206 @@ setInterval(trackTick, 1000);
 setInterval(flushActive, 15000);
 setInterval(pollTrack, 5000);
 
+// ---- servers panel ---------------------------------------------------------
+// Every registered server, under the file tree, with what it is using right now:
+// CPU, memory, and the disk the workspaces live on. It is ambient information —
+// you glance at it to see which machine has room, or why one feels slow.
+//
+// Each round costs one SSH round trip PER HOST, so the loop is careful about when
+// it runs at all: it is parked while the panel can't be seen (collapsed, or this
+// browser tab in the background) and resumes when it can. And it re-arms after
+// each poll settles rather than running on a fixed timer — an ssh to a hung host
+// blocks for the TCP timeout, which outlasts the interval, so a repeating timer
+// would stack connections on a machine that is already in trouble.
+const SERVERS_POLL_MS = 10000;
+const SERVERS_COLLAPSED_KEY = "forge-servers-collapsed";
+const servers = {
+  stats: [],      // [{host, addr, reachable, note, cpu_*, mem_*, disk_*, uptime}]
+  at: 0,          // when the last reading landed
+  timer: null,
+  busy: false,    // a poll is in flight; nothing may start a second one
+  loaded: false,  // we have had an answer, so "no servers" means it, not "not yet"
+};
+
+function serversCollapsed() { return localStorage.getItem(SERVERS_COLLAPSED_KEY) === "1"; }
+
+function setServersCollapsed(v) {
+  localStorage.setItem(SERVERS_COLLAPSED_KEY, v ? "1" : "0");
+  applyServersCollapsed();
+  refreshServers(); // expanding must not leave a reading from before you left
+}
+
+function applyServersCollapsed() {
+  const collapsed = serversCollapsed();
+  document.getElementById("servers").classList.toggle("collapsed", collapsed);
+  document.getElementById("servers-toggle").title = collapsed ? "Expand" : "Collapse";
+}
+
+// Nothing polls for a panel nobody can see.
+function serversWanted() { return !document.hidden && !serversCollapsed(); }
+
+// Poll now if what we have is older than a round; otherwise just make sure the
+// loop is armed. force skips the freshness check, for the moments when the list
+// itself changed (a server registered) and the answer on screen is about a
+// different set of machines.
+function refreshServers({ force = false } = {}) {
+  if (!serversWanted() || servers.busy) return scheduleServersPoll();
+  if (!force && servers.at && Date.now() - servers.at < SERVERS_POLL_MS) return scheduleServersPoll();
+  pollServers();
+}
+
+function scheduleServersPoll() {
+  clearTimeout(servers.timer);
+  servers.timer = null;
+  if (!serversWanted()) return;
+  servers.timer = setTimeout(pollServers, SERVERS_POLL_MS);
+}
+
+async function pollServers() {
+  if (servers.busy) return;
+  servers.busy = true;
+  try {
+    const res = await fetch("/api/hosts/stats");
+    if (res.ok) {
+      servers.stats = await res.json();
+      servers.at = Date.now();
+      servers.loaded = true;
+      renderServers();
+    }
+  } catch (e) {
+    // A poll that didn't land leaves the last reading up rather than blanking the
+    // panel: the numbers are a few seconds old, which the next round corrects.
+  } finally {
+    servers.busy = false;
+    scheduleServersPoll();
+  }
+}
+
+// A server just removed in Settings should leave the panel at once, not linger
+// until a poll (and the daemon's own freshness window) catch up.
+function dropServer(alias) {
+  servers.stats = servers.stats.filter((s) => s.host !== alias);
+  renderServers();
+}
+
+function renderServers() {
+  const list = document.getElementById("serverlist");
+  const count = document.getElementById("servers-count");
+  const stats = servers.stats || [];
+  count.textContent = stats.length > 1 ? String(stats.length) : "";
+  if (!stats.length) {
+    list.className = "muted";
+    list.textContent = servers.loaded ? "No servers registered." : "Loading…";
+    return;
+  }
+  list.className = "";
+  list.replaceChildren(...stats.map(serverRow));
+}
+
+function serverRow(s) {
+  const row = document.createElement("div");
+  row.className = "srv" + (s.reachable ? "" : " down");
+  row.title = serverTitle(s);
+
+  const head = document.createElement("div");
+  head.className = "srv-head";
+  const name = document.createElement("span");
+  name.className = "srv-name";
+  name.textContent = s.host;
+  const note = document.createElement("span");
+  note.className = "srv-note";
+  note.textContent = s.reachable ? uptimeLabel(s.uptime) : (s.note || "unreachable");
+  head.append(name, note);
+  row.appendChild(head);
+
+  if (!s.reachable) return row;
+  // A zero total is the daemon saying "not measured" — no machine has zero cores
+  // or zero bytes of RAM — so those meters read "—" instead of a confident 0%.
+  row.append(
+    meterRow("CPU", s.cpu_cores ? s.cpu_percent : null),
+    meterRow("RAM", pctOf(s.mem_used, s.mem_total)),
+    meterRow("DSK", pctOf(s.disk_used, s.disk_total)),
+  );
+  return row;
+}
+
+// One labelled bar. pct null means unmeasured: an empty track and a dash, which
+// is different from a measured zero.
+function meterRow(label, pct) {
+  const el = document.createElement("div");
+  el.className = "meter";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  const fill = document.createElement("i");
+  const p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  fill.style.width = p.toFixed(1) + "%";
+  if (pct != null && p >= 90) fill.className = "crit";
+  else if (pct != null && p >= 75) fill.className = "warn";
+  bar.appendChild(fill);
+  const val = document.createElement("span");
+  val.className = "meter-val";
+  val.textContent = pct == null ? "—" : Math.round(p) + "%";
+  el.append(name, bar, val);
+  return el;
+}
+
+function pctOf(used, total) {
+  if (!total) return null;
+  return (used / total) * 100;
+}
+
+// The tooltip carries what the bars can't: the address, the cores, and the actual
+// gigabytes — "83% full" and "12 GiB left" are different questions.
+function serverTitle(s) {
+  const lines = [s.host + (s.addr ? " · " + s.addr : "")];
+  if (!s.reachable) {
+    // The row shows the short label; the tooltip is where the reason fits.
+    lines.push(s.detail || s.note || "unreachable");
+    return lines.join("\n");
+  }
+  lines.push(s.cpu_cores
+    ? `CPU ${Math.round(s.cpu_percent)}% of ${s.cpu_cores} core${s.cpu_cores === 1 ? "" : "s"}`
+    : "CPU not measured");
+  lines.push(s.mem_total
+    ? `RAM ${fmtBytes(s.mem_used)} / ${fmtBytes(s.mem_total)}`
+    : "RAM not measured");
+  lines.push(s.disk_total
+    ? `Disk ${fmtBytes(s.disk_used)} / ${fmtBytes(s.disk_total)}` +
+      (s.disk_path ? ` on ${s.disk_path}` : "")
+    : "Disk not measured");
+  if (s.uptime) lines.push("up " + uptimeLabel(s.uptime).replace(/^up /, ""));
+  return lines.join("\n");
+}
+
+// Binary units, named as such: these come from the kernel's own KiB counts, and
+// calling 1024³ bytes a "GB" is how a 32 GiB machine gets described as 34 GB.
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + units[i];
+}
+
+function uptimeLabel(secs) {
+  if (!secs) return "";
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (d) return `up ${d}d ${h}h`;
+  if (h) return `up ${h}h ${m}m`;
+  return `up ${m}m`;
+}
+
+document.getElementById("servers-head").addEventListener("click", () =>
+  setServersCollapsed(!serversCollapsed()));
+// Coming back to the tab is the moment the numbers matter again — and the moment
+// they are most out of date.
+document.addEventListener("visibilitychange", () => refreshServers());
+
 // ---- clipboard -------------------------------------------------------------
 function flashCopied(btn) {
   if (!btn) return;
@@ -1606,6 +1806,7 @@ async function confirmRemoveHost(alias) {
     if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
 
     setSettingsMsg(`Removed "${alias}".`);
+    dropServer(alias);
     await loadWorkspaces();
     await renderAdminLists();
   } catch (e) {
@@ -2078,6 +2279,7 @@ async function submitWizard() {
         document.getElementById("wiz-prune").checked,
         document.getElementById("wiz-prune-images").checked);
       host = alias;
+      refreshServers({ force: true }); // a machine we've never measured just joined
       // The server is registered now. Fold it into the dropdown and select it,
       // so if the workspace step fails, hitting Create again retries just that —
       // rather than re-running a several-minute prepare on a prepared server.
@@ -2313,4 +2515,7 @@ initTheme();
 initTabDrag();
 state.showHidden = localStorage.getItem("forge-show-hidden") === "1";
 applyShowHidden();
+applyServersCollapsed();
+renderServers();
+refreshServers();
 loadWorkspaces().then(pollActivity);

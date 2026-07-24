@@ -199,6 +199,7 @@ func runUI(_ []string) int {
 		WorkspaceActivity: workspaceActivityInfo,
 		WorkspaceTrack:    workspaceTrackInfo,
 		TrackInc:          trackInc,
+		HostStats:         hostsStats,
 		HostFor: func(name string) *config.Host {
 			// Reload each time so workspaces added while the daemon runs resolve.
 			c, err := config.Load()
