@@ -116,9 +116,13 @@ func deleteWorkspace(name string) error {
 // it. The status is the session's — a workspace is a Linux user and a home
 // directory, and cannot itself be "stopped".
 type WorkspaceStatus struct {
-	Name   string
-	Host   string
-	Status string
+	Name string
+	Host string
+	// HostUser is the host's own login account (config's Host.User) — root, or a
+	// passwordless-sudo user. Resolved here from the config we already loaded, so
+	// callers that need it (the browser UI's host shell) don't reload the config.
+	HostUser string
+	Status   string
 }
 
 // listWorkspaces returns the workspaces THIS CLIENT created, with the state of the
@@ -164,7 +168,16 @@ func listWorkspaces() ([]WorkspaceStatus, error) {
 		sessions[alias] = byName
 	}
 
-	return mergeWorkspaceStatus(cfg.Workspaces, sessions), nil
+	out := mergeWorkspaceStatus(cfg.Workspaces, sessions)
+	// Fill in each workspace's host login user from the config already in hand —
+	// mergeWorkspaceStatus works off the name→alias map alone (so it stays unit-
+	// testable), and only here do we still hold cfg.Hosts to resolve the user.
+	for i := range out {
+		if h := cfg.Hosts[out[i].Host]; h != nil {
+			out[i].HostUser = h.User
+		}
+	}
+	return out, nil
 }
 
 // workspacesActivity asks each host once for the Claude attention state of the

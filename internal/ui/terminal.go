@@ -26,7 +26,7 @@ import (
 //
 // When the browser disconnects we kill the ssh process. For the Claude kind that
 // is a tmux *detach*, so the session and Claude keep running server-side; for the
-// ssh kind there is no tmux, so the shell goes with it.
+// ssh and host kinds there is no tmux, so the shell goes with it.
 type term struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
@@ -52,25 +52,35 @@ const (
 	// as its stream: hiding the panel keeps the stream (and the shell) alive,
 	// which is the whole point of hide-vs-close.
 	termSSH = "ssh"
+	// termHost is a login shell as the host's own login account — the user
+	// `host prepare` connected as (root, or a passwordless-sudo user; it differs
+	// per server). Unlike termSSH it is NOT scoped to a workspace user: it is the
+	// shell for server-wide work like installing a package. Like termSSH it is not
+	// tmux-backed and lives with its stream.
+	termHost = "host"
 )
 
-func validKind(k string) bool { return k == termClaude || k == termSSH }
+func validKind(k string) bool { return k == termClaude || k == termSSH || k == termHost }
 
 // startTerm opens a terminal of the given kind into the workspace through a
 // fresh local pty, sized to cols×rows so the very first draw matches the browser
 // (a 0×0 or default pty makes tmux/Claude render into the wrong rectangle —
 // cursor adrift, mouse tracking off).
 func startTerm(h *config.Host, workspace, kind string, cols, rows uint16) (*term, error) {
-	target := sshx.WorkspaceTarget(h, workspace)
-
 	var args []string
 	switch kind {
 	case termClaude:
-		args = target.TTYArgs(agentproto.AttachClaude)
+		args = sshx.WorkspaceTarget(h, workspace).TTYArgs(agentproto.AttachClaude)
 	case termSSH:
 		// Login shell with the local SSH agent forwarded — identical to
 		// `forge workspace <name> ssh`, so git in the shell uses your keys.
-		args = append([]string{"-A"}, target.TTYArgs()...)
+		args = append([]string{"-A"}, sshx.WorkspaceTarget(h, workspace).TTYArgs()...)
+	case termHost:
+		// Login shell as the host's own login account — the user `host prepare`
+		// connected as (root, or a passwordless-sudo user). Not scoped to the
+		// workspace user: this is the shell for server-wide work like installing a
+		// package. No agent forwarding — host admin doesn't use your git keys.
+		args = sshx.AdminTarget(h).TTYArgs()
 	default:
 		return nil, fmt.Errorf("unknown terminal kind %q", kind)
 	}

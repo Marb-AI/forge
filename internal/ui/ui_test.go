@@ -155,15 +155,21 @@ func TestParseDim(t *testing.T) {
 }
 
 func TestValidKindAndTermKey(t *testing.T) {
-	if !validKind(termClaude) || !validKind(termSSH) {
-		t.Error("claude and ssh must be valid kinds")
+	if !validKind(termClaude) || !validKind(termSSH) || !validKind(termHost) {
+		t.Error("claude, ssh and host must be valid kinds")
 	}
 	if validKind("bogus") || validKind("") {
 		t.Error("unknown kinds must be refused")
 	}
-	// The Claude terminal and the ssh shell of one workspace must not collide.
-	if termKey("ws", termClaude) == termKey("ws", termSSH) {
-		t.Error("terminal kinds must be namespaced apart in the registry")
+	// The Claude terminal, the ssh shell and the host shell of one workspace must
+	// each land on a distinct registry key, so opening one never closes another.
+	keys := map[string]bool{}
+	for _, k := range []string{termClaude, termSSH, termHost} {
+		key := termKey("ws", k)
+		if keys[key] {
+			t.Errorf("terminal kind %q collides with another in the registry", k)
+		}
+		keys[key] = true
 	}
 }
 
