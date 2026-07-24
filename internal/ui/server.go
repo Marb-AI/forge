@@ -95,7 +95,7 @@ type Deps struct {
 	CreateWorkspace func(name, host string) error
 	// PrepareHost provisions a bare server and registers it. It takes minutes and
 	// its progress is the point, so it writes every line to out (an SSE stream).
-	PrepareHost func(sshTarget, alias string, firewall, harden, dockerPrune bool, out io.Writer) error
+	PrepareHost func(sshTarget, alias string, firewall, harden, dockerPrune, pruneImages bool, out io.Writer) error
 	// DeleteWorkspace destroys a workspace on its host. IRREVERSIBLE: the agent
 	// runs `userdel -r`, so the workspace user and every file in its home are gone.
 	DeleteWorkspace func(name string) error

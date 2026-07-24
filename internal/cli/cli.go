@@ -12,7 +12,7 @@ const usage = `forge — remote Claude Code workspace manager
 
 Hosts:
   forge host prepare <ssh-target> --alias=<alias>  provision a bare server + register it
-                                                  [--no-firewall] [--no-ssh-harden] [--no-docker-prune]
+                                                  [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images]
   forge host add <ssh-target> --alias=<alias>   register an already-prepared server
   forge host gh-login <alias>                   authenticate gh once for the whole host
   forge host list

@@ -28,12 +28,13 @@ func hostPrepare(args []string) int {
 	noFirewall := hasBoolFlag(rest, "--no-firewall")
 	noHarden := hasBoolFlag(rest, "--no-ssh-harden")
 	noPrune := hasBoolFlag(rest, "--no-docker-prune")
-	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune")
+	pruneImages := hasBoolFlag(rest, "--docker-prune-images")
+	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune", "--docker-prune-images")
 
 	if len(rest) < 1 || alias == "" {
-		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune]")
+		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images]")
 	}
-	if err := runHostPrepare(rest[0], alias, !noFirewall, !noHarden, !noPrune, os.Stdout); err != nil {
+	if err := runHostPrepare(rest[0], alias, !noFirewall, !noHarden, !noPrune, pruneImages, os.Stdout); err != nil {
 		return fail("%v", err)
 	}
 	return 0
@@ -43,7 +44,7 @@ func hostPrepare(args []string) int {
 // server and registers it, writing every line of progress to out. The CLI passes
 // os.Stdout; the browser UI passes an SSE stream, so the wizard can show the same
 // long provisioning run live instead of a spinner.
-func runHostPrepare(sshTarget, alias string, firewall, harden, dockerPrune bool, out io.Writer) error {
+func runHostPrepare(sshTarget, alias string, firewall, harden, dockerPrune, pruneImages bool, out io.Writer) error {
 	user, addr, port, err := config.ParseSSHTarget(sshTarget)
 	if err != nil {
 		return err
@@ -91,7 +92,7 @@ func runHostPrepare(sshTarget, alias string, firewall, harden, dockerPrune bool,
 	}
 
 	// 2) Run the provisioning script as root.
-	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, firewall, harden, dockerPrune)
+	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, firewall, harden, dockerPrune, pruneImages)
 	runner := "bash -s"
 	if !isRoot {
 		runner = "sudo bash -s"
@@ -245,7 +246,7 @@ func contains(ss []string, s string) bool {
 
 // buildPrepareScript assembles the idempotent remote provisioning script. It
 // assumes it runs as root (the caller wraps it in `sudo bash -s` when needed).
-func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort int, user string, isRoot, firewall, harden, dockerPrune bool) string {
+func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort int, user string, isRoot, firewall, harden, dockerPrune, pruneImages bool) string {
 	var b strings.Builder
 	b.WriteString(prepareBase)
 	b.WriteString(ghSection)
@@ -273,8 +274,34 @@ func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort
 		"__KEY__", hostKeyPath,
 		"__SSHPORT__", strconv.Itoa(sshPort),
 		"__USER__", user,
+		"__IMAGE_PRUNE__", imagePruneLine(pruneImages),
 	)
 	return r.Replace(b.String())
+}
+
+// pruneImagesGrace is how old an unreferenced image must be before the opt-in
+// aggressive sweep will remove it. Wide enough (7 days) that every recent rebuild
+// — and so the newest build of any repository — is safe, and a stack brought fully
+// down for a few days keeps its image.
+const pruneImagesGrace = "168h"
+
+// imagePruneLine is the aggressive image sweep injected into the nightly clean-up
+// when `--docker-prune-images` is set. It removes tagged images that no container
+// (running OR stopped) references and that are older than the grace window — the
+// superseded builds a rebuild-to-a-new-tag leaves behind, which the dangling pass
+// can't see because they keep their tag. Off by default: without a container to
+// hold it, a `compose down`-ed stack's image older than the grace window would go
+// too and force a rebuild, so this is a trade you opt into rather than a default.
+func imagePruneLine(on bool) string {
+	if !on {
+		return "# tagged-image sweep disabled (opt in with --docker-prune-images)"
+	}
+	return `# Superseded builds: unreferenced tagged images past the grace window. A
+# rebuild to a NEW tag leaves the old one tagged (so not dangling); this is the
+# only pass that reaps it. -a is safe here because an image any container holds —
+# running or merely stopped — is never a candidate.
+echo "[prune] unreferenced images older than ` + pruneImagesGrace + `:"
+docker image prune -a -f --filter until=` + pruneImagesGrace + ` || true`
 }
 
 // prepareBase installs base tools + docker + the agent, idempotently.
@@ -476,10 +503,14 @@ fi
 // What it removes is deliberately conservative, because the failure mode of being
 // too eager is a workspace that has to rebuild from scratch in the morning:
 //
-//   - DANGLING images only (no -a). Those are the layer sets a rebuild left
-//     behind. `-a` would also delete any tagged image that no container happens to
-//     be running right now — which, with several workspaces where not all are up,
-//     means quietly deleting the images of every idle project each night.
+//   - DANGLING images only (no -a) by default. Those are the layer sets a rebuild
+//     left behind — including the previous image when you rebuild to the SAME tag,
+//     which loses its tag and so becomes dangling on the spot. Rebuilding to a NEW
+//     tag instead leaves the old build tagged (not dangling), so the default pass
+//     can't see it; the opt-in `--docker-prune-images` tier adds a guarded `-a`
+//     sweep for exactly that case (see imagePruneLine). It stays opt-in because a
+//     stack brought fully down — no container left, running or stopped — would lose
+//     its image too once past the grace window.
 //   - Build cache, which on a real host is where the growth actually is.
 //   - Never volumes. That is where data lives.
 //
@@ -505,6 +536,7 @@ docker system df 2>/dev/null || exit 0
 # Layer sets orphaned by a rebuild. NOT -a: that would delete tagged images no
 # container happens to be running, i.e. every idle workspace's images.
 docker image prune -f --filter until=24h || true
+__IMAGE_PRUNE__
 # BuildKit cache. Usually the biggest win.
 docker builder prune -f --filter until=24h || true
 # Containers are NOT pruned: worth ~nothing next to the cache, and removing one
