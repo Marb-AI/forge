@@ -40,9 +40,14 @@ import (
 // Claude session status. It mirrors the CLI's workspace list; the cli package
 // fills it in (the ui package must not import cli).
 type WorkspaceInfo struct {
-	Name   string `json:"name"`
-	Host   string `json:"host"`
-	Status string `json:"status"`
+	Name string `json:"name"`
+	Host string `json:"host"`
+	// HostUser is the host's own login account — the user `host prepare` connected
+	// as (root, or a passwordless-sudo user). It names the identity of the host
+	// shell (the rail's non-workspace shell), which differs per server, so the UI
+	// can label it truthfully instead of assuming "root".
+	HostUser string `json:"host_user"`
+	Status   string `json:"status"`
 }
 
 // Activity is a workspace's Claude attention state (state is "busy"/"idle"/

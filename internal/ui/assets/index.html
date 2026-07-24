@@ -99,7 +99,7 @@
           </div>
           <aside id="sshpanel" hidden>
             <div class="pane-head">
-          <span>SSH · <span id="ssh-ws"></span></span>
+          <span><span id="ssh-kind">SSH</span> · <span id="ssh-ws"></span></span>
           <button id="ssh-close" title="Hide (Esc) — the shell keeps running">✕</button>
         </div>
             <div id="sshbody"><div id="sshterm"></div></div>
@@ -126,6 +126,9 @@
         <div class="rail-sep"></div>
         <button class="rail-btn" data-action="ssh" title="Open a shell on the server">
           <span class="ico">&gt;_</span><span class="cap">ssh</span>
+        </button>
+        <button class="rail-btn" data-action="host" title="Open a shell on the server as its login user">
+          <span class="ico">@</span><span class="cap" id="host-cap">host</span>
         </button>
         <button class="rail-btn" data-action="settings" title="Settings">
           <span class="ico">⚙</span><span class="cap">settings</span>

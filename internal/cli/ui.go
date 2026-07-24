@@ -251,9 +251,12 @@ func listWorkspacesInfo() ([]ui.WorkspaceInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// listWorkspaces already resolved each workspace's host login user from the
+	// config it loaded, so the UI can name the host shell after the real account
+	// (root, or a sudo user) without a second config read on this hot path.
 	out := make([]ui.WorkspaceInfo, 0, len(list))
 	for _, ws := range list {
-		out = append(out, ui.WorkspaceInfo{Name: ws.Name, Host: ws.Host, Status: ws.Status})
+		out = append(out, ui.WorkspaceInfo{Name: ws.Name, Host: ws.Host, HostUser: ws.HostUser, Status: ws.Status})
 	}
 	return out, nil
 }

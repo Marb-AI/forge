@@ -359,7 +359,12 @@ button.big { padding: 10px 20px; font-size: 13px; }
   padding: 6px 2px;
 }
 .rail-btn .ico { font-size: 15px; line-height: 1; }
-.rail-btn .cap { font-size: 9px; line-height: 1; color: var(--fg-dim); letter-spacing: 0.02em; }
+/* The host-shell caption is a login name, which can be long — keep it on one line
+   and clip it rather than let it widen or wrap the rail. */
+.rail-btn .cap {
+  font-size: 9px; line-height: 1; color: var(--fg-dim); letter-spacing: 0.02em;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .rail-btn:hover .cap, .rail-btn.active .cap { color: var(--fg); }
 .rail-btn.active { background: var(--bg-3); border-color: var(--border); }
 .rail-btn:disabled { opacity: 0.35; cursor: default; }
