@@ -67,6 +67,37 @@ type Track struct {
 	ActiveSeconds int64 `json:"active_seconds"`
 }
 
+// HostStat is one registered server's resource usage, for the panel under the
+// file tree. The cli package fills it in from the agent (the ui package must not
+// import agentproto).
+//
+// A host that could not be measured still gets a row — Reachable false, Note
+// saying why. Dropping it would make a server that went down look like one you
+// never registered, and the moment a server stops answering is exactly when you
+// want to see it in the list.
+type HostStat struct {
+	Host      string `json:"host"` // the alias, as registered
+	Addr      string `json:"addr"`
+	Reachable bool   `json:"reachable"`
+	// Note is the few words the row itself shows when a host could not be measured
+	// ("unreachable"); Detail is the longer version for the tooltip, including what
+	// to do about it. Two fields because the row is a sidebar wide — a note long
+	// enough to explain the problem squeezes out the name of the server having it.
+	Note   string `json:"note,omitempty"`
+	Detail string `json:"detail,omitempty"`
+
+	// Zero means "not measured" for each of these — no real host has zero cores or
+	// zero bytes of RAM — so the browser can show "—" instead of a confident 0%.
+	CPUPercent float64 `json:"cpu_percent"`
+	CPUCores   int     `json:"cpu_cores"`
+	MemTotal   uint64  `json:"mem_total"`
+	MemUsed    uint64  `json:"mem_used"`
+	DiskPath   string  `json:"disk_path"`
+	DiskTotal  uint64  `json:"disk_total"`
+	DiskUsed   uint64  `json:"disk_used"`
+	Uptime     int64   `json:"uptime"`
+}
+
 // Deps are the Forge operations the UI needs, injected by the cli package so the
 // ui package stays free of the agent/command machinery (and of import cycles).
 type Deps struct {
@@ -87,6 +118,11 @@ type Deps struct {
 	// flushes its accumulated activity here periodically. Optional: handleTrackInc
 	// nil-checks it, so a caller that doesn't wire it just doesn't persist activity.
 	TrackInc func(name string, seconds int) error
+	// HostStats returns every registered server's resource usage, one entry per
+	// host, ordered by alias. Polled by the UI's servers panel. Optional, like
+	// WorkspaceActivity: handleHostStats nil-checks it and reports an empty list
+	// rather than failing to start.
+	HostStats func() ([]HostStat, error)
 	// HostFor resolves a workspace name to the host it lives on, or nil.
 	HostFor func(name string) *config.Host
 	// Checkpoint saves a handoff to memory and restarts the session from it. It
@@ -154,6 +190,20 @@ type server struct {
 	wsLastAt   time.Time        // when wsLast finished
 	now        func() time.Time // overridable in tests
 	onJoin     func()           // test seam: a caller just joined an in-flight call
+
+	statsMu       sync.Mutex // guards the fields below
+	statsInFlight *statsCall // the HostStats call callers are currently sharing
+	statsLast     *statsCall // the last one that completed, reused within statsFresh
+	statsLastAt   time.Time  // when statsLast finished
+	onStatsJoin   func()     // test seam, as onJoin
+}
+
+// statsCall is one in-flight HostStats, and the result everyone waiting on it
+// will get.
+type statsCall struct {
+	done  chan struct{}
+	stats []HostStat
+	err   error
 }
 
 // wsListCall is one in-flight ListWorkspaces, and the result everyone waiting on
@@ -287,6 +337,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /api/fs/{ws}/list", s.handleFsList)
 	mux.HandleFunc("GET /api/fs/{ws}/read", s.handleFsRead)
 	mux.HandleFunc("GET /api/hosts", s.handleHosts)
+	mux.HandleFunc("GET /api/hosts/stats", s.handleHostStats)
 	mux.HandleFunc("POST /api/workspaces", s.handleCreateWorkspace)
 	mux.HandleFunc("POST /api/hosts/prepare", s.handlePrepareHost)
 	mux.HandleFunc("GET /api/jobs/{id}/stream", s.handleJobStream)
@@ -475,6 +526,78 @@ func (s *server) handleTrack(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, tr)
+}
+
+// statsFresh is how long a measurement is handed to further callers instead of
+// taking new ones. It exists to make N browser tabs cost what one costs: every
+// open tab polls the servers panel on its own timer, and each miss is an SSH
+// round trip per registered host.
+//
+// It is deliberately just under the browser's own poll interval (SERVERS_POLL_MS
+// in app.js — the assets test holds the two together), so a second tab polling out
+// of phase with the first is served the first one's answer, while a single tab
+// still measures afresh every round rather than being shown the previous reading
+// twice.
+const statsFresh = 8 * time.Second
+
+// handleHostStats reports every registered server's CPU, memory and disk usage.
+// Like handleActivity it is polled and degrades quietly: a host that cannot be
+// reached comes back as a row saying so, not as a failed request.
+func (s *server) handleHostStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.deps.HostStats == nil {
+		writeJSON(w, []HostStat{})
+		return
+	}
+	stats, err := s.hostStatsShared()
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, err)
+		return
+	}
+	if stats == nil {
+		stats = []HostStat{}
+	}
+	writeJSON(w, stats)
+}
+
+// hostStatsShared runs HostStats, subject to the same two ways of not running it
+// as listWorkspacesShared: a result younger than statsFresh is reused, and a call
+// already in flight is joined rather than duplicated. Unlike the workspace list
+// there is no opt-in — nothing acts on these numbers, they are only read, so
+// "recent" is always good enough.
+func (s *server) hostStatsShared() ([]HostStat, error) {
+	s.statsMu.Lock()
+	if s.now == nil {
+		s.now = time.Now
+	}
+	// Only a successful call is reusable: caching a failure would keep reporting a
+	// server as down for the rest of the window after it came back.
+	if s.statsLast != nil && s.statsLast.err == nil && s.now().Sub(s.statsLastAt) < statsFresh {
+		c := s.statsLast
+		s.statsMu.Unlock()
+		return c.stats, c.err
+	}
+	if c := s.statsInFlight; c != nil {
+		if s.onStatsJoin != nil {
+			s.onStatsJoin()
+		}
+		s.statsMu.Unlock()
+		<-c.done
+		return c.stats, c.err
+	}
+	c := &statsCall{done: make(chan struct{})}
+	s.statsInFlight = c
+	s.statsMu.Unlock()
+
+	c.stats, c.err = s.deps.HostStats()
+
+	s.statsMu.Lock()
+	s.statsInFlight = nil
+	s.statsLast, s.statsLastAt = c, s.now()
+	s.statsMu.Unlock()
+	close(c.done)
+
+	return c.stats, c.err
 }
 
 // loopbackHost reports whether the request's Host header names the loopback

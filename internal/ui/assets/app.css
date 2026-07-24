@@ -195,6 +195,76 @@ button:hover { background: var(--bg-3); }
 #filetree:not(.show-hidden) .tnode.dotfile { display: none; }
 #filetree { flex: 1; overflow: auto; padding: 8px 10px; scrollbar-gutter: stable; }
 
+/* ---- servers panel (below the file tree) ----
+   The tree owns the leftover height; this sits under it and takes only what its
+   rows need, up to a share of the pane — past that it scrolls, so a handful of
+   registered servers can never squeeze the file tree out of existence. */
+#servers { flex: none; border-top: 1px solid var(--border); background: var(--bg-2); }
+#servers-head { cursor: pointer; user-select: none; border-bottom: none; }
+#servers:not(.collapsed) #servers-head { border-bottom: 1px solid var(--border); }
+#servers-count { font-size: 10px; letter-spacing: 0; text-transform: none; }
+/* The chevron points down when open, right when collapsed — the panel's state,
+   not the action, which is what a disclosure triangle means everywhere else. */
+#servers.collapsed #servers-toggle svg { transform: rotate(-90deg); }
+#servers-toggle svg { transition: transform 0.12s ease; }
+#serverlist {
+  max-height: 34vh;
+  overflow: auto;
+  padding: 6px 10px 8px;
+  scrollbar-gutter: stable;
+}
+#servers.collapsed #serverlist { display: none; }
+.srv { padding: 4px 0 6px; }
+.srv + .srv { border-top: 1px solid var(--border); margin-top: 2px; }
+.srv-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 3px; }
+/* At the pane's narrowest, something has to give, and it is the name: the note
+   is short and load-bearing ("unreachable" truncated to "unreac…" is the one
+   word you needed), while a clipped alias is still recognisable — and the
+   tooltip carries both in full. */
+.srv-name {
+  flex: 1 1 auto;
+  min-width: 4em;
+  font-size: 11.5px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.srv-note {
+  flex: none;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.srv.down .srv-name { color: var(--fg-dim); }
+.srv.down .srv-note { color: var(--err-fg); }
+.meter {
+  display: grid;
+  grid-template-columns: 26px 1fr 32px;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--fg-dim);
+  line-height: 1.6;
+}
+.meter-val { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg); }
+.bar { height: 5px; border-radius: 3px; background: var(--bg-3); overflow: hidden; }
+.bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: #57b66a;
+  transition: width 0.4s ease;
+}
+/* Amber from three-quarters full, red from ninety percent: the point of the
+   colour is to be noticed before the disk fills, not once it has. */
+.bar > i.warn { background: #f5a623; }
+.bar > i.crit { background: #e0574c; }
+@media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+
 #main {
   flex: 1;
   display: flex;

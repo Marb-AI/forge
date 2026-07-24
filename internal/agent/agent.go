@@ -43,7 +43,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 // Main is the forge-agent entrypoint; returns a process exit code.
 func Main(args []string) int {
 	if len(args) == 0 {
-		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc>")
+		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc|host-stats>")
 	}
 	switch args[0] {
 	case "workspace-create":
@@ -60,6 +60,8 @@ func Main(args []string) int {
 		return opTrack()
 	case "workspace-track-inc":
 		return opTrackInc(args[1:])
+	case "host-stats":
+		return opHostStats()
 	default:
 		return emitError("unknown op %q", args[0])
 	}
@@ -468,6 +470,196 @@ func opTrackInc(args []string) int {
 	// The workspace user owns its home; the agent wrote the file as root.
 	_, _ = run("chown", *name+":"+*name, path)
 	return emit(agentproto.OK{OK: true})
+}
+
+// cpuWindow is how long host-stats watches /proc/stat before reporting a
+// percentage. Long enough that a scheduler tick or two lands in it and the number
+// is not pure noise; short enough that the poll behind it stays much cheaper than
+// the SSH round trip that carried it.
+const cpuWindow = 200 * time.Millisecond
+
+// opHostStats reports the server's own resource usage: CPU, memory and the disk
+// the workspaces live on.
+//
+// Every part is best-effort and independent, because a machine that cannot answer
+// one of these can usually answer the others, and a panel showing two of three
+// numbers beats one showing an error. Something unmeasurable is left at zero,
+// which is unambiguous for each of them — a real host has neither zero cores nor
+// zero bytes of RAM — so the browser can say "—" rather than a confident lie. That
+// includes CPU: 0% is a plausible reading on an idle box, so the *cores* count
+// (from the same file) is what says whether the CPU figure means anything.
+func opHostStats() int {
+	st := agentproto.HostStats{}
+	if pct, cores, ok := cpuUsage(cpuWindow); ok {
+		st.CPUPercent, st.CPUCores = pct, cores
+	}
+	if data, err := os.ReadFile(filepath.Join(procRoot, "meminfo")); err == nil {
+		if total, used, ok := parseMemInfo(data); ok {
+			st.MemTotal, st.MemUsed = total, used
+		}
+	}
+	st.DiskPath = diskPath()
+	if total, used, ok := diskUsage(st.DiskPath); ok {
+		st.DiskTotal, st.DiskUsed = total, used
+	}
+	if data, err := os.ReadFile(filepath.Join(procRoot, "uptime")); err == nil {
+		st.Uptime = parseUptime(data)
+	}
+	return emit(st)
+}
+
+// cpuUsage samples /proc/stat twice, `window` apart, and returns the busy share
+// of all cores across that interval — plus the number of cores, which doubles as
+// "was this measurable at all".
+//
+// Two samples are the point. /proc/stat holds counters since boot, so a single
+// read yields the average since the machine was switched on: a server that has
+// been up for a month and is on fire right now would report a calm 4%.
+func cpuUsage(window time.Duration) (percent float64, cores int, ok bool) {
+	first, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return 0, 0, false
+	}
+	idle1, total1, cores, ok := parseCPUStat(first)
+	if !ok {
+		return 0, 0, false
+	}
+	time.Sleep(window)
+	second, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return 0, 0, false
+	}
+	idle2, total2, _, ok := parseCPUStat(second)
+	if !ok {
+		return 0, 0, false
+	}
+	dTotal, dIdle := total2-total1, idle2-idle1
+	if total2 < total1 || dTotal == 0 {
+		// Counters only ever climb, so a smaller second read means we were handed
+		// something that isn't /proc/stat. An unchanged one means the window closed
+		// inside a single tick — the cores are real, the percentage isn't.
+		return 0, cores, true
+	}
+	busy := float64(dTotal-dIdle) / float64(dTotal) * 100
+	return max(0, min(100, busy)), cores, true
+}
+
+// parseCPUStat reads /proc/stat's aggregate "cpu" line into (idle, total) jiffies
+// and counts the per-core "cpuN" lines.
+//
+// idle counts iowait as idle — a core waiting on a disk is not doing work, and
+// calling that "busy" is how a box with one slow disk reports 100% CPU. total sums
+// user..steal only: guest and guest_nice are already included in user and nice, so
+// adding them again inflates the denominator and quietly understates usage.
+func parseCPUStat(data []byte) (idle, total uint64, cores int, ok bool) {
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || !strings.HasPrefix(f[0], "cpu") {
+			continue
+		}
+		if f[0] != "cpu" {
+			cores++ // cpu0, cpu1, …
+			continue
+		}
+		if len(f) < 5 {
+			continue // too short to hold even idle: not a line we can use
+		}
+		for i, field := range f[1:] {
+			if i >= 8 {
+				break // guest / guest_nice: already counted in user / nice
+			}
+			n, err := strconv.ParseUint(field, 10, 64)
+			if err != nil {
+				return 0, 0, 0, false
+			}
+			total += n
+			if i == 3 || i == 4 { // idle, iowait
+				idle += n
+			}
+		}
+		ok = true
+	}
+	return idle, total, cores, ok
+}
+
+// parseMemInfo reads /proc/meminfo into total and used bytes.
+//
+// Used is total minus MemAvailable, not minus MemFree: Linux spends every spare
+// byte on page cache, so MemFree on a healthy server is near zero and "used" from
+// it reads as 97% on a machine with plenty of room. MemAvailable is the kernel's
+// own estimate of what a new process could actually get, which is the number a
+// person means. Kernels too old to publish it (pre-3.14) fall back to
+// free+buffers+cached.
+func parseMemInfo(data []byte) (total, used uint64, ok bool) {
+	vals := map[string]uint64{}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, rest, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) == 0 {
+			continue
+		}
+		n, err := strconv.ParseUint(f[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		vals[key] = n * 1024 // every value we want is in kB
+	}
+	total = vals["MemTotal"]
+	if total == 0 {
+		return 0, 0, false
+	}
+	avail, hasAvail := vals["MemAvailable"]
+	if !hasAvail {
+		avail = vals["MemFree"] + vals["Buffers"] + vals["Cached"]
+	}
+	if avail > total {
+		avail = total
+	}
+	return total, total - avail, true
+}
+
+// diskPath is the filesystem host-stats measures: the one holding the workspaces,
+// which is the disk that fills up and the one you can do something about. A host
+// where that directory doesn't exist yet (nothing created on it) is measured at
+// the root instead.
+func diskPath() string {
+	if _, err := os.Stat(baseDir); err == nil {
+		return baseDir
+	}
+	return "/"
+}
+
+// diskUsage returns a filesystem's total and used bytes.
+//
+// Used counts the root-reserved blocks that `df` leaves out of its percentage, so
+// this can read a few percent fuller than df does on an ext4 with the default 5%
+// reservation. That is the honest direction to differ in: the reserve is real
+// space an ordinary process cannot have.
+func diskUsage(path string) (total, used uint64, ok bool) {
+	bsize, blocks, bfree, err := statfs(path)
+	if err != nil || bsize == 0 || blocks == 0 {
+		return 0, 0, false
+	}
+	if bfree > blocks {
+		return 0, 0, false
+	}
+	return blocks * bsize, (blocks - bfree) * bsize, true
+}
+
+// parseUptime reads the seconds since boot from /proc/uptime ("<up> <idle>").
+func parseUptime(data []byte) int64 {
+	f := strings.Fields(string(data))
+	if len(f) == 0 {
+		return 0
+	}
+	secs, err := strconv.ParseFloat(f[0], 64)
+	if err != nil || secs < 0 {
+		return 0
+	}
+	return int64(secs)
 }
 
 // ensureActivityHooks installs the activity hooks into a workspace that predates
