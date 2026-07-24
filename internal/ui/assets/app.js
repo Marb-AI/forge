@@ -561,6 +561,7 @@ const TRACK_HIDE_KEY = "forge-hide-tracking";
 const track = {
   data: {},                                   // ws -> {session_start, active_seconds} (server)
   pending: {},                                // ws -> locally accrued, not-yet-flushed seconds
+  inflight: {},                               // ws -> a flush is mid-POST; guards against double-count
   paused: false,                              // manual pause; any interaction clears it
   hasFocus: typeof document !== "undefined" ? document.hasFocus() : true,
   hidden: localStorage.getItem(TRACK_HIDE_KEY) === "1",
@@ -654,6 +655,12 @@ async function pollTrack() {
 async function flushTrack(ws) {
   const n = ws ? (track.pending[ws] | 0) : 0;
   if (!ws || n <= 0) return;
+  // One flush per workspace at a time: the interval, blur, pause and switch can
+  // all fire a flush, and two overlapping POSTs would each snapshot n, send it,
+  // and both subtract on success — double-counting the seconds and driving
+  // pending negative. A later flush carries whatever accrues while this one runs.
+  if (track.inflight[ws]) return;
+  track.inflight[ws] = true;
   try {
     const res = await fetch(`/api/track/${encodeURIComponent(ws)}/inc`, {
       method: "POST",
@@ -664,6 +671,7 @@ async function flushTrack(ws) {
     track.pending[ws] -= n;
     if (track.data[ws]) track.data[ws].active_seconds += n;
   } catch { /* keep pending, retry next flush */ }
+  finally { delete track.inflight[ws]; }
 }
 function flushActive() { return flushTrack(state.active); }
 
@@ -694,6 +702,7 @@ function trackTick() {
 function clearTrack(ws) {
   delete track.pending[ws];
   delete track.data[ws];
+  delete track.inflight[ws];
   renderTrackBanner();
 }
 
@@ -1645,6 +1654,9 @@ async function post(action, ws) {
 async function doStop() {
   if (!state.active) return;
   const ws = state.active;
+  // Poll once if the clocks haven't landed yet, so the dialog's Copy button
+  // isn't hidden on a fresh load where /api/track hasn't returned.
+  if (!trackNumbers(ws)) await pollTrack();
   const ok = await confirmAction({
     title: "Stop the Claude session?",
     body: [
@@ -1701,6 +1713,7 @@ function doStart() {
 async function doRestart() {
   if (!state.active) return;
   const ws = state.active;
+  if (!trackNumbers(ws)) await pollTrack();
   const ok = await confirmAction({
     title: "Restart the Claude session?",
     body: [
@@ -1730,6 +1743,7 @@ async function doRestart() {
 async function doCheckpoint() {
   if (!state.active) return;
   const ws = state.active;
+  if (!trackNumbers(ws)) await pollTrack();
   const ok = await confirmAction({
     title: "Checkpoint this session?",
     body: [
