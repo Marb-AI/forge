@@ -294,6 +294,23 @@ same code, not a reimplementation that quietly drifts.
   terminal with syntax highlighting. Read-only is the point: Claude writes the
   code, you inspect it. Dotfiles at the root (plus `.git` and `.claude` anywhere)
   hide behind the eye toggle.
+- **The Claude panel**, above the servers: one group per Claude login, because a
+  rate limit belongs to an *account* — three workspaces signed into the same login
+  are all drawing down the same five-hour window. Each group carries that window
+  and the weekly one, ambering and reddening on the same thresholds as a disk, so
+  the login about to stop working sorts to the top and you see it before a turn
+  dies mid-sentence. Under the bars are the workspaces spending it, each with how
+  full its context is and what its session has cost — the bars say the allowance is
+  nearly gone, the rows say which workspace is eating it. Nothing is summed: the
+  window is one number reported by every workspace on the login, so the group shows
+  the freshest report and stamps it with how old that is. An organisation on API
+  credits has no such windows at all, so its group shows spend instead of two bars
+  implying an allowance that doesn't exist. Numbers come from Claude's own status
+  line, which Forge installs in each workspace — chaining any status line that was
+  already there rather than replacing it.
+- **The login and the server** as two chips under the topic: the topic says what a
+  workspace is doing, these say whose allowance it spends and whose disk it fills.
+  At twenty tabs that is three facts nobody keeps in their head per tab.
 - **The servers panel** under the tree: every registered machine with its CPU,
   memory and disk usage, refreshed every ten seconds. It answers the question you
   otherwise ssh in to ask — which box has room, and why one feels slow — and turns

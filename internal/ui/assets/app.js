@@ -101,6 +101,11 @@ async function loadWorkspaces({ maxAge = 0 } = {}) {
   state.hosts = hosts;
 
   renderTabs();
+  // The Claude panel groups the workspaces it knows as tabs, so a usage poll that
+  // landed before this list did found nothing to group and left the panel empty.
+  // Re-render it here: whichever of the two arrives second completes the picture.
+  renderLogins();
+  renderIdent();
 
   // With nothing to show, the terminal would be a black void — offer the one
   // action that makes sense instead.
@@ -558,6 +563,7 @@ async function pollActivity() {
   if (!act) return;
   state.activity = act;
   renderTopic();
+  renderIdent();
   if (state.active && !document.hidden) ackActivity(state.active); // you're looking at it
   // Repaint the tabs only when the flagged set changed, and never mid-drag — a
   // reorder owns the strip. paintBrowserTab rides along inside renderTabs; call it
@@ -700,6 +706,43 @@ function renderTopic() {
   box.title = t.ts ? `${t.text}\nSet ${fmtAge(age)} ago by Claude.` : t.text;
 }
 
+// ---- workspace identity (login + server) ------------------------------------
+// The topic says what this workspace is doing. These two say where it is doing it:
+// whose Claude allowance it spends, and whose disk it fills. Both are properties
+// you otherwise have to remember per tab, and at twenty tabs nobody does.
+//
+// The server is known from the workspace list, so it is there immediately. The
+// login has to come from the host, so its chip appears when the first usage poll
+// lands — and stays put afterwards, because a login does not change while you look
+// at it.
+function renderIdent() {
+  const box = document.getElementById("ws-ident");
+  const loginChip = document.getElementById("ws-login");
+  const serverChip = document.getElementById("ws-server");
+  const ws = state.workspaces.find((w) => w.name === state.active);
+  const u = state.active ? usage.data[state.active] : null;
+
+  const host = ws ? ws.host : "";
+  serverChip.hidden = !host;
+  if (host) {
+    serverChip.textContent = host;
+    serverChip.title = `Runs on ${host}` + (ws.host_user ? ` (as ${ws.host_user})` : "");
+  }
+
+  loginChip.hidden = !u;
+  if (u) {
+    const account = u.account || {};
+    loginChip.textContent = loginLabel(u);
+    loginChip.classList.toggle("dim", !account.uuid);
+    const lines = [account.uuid ? `Claude login: ${loginLabel(u)}` : `No Claude login on this workspace.`];
+    if (account.org) lines.push(account.org);
+    if (u.auth) lines.push(`Paying by: ${AUTH_LABELS[u.auth] || u.auth}`);
+    if (u.note) lines.push(u.note);
+    loginChip.title = lines.join("\n");
+  }
+  box.hidden = loginChip.hidden && serverChip.hidden;
+}
+
 // Merge a fresh server poll, keeping the activity count monotonic within a session:
 // a poll that raced ahead of an in-flight flush must not make the clock tick
 // backwards. A changed session_start (a restart) legitimately resets it.
@@ -722,6 +765,7 @@ async function pollTrack() {
   } catch { /* unreachable host: clocks just don't advance their base this round */ }
   renderTrackBanner();
   renderTopic(); // a changed session_start can flip a topic to stale
+  renderIdent();
 }
 
 // Flush accrued activity for a workspace. Optimistically fold it into the local
@@ -819,6 +863,291 @@ document.getElementById("track-toggle").addEventListener("click", () => setTrack
 setInterval(trackTick, 1000);
 setInterval(flushActive, 15000);
 setInterval(pollTrack, 5000);
+
+// ---- Claude panel (one group per login) -------------------------------------
+// Twenty workspaces spend three or four Claude accounts between them, and a rate
+// limit belongs to the ACCOUNT: three workspaces on one login are all drawing down
+// the same five-hour window. So this panel is grouped the way the limits actually
+// work — a header per login carrying its 5-hour and weekly bars, with the
+// workspaces that spend it listed underneath.
+//
+// Nothing is summed across a group. The window is one number that every workspace
+// on the login reports identically, so the group shows the FRESHEST report of it,
+// stamped with when that was. Cost and context are per workspace and stay on their
+// own rows.
+//
+// The poll is gated like the servers one, and for the same reason — a round is an
+// SSH round trip per host — with one difference: it also runs while we have never
+// loaded, so the login chip at the top of the pane has a value even when this panel
+// is collapsed. Identity is wanted whether or not you are watching the meters.
+const USAGE_POLL_MS = 10000;
+const LOGINS_COLLAPSED_KEY = "forge-logins-collapsed";
+const usage = {
+  data: {},       // ws name -> {account, auth, ts, model, context_*, cost_usd, five_hour, seven_day, note}
+  at: 0,          // when the last reading landed
+  timer: null,
+  busy: false,
+  loaded: false,
+};
+
+function loginsCollapsed() { return localStorage.getItem(LOGINS_COLLAPSED_KEY) === "1"; }
+
+function setLoginsCollapsed(v) {
+  localStorage.setItem(LOGINS_COLLAPSED_KEY, v ? "1" : "0");
+  applyLoginsCollapsed();
+  refreshUsage(); // expanding must not leave a limit from before you left
+}
+
+function applyLoginsCollapsed() {
+  const collapsed = loginsCollapsed();
+  document.getElementById("logins").classList.toggle("collapsed", collapsed);
+  document.getElementById("logins-toggle").title = collapsed ? "Expand" : "Collapse";
+}
+
+function usageWanted() {
+  if (document.hidden) return false;
+  return !loginsCollapsed() || !usage.loaded;
+}
+
+function refreshUsage({ force = false } = {}) {
+  if (!usageWanted() || usage.busy) return scheduleUsagePoll();
+  if (!force && usage.at && Date.now() - usage.at < USAGE_POLL_MS) return scheduleUsagePoll();
+  pollUsage();
+}
+
+function scheduleUsagePoll() {
+  clearTimeout(usage.timer);
+  usage.timer = null;
+  if (!usageWanted()) return;
+  usage.timer = setTimeout(pollUsage, USAGE_POLL_MS);
+}
+
+async function pollUsage() {
+  if (usage.busy) return;
+  usage.busy = true;
+  try {
+    const res = await fetch("/api/usage");
+    if (res.ok) {
+      usage.data = await res.json();
+      usage.at = Date.now();
+      usage.loaded = true;
+      renderLogins();
+      renderIdent();
+    }
+  } catch {
+    // A poll that didn't land leaves the last reading up, stamped with its own age.
+  } finally {
+    usage.busy = false;
+    scheduleUsagePoll();
+  }
+}
+
+// What a login is called, in the order of what a person recognises. An account
+// with no id is not a login at all — it is a workspace paying another way, and the
+// group is named after that instead, because "unknown" would be a worse answer
+// than "API credits" when the latter is exactly what it is.
+const AUTH_LABELS = {
+  api: "API credits",
+  bedrock: "Bedrock",
+  vertex: "Vertex AI",
+};
+
+function loginLabel(u) {
+  const a = u.account || {};
+  if (a.uuid) return a.email || a.name || a.org || "Claude login";
+  return AUTH_LABELS[u.auth] || "No login yet";
+}
+
+// Group the workspaces we have tabs for by the login they run as, newest sample
+// winning the group's windows. Keyed by account uuid — the same person in two
+// organisations is two accounts with two allowances — and by auth kind for the
+// workspaces that have no login to key on.
+function loginGroups() {
+  const groups = new Map();
+  for (const ws of state.workspaces) {
+    const u = usage.data[ws.name];
+    if (!u) continue;
+    const account = u.account || {};
+    const key = account.uuid || `auth:${u.auth || "none"}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        key,
+        label: loginLabel(u),
+        org: account.uuid ? account.org || "" : "",
+        auth: u.auth || "",
+        ts: 0,
+        five: null,
+        seven: null,
+        rows: [],
+      };
+      groups.set(key, g);
+    }
+    // The freshest member speaks for the group's windows: they are one number
+    // reported many times, not many numbers to reconcile.
+    if ((u.ts || 0) > g.ts) {
+      g.ts = u.ts || 0;
+      g.five = u.five_hour || null;
+      g.seven = u.seven_day || null;
+    }
+    g.rows.push({ name: ws.name, host: ws.host, usage: u });
+  }
+  for (const g of groups.values()) g.rows.sort((a, b) => a.name.localeCompare(b.name));
+  // Closest to a limit first: the panel exists to be glanced at, and the login
+  // about to stop working is the one worth putting at the top. Groups with no
+  // window to compare fall to the bottom in name order.
+  return [...groups.values()].sort((a, b) => groupPressure(b) - groupPressure(a) ||
+    a.label.localeCompare(b.label));
+}
+
+function groupPressure(g) {
+  return Math.max(g.five ? g.five.used_percent : -1, g.seven ? g.seven.used_percent : -1);
+}
+
+function renderLogins() {
+  const list = document.getElementById("loginlist");
+  const count = document.getElementById("logins-count");
+  const groups = loginGroups();
+  count.textContent = groups.length > 1 ? String(groups.length) : "";
+  if (!groups.length) {
+    list.className = "muted";
+    list.textContent = usage.loaded ? "No Claude usage reported yet." : "Loading…";
+    return;
+  }
+  list.className = "";
+  list.replaceChildren(...groups.map(loginGroupRow));
+}
+
+function loginGroupRow(g) {
+  const row = document.createElement("div");
+  row.className = "lgn";
+  row.title = loginTitle(g);
+
+  const head = document.createElement("div");
+  head.className = "lgn-head";
+  const name = document.createElement("span");
+  name.className = "lgn-name";
+  // textContent, always: every string here came out of a file in a workspace home.
+  name.textContent = g.label;
+  const note = document.createElement("span");
+  note.className = "lgn-note";
+  note.textContent = g.ts ? fmtAge(nowSeconds() - g.ts) : "no sample";
+  head.append(name, note);
+  row.appendChild(head);
+
+  // Only a Claude.ai subscription HAS these windows. For anything else their
+  // absence is the nature of the thing, so the group shows what it does have —
+  // what it has spent — rather than two bars implying an untouched allowance.
+  if (g.five || g.seven) {
+    row.append(
+      meterRow("5h", g.five ? g.five.used_percent : null),
+      meterRow("7d", g.seven ? g.seven.used_percent : null),
+    );
+  } else {
+    const spend = document.createElement("div");
+    spend.className = "lgn-spend";
+    spend.textContent = g.auth && g.auth !== "subscription"
+      ? `no limit windows · ${fmtCost(groupCost(g))} this session`
+      : `${fmtCost(groupCost(g))} this session`;
+    row.appendChild(spend);
+  }
+
+  for (const r of g.rows) row.appendChild(loginWorkspaceRow(r));
+  return row;
+}
+
+// One workspace inside its login's group: what it is called, where it runs, how
+// full its context is and what it has cost. This is what makes a group actionable
+// — the window says the login is nearly spent, these rows say which workspace is
+// spending it.
+function loginWorkspaceRow(r) {
+  const el = document.createElement("div");
+  el.className = "lgn-ws" + (r.name === state.active ? " active" : "");
+  const name = document.createElement("span");
+  name.className = "lgn-ws-name";
+  name.textContent = r.name;
+  const figures = document.createElement("span");
+  figures.className = "lgn-ws-figures";
+  const bits = [];
+  const ctx = contextPercent(r.usage);
+  if (ctx != null) bits.push(`ctx ${Math.round(ctx)}%`);
+  if (r.usage.cost_usd) bits.push(fmtCost(r.usage.cost_usd));
+  // A dash where the figures would be, exactly as the meters do it: a workspace
+  // that has not reported has no numbers, and a row trailing off into blank space
+  // reads as a rendering fault rather than as an answer. Why it hasn't reported —
+  // never started, or a status line it doesn't own — is in the tooltip.
+  figures.textContent = bits.length ? bits.join(" · ") : "—";
+  el.append(name, figures);
+  el.title = workspaceUsageTitle(r);
+  return el;
+}
+
+function contextPercent(u) {
+  if (!u || !u.context_size) return null;
+  return Math.max(0, Math.min(100, (u.context_used / u.context_size) * 100));
+}
+
+function groupCost(g) {
+  return g.rows.reduce((sum, r) => sum + (r.usage.cost_usd || 0), 0);
+}
+
+// Cents matter here: a session that has cost eleven cents is a different fact from
+// one that has cost nothing, and "$0" for both would hide it.
+function fmtCost(usd) {
+  if (!usd) return "$0";
+  return usd < 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(usd < 10 ? 2 : 0)}`;
+}
+
+// The tooltip carries what the bars can't: which organisation, when each window
+// resets, and how old the reading is.
+function loginTitle(g) {
+  const lines = [g.label + (g.org ? ` · ${g.org}` : "")];
+  if (g.auth) lines.push(`Paying by: ${AUTH_LABELS[g.auth] || g.auth}`);
+  for (const [label, w] of [["5-hour", g.five], ["Weekly", g.seven]]) {
+    if (!w) continue;
+    const resets = w.resets_at ? `, resets ${fmtReset(w.resets_at)}` : "";
+    lines.push(`${label}: ${Math.round(w.used_percent)}% used${resets}`);
+  }
+  if (!g.five && !g.seven) {
+    lines.push("No rate-limit windows — Claude.ai subscriptions only.");
+  }
+  lines.push(g.ts
+    ? `Read ${fmtAge(nowSeconds() - g.ts)} ago. Figures only move while a workspace's Claude is running.`
+    : "No workspace on this login has reported yet.");
+  return lines.join("\n");
+}
+
+function workspaceUsageTitle(r) {
+  const u = r.usage;
+  const lines = [r.name + (r.host ? ` · ${r.host}` : "")];
+  if (u.model) lines.push(`Model: ${u.model}`);
+  if (u.context_size) {
+    lines.push(`Context: ${fmtTokens(u.context_used)} of ${fmtTokens(u.context_size)}`);
+  }
+  if (u.cost_usd) lines.push(`Session cost: ${fmtCost(u.cost_usd)}`);
+  if (u.note) lines.push(u.note + " — so this workspace cannot report its usage.");
+  if (!u.ts) lines.push("No sample yet: Claude has not rendered here since Forge asked it to.");
+  return lines.join("\n");
+}
+
+function fmtTokens(n) {
+  if (!n) return "0";
+  if (n < 1000) return String(n);
+  return `${Math.round(n / 1000)}k`;
+}
+
+// A reset is only ever a few hours or days out, so what you want is "in 2h", not a
+// date you have to subtract from now yourself.
+function fmtReset(at) {
+  const left = at - nowSeconds();
+  if (left <= 0) return "now";
+  return `in ${fmtAge(left)}`;
+}
+
+function nowSeconds() { return Math.floor(Date.now() / 1000); }
+
+document.getElementById("logins-head").addEventListener("click", () =>
+  setLoginsCollapsed(!loginsCollapsed()));
 
 // ---- servers panel ---------------------------------------------------------
 // Every registered server, under the file tree, with what it is using right now:
@@ -1018,7 +1347,10 @@ document.getElementById("servers-head").addEventListener("click", () =>
   setServersCollapsed(!serversCollapsed()));
 // Coming back to the tab is the moment the numbers matter again — and the moment
 // they are most out of date.
-document.addEventListener("visibilitychange", () => refreshServers());
+document.addEventListener("visibilitychange", () => {
+  refreshServers();
+  refreshUsage();
+});
 
 // ---- clipboard -------------------------------------------------------------
 function flashCopied(btn) {
@@ -1115,6 +1447,7 @@ function selectWs(name) {
     '<div class="muted">No files to show.</div>';
 
   renderTopic();       // say what this workspace is about before anything loads
+  renderIdent();      // and where it runs
   renderTrackBanner(); // reflect the new workspace's clocks immediately
   pollTrack();         // and fetch its start/active without waiting for the interval
 }
@@ -2889,6 +3222,9 @@ initTabDrag();
 state.showHidden = localStorage.getItem("forge-show-hidden") === "1";
 applyShowHidden();
 applyServersCollapsed();
+applyLoginsCollapsed();
 renderServers();
+renderLogins();
 refreshServers();
+refreshUsage();
 loadWorkspaces().then(pollActivity);
