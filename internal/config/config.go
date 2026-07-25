@@ -408,18 +408,3 @@ func (c *Config) HostFor(name string) *Host {
 	}
 	return c.Hosts[alias]
 }
-
-// SetPorts records the discovered ports for a workspace on a host.
-func (c *Config) SetPorts(host, workspace string, ports []int) {
-	if c.Ports[host] == nil {
-		c.Ports[host] = map[string][]int{}
-	}
-	if len(ports) == 0 {
-		delete(c.Ports[host], workspace)
-		if len(c.Ports[host]) == 0 {
-			delete(c.Ports, host)
-		}
-		return
-	}
-	c.Ports[host][workspace] = ports
-}

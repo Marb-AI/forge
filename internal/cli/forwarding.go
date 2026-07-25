@@ -4,13 +4,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/Marb-AI/forge/internal/config"
-	"github.com/Marb-AI/forge/internal/sshx"
 	"github.com/Marb-AI/forge/internal/supervisor"
 )
 
@@ -30,62 +27,14 @@ func forwardingCmd(args []string) int {
 	}
 }
 
-// forwardingStart scans the Docker published ports of the target workspace(s),
-// records them in config, and (re)launches the supervisor. Run it once after
-// bringing services up, and again only when you add or remove a service.
-func forwardingStart(args []string) int {
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
-
-	targets := map[string]string{} // workspace -> host alias
-	if len(args) > 0 {
-		name := args[0]
-		alias, ok := cfg.Workspaces[name]
-		if !ok {
-			return fail("unknown workspace %q", name)
-		}
-		targets[name] = alias
-	} else {
-		if len(cfg.Workspaces) == 0 {
-			return fail("no workspaces known — create one first")
-		}
-		for name, alias := range cfg.Workspaces {
-			targets[name] = alias
-		}
-	}
-
-	// Scan first, record after: each scan is an SSH round trip, and holding the
-	// config open across all of them would let a slow host's scan undo whatever
-	// else was written while it ran.
-	type found struct{ alias, name string }
-	scanned := map[found][]int{}
-	for name, alias := range targets {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			fmt.Fprintf(os.Stderr, "  skip %s: host %q unknown\n", name, alias)
-			continue
-		}
-		ports, err := scanDockerPorts(host, name)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  scan %s: %v\n", name, err)
-			continue
-		}
-		scanned[found{alias, name}] = ports
-		fmt.Printf("  %s: %s\n", name, formatPorts(ports))
-	}
-
-	if err := config.Update(func(c *config.Config) error {
-		for f, ports := range scanned {
-			c.SetPorts(f.alias, f.name, ports)
-		}
-		return nil
-	}); err != nil {
-		return fail("%v", err)
-	}
-
-	// Reload = stop the old supervisor, then spawn a fresh one with new config.
+// forwardingStart restarts the supervisor, which then picks up whatever the hosts
+// currently publish.
+//
+// It used to scan for ports itself and freeze the result into the config, which is
+// why it had to be re-run every time a service was added. The supervisor now does
+// that continuously, so there is nothing here to scan: a restart is only worth
+// asking for when you would rather not wait out the poll.
+func forwardingStart(_ []string) int {
 	dir, err := config.Dir()
 	if err != nil {
 		return fail("%v", err)
@@ -98,7 +47,7 @@ func forwardingStart(args []string) int {
 	if err := startSupervisorDetached(dir); err != nil {
 		return fail("start supervisor: %v", err)
 	}
-	fmt.Println("forwarding (re)started")
+	fmt.Println("forwarding (re)started — tunnels follow what the hosts publish")
 	return 0
 }
 
@@ -149,66 +98,6 @@ func forwardingStatus() int {
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", t.Workspace, t.Port, t.State, t.Detail)
 	}
 	return flush(w)
-}
-
-// scanDockerPorts asks Docker on the server (as the workspace user) which host
-// ports the workspace's compose project publishes. Convention: the compose
-// project name equals the workspace name.
-func scanDockerPorts(host *config.Host, workspace string) ([]int, error) {
-	target := sshx.WorkspaceTarget(host, workspace)
-	label := "label=com.docker.compose.project=" + workspace
-	out, err := sshx.Capture(target.Args(
-		"docker", "ps", "--filter", label, "--format", "{{.Ports}}",
-	)...)
-	if err != nil {
-		return nil, err
-	}
-	return parsePublishedPorts(string(out)), nil
-}
-
-// parsePublishedPorts extracts host ports from `docker ps` "Ports" output, e.g.
-//
-//	0.0.0.0:3000->3000/tcp, :::3000->3000/tcp
-//	0.0.0.0:5173->5173/tcp
-//
-// Only published ports (those with a "host:PORT->" segment) are returned, deduped
-// and sorted.
-func parsePublishedPorts(out string) []int {
-	seen := map[int]bool{}
-	for _, line := range strings.Split(out, "\n") {
-		for _, seg := range strings.Split(line, ",") {
-			seg = strings.TrimSpace(seg)
-			arrow := strings.Index(seg, "->")
-			if arrow < 0 {
-				continue // unpublished port, skip
-			}
-			hostPart := seg[:arrow]
-			colon := strings.LastIndex(hostPart, ":")
-			if colon < 0 {
-				continue
-			}
-			if p, err := strconv.Atoi(hostPart[colon+1:]); err == nil {
-				seen[p] = true
-			}
-		}
-	}
-	ports := make([]int, 0, len(seen))
-	for p := range seen {
-		ports = append(ports, p)
-	}
-	sort.Ints(ports)
-	return ports
-}
-
-func formatPorts(ports []int) string {
-	if len(ports) == 0 {
-		return "(no published ports found)"
-	}
-	parts := make([]string, len(ports))
-	for i, p := range ports {
-		parts[i] = strconv.Itoa(p)
-	}
-	return strings.Join(parts, " ")
 }
 
 // waitForSupervisorExit gives a signalled supervisor a moment to release the

@@ -27,7 +27,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	c, _ := Load()
 	c.Hosts["myserver"] = &Host{Alias: "myserver", User: "root", Addr: "1.2.3.4", Port: 22}
 	c.AddWorkspace("crm", "myserver")
-	c.SetPorts("myserver", "crm", []int{3000, 5173})
+	c.Ports["myserver"] = map[string][]int{"crm": {3000, 5173}}
 	if err := c.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -230,15 +230,6 @@ func TestUpdateDoesNotSaveWhenTheChangeFails(t *testing.T) {
 	}
 	if got.UIPort != 8099 {
 		t.Errorf("UI port = %d, want the failed change rolled back to 8099", got.UIPort)
-	}
-}
-
-func TestSetPortsEmptyRemoves(t *testing.T) {
-	c := &Config{Ports: map[string]map[string][]int{}}
-	c.SetPorts("h", "w", []int{1, 2})
-	c.SetPorts("h", "w", nil) // empty removes
-	if len(c.Ports) != 0 {
-		t.Errorf("expected host pruned, got %v", c.Ports)
 	}
 }
 

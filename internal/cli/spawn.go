@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/config"
 	"github.com/Marb-AI/forge/internal/proc"
 	"github.com/Marb-AI/forge/internal/supervisor"
@@ -47,10 +48,21 @@ func runSupervisor(_ []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	if err := supervisor.Run(dir, cfg); err != nil {
+	if err := supervisor.Run(dir, cfg, observePorts); err != nil {
 		return fail("%v", err)
 	}
 	return 0
+}
+
+// observePorts asks one host what its workspaces publish. Handed to the supervisor
+// rather than called by it: reaching the agent lives here, in the package that
+// imports the supervisor.
+func observePorts(host *config.Host) (map[string]agentproto.WorkspacePorts, error) {
+	var res agentproto.PortsResult
+	if err := callAgent(host, &res, "workspace-ports"); err != nil {
+		return nil, err
+	}
+	return res.Workspaces, nil
 }
 
 // startSupervisorDetached launches this binary again as a detached background

@@ -43,7 +43,7 @@ func TestRemoveWorkspaceClearsPorts(t *testing.T) {
 		Workspaces: map[string]string{},
 	}
 	c.AddWorkspace("crm", "h")
-	c.SetPorts("h", "crm", []int{3000})
+	c.Ports["h"] = map[string][]int{"crm": {3000}}
 	c.RemoveWorkspace("crm")
 	if _, ok := c.Workspaces["crm"]; ok {
 		t.Error("workspace not removed")
