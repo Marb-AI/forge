@@ -69,6 +69,55 @@ type ListResult struct {
 	Workspaces []Workspace `json:"workspaces"`
 }
 
+// What is holding a port open. A container can be started and stopped, and says
+// which internal port it fronts; a plain process — a dev server the workspace ran
+// directly — can do neither, and is reported so the tunnel exists and the UI can
+// show it rather than pretending it isn't there.
+const (
+	KindContainer = "container"
+	KindProcess   = "process"
+)
+
+// Port is one host port a workspace has published, as the agent found it.
+//
+// This is an OBSERVATION, not a record: nothing is stored, every field is read
+// fresh from Docker and the kernel each time. The workspace's block says which
+// ports it MAY use; this says which it actually does.
+type Port struct {
+	// Name is what to call it: the compose service ("web"), or the process name for
+	// a plain listener. Never the raw container name, which carries the project
+	// prefix and a replica index — "crm-web-1" tells you the workspace you are
+	// already looking at, twice.
+	Name string `json:"name"`
+	Host int    `json:"host"`
+	// Target is the port inside the container, which is what the service itself
+	// thinks it listens on. Zero for a plain process, where there is no inside.
+	Target int `json:"target,omitempty"`
+	// Running distinguishes a stopped container from a missing one. A stopped
+	// container still HOLDS its host port — `docker start` will bind it — so it must
+	// keep appearing, or its port looks free and gets reused.
+	Running bool   `json:"running"`
+	Kind    string `json:"kind"`
+}
+
+// WorkspacePorts is one workspace's block and what it currently publishes.
+//
+// The block rides along because it is what decides which of these ports get
+// tunnelled: exactly the ones inside it. A port outside the block is reported (it
+// is real, and worth showing) but never forwarded — the workspace was told in
+// writing that its block is what reaches the developer's machine, and quietly
+// forwarding more would make that false and let two workspaces collide again.
+type WorkspacePorts struct {
+	Block *PortBlock `json:"block,omitempty"`
+	Ports []Port     `json:"ports"`
+}
+
+// PortsResult is returned by `forge-agent workspace-ports`: one entry per workspace
+// that has a block or something listening (a workspace with neither has no entry).
+type PortsResult struct {
+	Workspaces map[string]WorkspacePorts `json:"workspaces"`
+}
+
 // Activity states — Claude's attention state within a workspace, as reported by
 // the Claude Code hooks the agent installs. The whole vocabulary in one place,
 // because the browser UI switches on these strings too.

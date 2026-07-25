@@ -126,7 +126,7 @@ reattach over SSH from your laptop. It's always right where you left it.
 | **Host** | a server you registered, reached only over SSH |
 | **Workspace** | an isolated Linux user on a host (`crm`), with its own home, git config, keys, and one Claude session |
 | **Claude session** | a background tmux session that keeps Claude alive across disconnects |
-| **Forwarding** | keeps your dev servers tunnelled to `localhost`, auto-reconnecting through blips and reboots |
+| **Forwarding** | keeps your dev servers tunnelled to `localhost`, following what they publish and auto-reconnecting through blips and reboots |
 
 ---
 
@@ -150,11 +150,14 @@ forge workspace shop ssh
 #     make dev            # or `docker compose up`, whatever the project uses
 
 # Tunnel the dev servers and open the session:
-forge forwarding start shop                        # find the project's ports, tunnel them
 forge spawn                                         # keep tunnels alive in the background
 forge forwarding status                             # per-tunnel state
 forge workspace shop claude                         # open Claude
 ```
+
+There is no step here that finds the ports. `spawn` watches what the workspaces
+publish and tunnels it — bring a service up on the server and it is on your
+`localhost` a few seconds later, take it down and the tunnel goes with it.
 
 To keep tunnels alive across laptop reboots, add one line to your shell rc
 (`spawn` is idempotent — every later shell is a fast no-op):
@@ -209,7 +212,7 @@ Workspaces
   forge workspace <name> expose <port>            tunnel one port, foreground (Ctrl-C stops)
 
 Forwarding
-  forge forwarding start [name]                   find the project's ports, save, keep them tunnelled
+  forge forwarding start                          restart the supervisor now (it polls on its own)
   forge forwarding stop
   forge forwarding status
   forge spawn                                      keep tunnels alive in the background (idempotent)
@@ -386,6 +389,24 @@ blip or a server reboot — a service that's momentarily down is fine, it just
 starts working once it's up. A wrong SSH key is reported instead of retried
 forever.
 
+**Tunnels follow the containers.** The set isn't fixed when `spawn` starts: every
+few seconds Forge asks each server what its workspaces publish and reconciles
+against it, so a `docker compose up` on the server puts the port on your
+`localhost` on its own, and a `down` takes it away. Tunnels that haven't changed
+are left strictly alone — rebuilding them on a timer would drop every connection
+through them. Only ports inside a workspace's block are carried, which is exactly
+what that workspace was promised.
+
+**A port taken on your laptop says so, by name.** If something local already holds
+`16104`, that one tunnel reports `blocked` and names the process — `node (pid
+4821)` — rather than failing anonymously or taking the other tunnels with it. It
+keeps retrying, so stopping the squatter brings it up within a second, with
+nothing to restart.
+
+When no server answers at all — a shut lid, a dead network — Forge keeps the
+tunnels it has rather than tearing them all down. They'd come back on the next
+poll, but every connection through them would have died in between.
+
 **Ports: every workspace owns a block.** Forge allocates from one range —
 `16000–30000` by default — and gives each workspace 100 consecutive host ports of
 it, once, at creation. That block never moves, so a port written into a compose
@@ -423,7 +444,8 @@ on one project. Name the workspace after the project.
 (`crm`, `crm-2`, `crm-feature`). Compose projects and networks won't collide, and
 neither will their ports: each workspace holds its own block, so the same repo
 brought up in three of them lands on three different sets of host ports with no
-per-workspace editing. `forge forwarding start` then tunnels each independently.
+per-workspace editing, and each set is tunnelled independently without being
+asked.
 
 **Backend + frontend across two repos.** Run them as separate projects. If the
 frontend is a container, put it on the backend's docker network and reach it by

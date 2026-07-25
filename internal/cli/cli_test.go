@@ -68,13 +68,7 @@ func TestIproutePackage(t *testing.T) {
 	}
 }
 
-func TestFormatAndJoinPorts(t *testing.T) {
-	if formatPorts(nil) == "" {
-		t.Error("expected a placeholder for no ports")
-	}
-	if got := formatPorts([]int{3000, 8080}); got != "3000 8080" {
-		t.Errorf("formatPorts = %q", got)
-	}
+func TestJoinInts(t *testing.T) {
 	if got := joinInts([]int{1, 2, 3}); got != "1 2 3" {
 		t.Errorf("joinInts = %q", got)
 	}
