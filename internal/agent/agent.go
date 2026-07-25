@@ -44,7 +44,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 // Main is the forge-agent entrypoint; returns a process exit code.
 func Main(args []string) int {
 	if len(args) == 0 {
-		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc|workspace-usage|workspace-port-block|workspace-ports|host-stats>")
+		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc|workspace-usage|workspace-port-block|workspace-ports|workspace-container|host-stats>")
 	}
 	switch args[0] {
 	case "workspace-create":
@@ -67,6 +67,8 @@ func Main(args []string) int {
 		return opPortBlock(args[1:])
 	case "workspace-ports":
 		return opPorts()
+	case "workspace-container":
+		return opContainer(args[1:])
 	case "host-stats":
 		return opHostStats()
 	default:

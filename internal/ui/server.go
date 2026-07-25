@@ -223,6 +223,13 @@ type Deps struct {
 	// functions and nothing more.
 	Prompts    func() ([]Prompt, error)
 	SetPrompts func(list []Prompt) error
+	// Ports reports one workspace's published ports and the state of the tunnel
+	// carrying each. Injected because it needs both halves — the host, and the
+	// local tunnel supervisor — and this package must import neither.
+	Ports func(workspace string) (WorkspacePortsInfo, error)
+	// ContainerAction starts or stops one of a workspace's containers. Never
+	// creates one: that would need to know the project.
+	ContainerAction func(workspace, service, action string) error
 }
 
 // validate reports the first operation the caller forgot to wire. Every field is
@@ -241,6 +248,8 @@ func (d Deps) validate() error {
 		"SetUIPort":       d.SetUIPort,
 		"Prompts":         d.Prompts,
 		"SetPrompts":      d.SetPrompts,
+		"Ports":           d.Ports,
+		"ContainerAction": d.ContainerAction,
 	} {
 		if reflect.ValueOf(fn).IsNil() {
 			return fmt.Errorf("ui: Deps.%s is not wired", name)
@@ -425,6 +434,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /api/ws/{ws}/checkpoint", s.handleCheckpoint)
 	mux.HandleFunc("GET /api/fs/{ws}/list", s.handleFsList)
 	mux.HandleFunc("GET /api/fs/{ws}/read", s.handleFsRead)
+	mux.HandleFunc("GET /api/ports/{ws}", s.handlePorts)
+	mux.HandleFunc("POST /api/ports/{ws}/container", s.handleContainerAction)
 	mux.HandleFunc("GET /api/hosts", s.handleHosts)
 	mux.HandleFunc("GET /api/hosts/stats", s.handleHostStats)
 	mux.HandleFunc("POST /api/workspaces", s.handleCreateWorkspace)

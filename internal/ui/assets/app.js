@@ -1357,6 +1357,7 @@ document.getElementById("servers-head").addEventListener("click", () =>
 document.addEventListener("visibilitychange", () => {
   refreshServers();
   refreshUsage();
+  refreshPorts();
 });
 
 // ---- clipboard -------------------------------------------------------------
@@ -1431,6 +1432,7 @@ function selectWs(name) {
   ackActivity(name); // opening a workspace clears its "waiting for you" mark
   renderTabs();
   resetFiles();
+  refreshPorts(); // the ports panel is about the workspace you are looking at
   // The ssh shell used to be dropped on every tab switch, resetting you to a
   // fresh prompt each time you came back. Now each workspace keeps its own shell
   // alive in the background; switching just shows the one that belongs to this
@@ -3235,3 +3237,255 @@ renderLogins();
 refreshServers();
 refreshUsage();
 loadWorkspaces().then(pollActivity);
+
+// ── Ports ────────────────────────────────────────────────────────────────────
+// What this workspace publishes, and a way in. Same polling discipline as the
+// servers panel: parked while the panel can't be seen, re-armed after each poll
+// settles rather than on a fixed timer, and a poll that doesn't land leaves the
+// last answer up instead of blanking the panel.
+const PORTS_POLL_MS = 6000;
+const PORTS_COLLAPSED_KEY = "forge-ports-collapsed";
+const ports = {
+  ws: null,       // the workspace the rows describe
+  info: null,     // {block, rows:[…]}
+  at: 0,
+  timer: null,
+  busy: false,
+  loaded: false,
+};
+
+// Container ports that are famously not HTTP. The heuristic runs on the TARGET
+// port — the one inside the container — because the host port comes from the
+// workspace's block and says nothing about what is behind it: Postgres published
+// at 16003 is still Postgres. Getting it wrong costs a copy instead of a link,
+// which is why a short list beats probing.
+const NON_HTTP_PORTS = new Set([
+  5432, 3306, 1433, 27017, 6379, 11211, 5672, 9092, 2181, 25, 587, 22,
+]);
+
+function portsCollapsed() { return localStorage.getItem(PORTS_COLLAPSED_KEY) === "1"; }
+
+function setPortsCollapsed(v) {
+  localStorage.setItem(PORTS_COLLAPSED_KEY, v ? "1" : "0");
+  applyPortsCollapsed();
+  refreshPorts({ force: true });
+}
+
+function applyPortsCollapsed() {
+  const collapsed = portsCollapsed();
+  document.getElementById("ports").classList.toggle("collapsed", collapsed);
+  document.getElementById("ports-toggle").title = collapsed ? "Expand" : "Collapse";
+}
+
+function portsWanted() {
+  return !document.hidden && !portsCollapsed() && !!state.active;
+}
+
+function refreshPorts({ force = false } = {}) {
+  // Switching workspace makes what's on screen about a different machine, so it
+  // is refetched rather than aged out.
+  if (ports.ws !== state.active) {
+    ports.ws = state.active;
+    ports.info = null;
+    ports.at = 0;
+    ports.loaded = false;
+    renderPorts();
+    force = true;
+  }
+  if (!portsWanted() || ports.busy) return schedulePortsPoll();
+  if (!force && ports.at && Date.now() - ports.at < PORTS_POLL_MS) return schedulePortsPoll();
+  pollPorts();
+}
+
+function schedulePortsPoll() {
+  clearTimeout(ports.timer);
+  ports.timer = null;
+  if (!portsWanted()) return;
+  ports.timer = setTimeout(pollPorts, PORTS_POLL_MS);
+}
+
+async function pollPorts() {
+  if (ports.busy || !state.active) return;
+  const ws = state.active;
+  ports.busy = true;
+  try {
+    const res = await fetch(`/api/ports/${encodeURIComponent(ws)}`);
+    if (res.ok) {
+      const info = await res.json();
+      // The answer is about the workspace that was active when it was asked for;
+      // if that changed while it was in flight, it is about the wrong one.
+      if (ws !== state.active) return;
+      ports.info = info;
+      ports.at = Date.now();
+      ports.loaded = true;
+      renderPorts();
+    }
+  } catch (e) {
+    // Left as-is: a few seconds stale beats an empty panel that looks like a
+    // workspace with nothing running.
+  } finally {
+    ports.busy = false;
+    schedulePortsPoll();
+  }
+}
+
+function renderPorts() {
+  const list = document.getElementById("portlist");
+  const block = document.getElementById("ports-block");
+  const info = ports.info;
+  block.textContent = info && info.block ? info.block : "";
+  const rows = (info && info.rows) || [];
+  if (!rows.length) {
+    list.className = "muted";
+    if (!state.active) list.textContent = "Select a workspace.";
+    else if (!ports.loaded) list.textContent = "Loading…";
+    else if (info && info.block) list.textContent = `Nothing published yet (${info.block}).`;
+    else list.textContent = "Nothing published yet.";
+    return;
+  }
+  list.className = "";
+  list.replaceChildren(...rows.map(portRow));
+}
+
+// A row's state, in one word — and the same word the dot's colour means.
+//
+// Every tunnel state the daemon can send is answered here by name. "retrying" is
+// the only one left to the default, because it is the only one whose meaning is
+// "wait a moment"; the others each need saying, and an auth failure quietly
+// rendered as "connecting" would be a spinner for something that will never
+// connect.
+function portState(p) {
+  if (!p.in_block) return "untunnelled";
+  if (!p.running) return "stopped";
+  switch (p.tunnel) {
+    case "up": return "ok";
+    case "blocked": return "blocked";
+    case "error": return "error";
+    case "none": return "notunnel";
+    default: return "connecting";
+  }
+}
+
+// How each state paints. A table rather than a chain of ternaries, so adding a
+// state is one line and forgetting one is visible.
+const PORT_DOT = {
+  ok: "",
+  stopped: " stopped",
+  blocked: " bad",
+  error: " bad",
+  notunnel: " warn",
+  untunnelled: " warn",
+  connecting: " warn",
+};
+
+function portRow(p) {
+  const st = portState(p);
+  const row = document.createElement("div");
+  row.className = "port" + (st === "ok" ? "" : " down");
+  row.title = portTitle(p, st);
+
+  const dot = document.createElement("span");
+  dot.className = "port-dot" + PORT_DOT[st];
+
+  const label = document.createElement("span");
+  label.className = "port-label";
+  label.appendChild(portTarget(p, st));
+
+  row.append(dot, label);
+  // Only a container can be started and stopped. A plain process — a dev server
+  // someone ran in a shell — has no command Forge could bring it back with, so
+  // it gets no button rather than one that fails.
+  if (p.kind === "container") row.appendChild(portButton(p));
+  return row;
+}
+
+// The clickable part. A link only when it would actually work: the tunnel has to
+// be up, and the thing behind it has to plausibly speak HTTP. Everything else is
+// a button that copies `127.0.0.1:<port>`, because the port is what you'd paste
+// into curl or a redirect URI anyway.
+function portTarget(p, st) {
+  const text = `${p.name}:${p.port}`;
+  if (st === "ok" && !NON_HTTP_PORTS.has(p.target)) {
+    const a = document.createElement("a");
+    a.href = `http://127.0.0.1:${p.port}`;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = text;
+    return a;
+  }
+  const b = document.createElement("button");
+  b.className = "plain";
+  b.textContent = text;
+  b.addEventListener("click", () => writeClipboard(`127.0.0.1:${p.port}`));
+  return b;
+}
+
+function portButton(p) {
+  const b = document.createElement("button");
+  b.className = "port-act";
+  const stop = p.running;
+  b.title = stop ? `Stop ${p.name}` : `Start ${p.name}`;
+  b.innerHTML = stop
+    ? '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">' +
+      '<rect x="6" y="6" width="12" height="12" rx="1"></rect></svg>'
+    : '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">' +
+      '<polygon points="7,5 19,12 7,19"></polygon></svg>';
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    try {
+      const res = await fetch(`/api/ports/${encodeURIComponent(ports.ws)}/container`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: p.name, action: stop ? "stop" : "start" }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        flashStatus(body.error || `Could not ${stop ? "stop" : "start"} ${p.name}`, 4000);
+      }
+    } catch (e) {
+      flashStatus(`Could not ${stop ? "stop" : "start"} ${p.name}`, 4000);
+    } finally {
+      b.disabled = false;
+      // Docker has moved on; the panel should say so now rather than in six
+      // seconds, while you are still looking at the button you pressed.
+      refreshPorts({ force: true });
+    }
+  });
+  return b;
+}
+
+// The tooltip carries what one narrow row cannot: what is behind the port, and
+// why it isn't reachable when it isn't.
+function portTitle(p, st) {
+  const lines = [`${p.name} — host port ${p.port}` + (p.target ? ` → ${p.target} in the container` : "")];
+  switch (st) {
+    case "ok":
+      lines.push(`Reachable at 127.0.0.1:${p.port}`);
+      break;
+    case "stopped":
+      lines.push("Container is stopped — its port stays reserved");
+      break;
+    case "blocked":
+      lines.push(p.tunnel_detail || "Something on this machine is holding the port");
+      break;
+    case "error":
+      lines.push(p.tunnel_detail || "The tunnel failed and will not retry");
+      break;
+    case "notunnel":
+      lines.push("No tunnel for this port — is `forge spawn` running?");
+      break;
+    case "untunnelled":
+      lines.push("Published outside this workspace's port block, so Forge does not tunnel it");
+      break;
+    default:
+      lines.push(p.tunnel_detail || "Tunnel is connecting");
+  }
+  return lines.join("\n");
+}
+
+document.getElementById("ports-head").addEventListener("click", () =>
+  setPortsCollapsed(!portsCollapsed()));
+
+applyPortsCollapsed();
+renderPorts();
+refreshPorts();

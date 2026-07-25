@@ -2,6 +2,7 @@ package agent
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
@@ -155,5 +156,20 @@ func TestUserProcess(t *testing.T) {
 	// parser must not invent a process.
 	if _, _, ok := userProcess(`LISTEN 0 4096 *:16000 *:*`); ok {
 		t.Error("expected no process")
+	}
+}
+
+// Service names become docker filter arguments, so they are validated rather than
+// trusted — the same reason workspace names are.
+func TestServiceRe(t *testing.T) {
+	for _, ok := range []string{"web", "api-1", "db_main", "Web2", "a.b"} {
+		if !serviceRe.MatchString(ok) {
+			t.Errorf("%q should be a valid service name", ok)
+		}
+	}
+	for _, bad := range []string{"", "-web", ".hidden", "web service", "web;rm -rf /", "--filter", "a/b", strings.Repeat("x", 64)} {
+		if serviceRe.MatchString(bad) {
+			t.Errorf("%q should be rejected", bad)
+		}
 	}
 }

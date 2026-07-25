@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"flag"
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -272,3 +274,68 @@ func ownerOf(pid int) string {
 	}
 	return u.Username
 }
+
+// Container actions the agent will perform. Deliberately only these two.
+//
+// `docker compose up` is NOT here and should not be: it CREATES containers, which
+// takes knowing the project — which compose file, which profiles, whether the repo
+// actually starts with `make dev` instead. Forge does not know any of that, and a
+// button that guesses is worse than no button, because you cannot tell what it
+// did. Starting and stopping something that already exists needs none of it: the
+// container is an object with a name, and the answer is the same whatever built it.
+const (
+	actionStart = "start"
+	actionStop  = "stop"
+)
+
+// opContainer starts or stops one of a workspace's containers.
+//
+// The container is named by its compose SERVICE, which is what the UI shows, and
+// resolved here through the project label. Taking a container id from the caller
+// would let any request reach any container on the host, including another
+// workspace's; a service name is scoped to the project by construction, and the
+// project is the workspace.
+func opContainer(args []string) int {
+	fs := flag.NewFlagSet("workspace-container", flag.ContinueOnError)
+	name := fs.String("name", "", "workspace name")
+	service := fs.String("service", "", "compose service name")
+	action := fs.String("action", "", "start or stop")
+	if err := fs.Parse(args); err != nil {
+		return emitError("bad arguments")
+	}
+	if !nameRe.MatchString(*name) {
+		return emitError("invalid workspace name %q", *name)
+	}
+	if *action != actionStart && *action != actionStop {
+		return emitError("action must be %q or %q", actionStart, actionStop)
+	}
+	if !serviceRe.MatchString(*service) {
+		return emitError("invalid service name %q", *service)
+	}
+	if _, err := os.Stat(filepath.Join(baseDir, *name)); err != nil {
+		return emitError("no such workspace %q", *name)
+	}
+
+	ids, err := run("docker", "ps", "-aq",
+		"--filter", "label=com.docker.compose.project="+*name,
+		"--filter", "label=com.docker.compose.service="+*service)
+	if err != nil {
+		return emitError("docker ps: %v: %s", err, ids)
+	}
+	list := strings.Fields(ids)
+	if len(list) == 0 {
+		// Nothing to act on. Not an error the UI should swallow: the button was
+		// drawn from an observation, so an empty answer means the container went
+		// away underneath it.
+		return emitError("workspace %q has no container for service %q", *name, *service)
+	}
+	if out, err := run("docker", append([]string{*action}, list...)...); err != nil {
+		return emitError("docker %s: %v: %s", *action, err, tailLines(out, 3))
+	}
+	return emit(agentproto.OK{OK: true})
+}
+
+// serviceRe bounds what can be passed as a compose service. These become docker
+// filter arguments, so they are validated rather than trusted — the same reason
+// workspace names are.
+var serviceRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
