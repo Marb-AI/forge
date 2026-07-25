@@ -885,26 +885,35 @@ setInterval(trackTick, 1000);
 setInterval(flushActive, 15000);
 setInterval(pollTrack, 5000);
 
-// ---- Claude panel (one group per login) -------------------------------------
+// ---- Claude panel (one line per login) --------------------------------------
 // Twenty workspaces spend three or four Claude accounts between them, and a rate
 // limit belongs to the ACCOUNT: three workspaces on one login are all drawing down
 // the same five-hour window. So this panel is grouped the way the limits actually
-// work — a header per login carrying its 5-hour and weekly bars, with the
-// workspaces that spend it listed underneath.
+// work — one line per login, carrying that login's 5-hour and weekly percentages.
+//
+// A line and nothing more. No bars, no row per workspace, no costs: the panel sits
+// above the servers panel in a column the file tree also needs, and the one thing
+// it exists to answer is which login is about to stop working. Which workspaces
+// draw on a login is answered by the chip at the top of the pane; how full a
+// context window is belongs there too, being a property of one session. Everything
+// else — reset times, member names, the age of the reading — is in the tooltip.
 //
 // Nothing is summed across a group. The window is one number that every workspace
 // on the login reports identically, so the group shows the FRESHEST report of it,
-// stamped with when that was. Cost and context are per workspace and stay on their
-// own rows.
+// and dims the line when that report is too old to present as current.
 //
 // The poll is gated like the servers one, and for the same reason — a round is an
 // SSH round trip per host — with one difference: it also runs while we have never
 // loaded, so the login chip at the top of the pane has a value even when this panel
-// is collapsed. Identity is wanted whether or not you are watching the meters.
+// is collapsed. Identity is wanted whether or not you are watching the numbers.
 const USAGE_POLL_MS = 10000;
 const LOGINS_COLLAPSED_KEY = "forge-logins-collapsed";
 const usage = {
-  data: {},       // ws name -> {account, auth, ts, model, context_*, cost_usd, five_hour, seven_day, note}
+  // ws name -> {account, auth, ts, model, context_*, cost_usd, five_hour, seven_day, note}
+  // cost_usd arrives and is deliberately not rendered: nothing actionable follows
+  // from it, and on a subscription it isn't a bill but what the same usage would
+  // have cost on the API.
+  data: {},
   at: 0,          // when the last reading landed
   timer: null,
   busy: false,

@@ -294,8 +294,8 @@ same code, not a reimplementation that quietly drifts.
   terminal with syntax highlighting. Read-only is the point: Claude writes the
   code, you inspect it. Dotfiles at the root (plus `.git` and `.claude` anywhere)
   hide behind the eye toggle.
-- **The Claude panel**, above the servers: one line per Claude login — `5h 92%
-  7d 56%` — because a rate limit belongs to an *account*, and three workspaces
+- **The Claude panel**, above the servers: one line per Claude login,
+  `5h 92% 7d 56%`, because a rate limit belongs to an *account* — and three workspaces
   signed into the same login are all drawing down the same five-hour window. The
   percentage ambers at three-quarters and reddens at ninety, the same thresholds as
   a disk, and the fullest login sorts to the top, so you see the one about to stop
