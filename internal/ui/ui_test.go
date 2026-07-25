@@ -269,6 +269,8 @@ func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 		SetUIPort:       func(int) error { return nil },
 		Prompts:         func() ([]Prompt, error) { return nil, nil },
 		SetPrompts:      func([]Prompt) error { return nil },
+		Ports:           func(string) (WorkspacePortsInfo, error) { return WorkspacePortsInfo{}, nil },
+		ContainerAction: func(string, string, string) error { return nil },
 	}
 	if err := full.validate(); err != nil {
 		t.Fatalf("a fully wired Deps should validate, got %v", err)
@@ -277,6 +279,8 @@ func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 	// Every field is required — dropping any one must be caught at startup rather
 	// than panicking inside a handler later.
 	drops := map[string]func(*Deps){
+		"Ports":           func(d *Deps) { d.Ports = nil },
+		"ContainerAction": func(d *Deps) { d.ContainerAction = nil },
 		"ListWorkspaces":  func(d *Deps) { d.ListWorkspaces = nil },
 		"HostFor":         func(d *Deps) { d.HostFor = nil },
 		"Checkpoint":      func(d *Deps) { d.Checkpoint = nil },

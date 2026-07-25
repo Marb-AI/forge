@@ -267,6 +267,8 @@ func runUI(_ []string) int {
 		SetUIPort:       setUIPort,
 		Prompts:         listPrompts,
 		SetPrompts:      setPrompts,
+		Ports:           workspacePorts,
+		ContainerAction: containerAction,
 	}
 	if err := ui.Serve(dir, cfg.UIPortOr(), deps); err != nil {
 		return fail("%v", err)

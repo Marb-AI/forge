@@ -323,6 +323,21 @@ same code, not a reimplementation that quietly drifts.
   panel below because it belongs to one session — several workspaces on one login
   have several different contexts, and a global figure would be a number about
   nothing.
+- **The ports panel** under the tree: what this workspace publishes, one row per
+  port — `web:16000`, and clicking it opens `127.0.0.1:16000`. That is the whole
+  feature: you never look a port up, and you never wonder whether it's reachable,
+  because the row only offers a link while the tunnel is actually up. Everything
+  else is a click-to-copy of `127.0.0.1:<port>`, which is what you'd paste into
+  `curl` or a redirect URI anyway — including for a service that plainly isn't
+  HTTP, since a link to Postgres is a dead click. A stopped container keeps its
+  row (its port is still reserved) and offers **start**; a running one offers
+  **stop**. Not `up` — creating containers means knowing which compose file,
+  which profiles, whether the repo really starts with `make dev`, and a button
+  that guesses is worse than no button. A dev server started by hand, with no
+  container around it, is listed and tunnelled like anything else but has no
+  buttons: there's nothing Forge could start it back up with. A port published
+  outside the workspace's block says so rather than looking broken, and a port
+  something on *your* machine is squatting names the process holding it.
 - **The servers panel** under the tree: every registered machine with its CPU,
   memory and disk usage, refreshed every ten seconds. It answers the question you
   otherwise ssh in to ask — which box has room, and why one feels slow — and turns
