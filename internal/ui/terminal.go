@@ -8,7 +8,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,14 +22,14 @@ import (
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
-// term is one live browser terminal: an ssh process behind a local pty, running
-// either the Claude tmux session or a plain shell (see the kinds below). The
-// local pty is what makes browser resizes real — resizing it raises SIGWINCH on
-// ssh, which forwards the new size to the remote end.
+// term is one live browser terminal: a process behind a local pty — ssh for the
+// three remote kinds below, your own shell for the local one. The pty is what
+// makes browser resizes real: resizing it raises SIGWINCH on the child, which ssh
+// forwards to the remote end.
 //
-// When the browser disconnects we kill the ssh process. For the Claude kind that
-// is a tmux *detach*, so the session and Claude keep running server-side; for the
-// ssh and host kinds there is no tmux, so the shell goes with it.
+// When the browser disconnects we kill that process. For the Claude kind that is
+// a tmux *detach*, so the session and Claude keep running server-side; for the
+// ssh, host and local kinds there is no tmux, so the shell goes with it.
 type term struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
@@ -42,7 +45,8 @@ func (t *term) close() {
 	}
 }
 
-// The two kinds of terminal the UI opens into a workspace.
+// The kinds of terminal the UI opens into a workspace. (The local shell is not
+// one of them — it belongs to no workspace; see startLocalTerm.)
 const (
 	// termClaude attaches the persistent Claude session (tmux): closing the
 	// browser detaches, the session lives on.
@@ -96,9 +100,61 @@ func startTerm(h *config.Host, workspace, kind string, cols, rows uint16) (*term
 	return &term{ptmx: ptmx, cmd: cmd}, nil
 }
 
+// startLocalTerm opens a login shell on THIS machine — the one running the UI
+// daemon and the browser — starting in your home directory. It is the one
+// terminal in the UI that never touches ssh: the rail's other shells are there to
+// save you a terminal window for the servers, and this one is there so the local
+// commands that go with them (a git push from a clone here, a scp, a curl at the
+// tunnel) don't send you out of the tool either.
+//
+// It is deliberately not workspace-scoped: there is one local machine, so there
+// is one local shell, shared by every tab (see localTermKey).
+func startLocalTerm(cols, rows uint16) (*term, error) {
+	sh := os.Getenv("SHELL")
+	if sh == "" {
+		sh = "/bin/sh"
+	}
+	cmd := exec.Command(sh)
+	// argv[0] with a leading dash is how a unix shell is told it is a login shell
+	// — the same thing your terminal app does when it opens a window — so it reads
+	// your profile and you get the PATH, aliases and prompt you actually have. The
+	// `-l` flag would do it for bash/zsh but not for a plain sh, and $SHELL is
+	// whatever the user chose; the dash convention holds for all of them.
+	cmd.Args = []string{"-" + filepath.Base(sh)}
+	// Home, not the daemon's cwd: `forge ui` is started from wherever you happened
+	// to be standing and then detaches, so its directory is an accident. Falling
+	// back to inheriting it is still better than failing to open a shell.
+	if home, err := os.UserHomeDir(); err == nil {
+		cmd.Dir = home
+	}
+	// The daemon has no terminal of its own, so TERM is whatever `forge ui`
+	// inherited — often unset, sometimes the terminal you started it from. The far
+	// end is xterm.js: say so, or full-screen programs (vim, htop, less) draw as
+	// if into a teletype. Replaced rather than appended, so the shell is handed
+	// exactly one TERM: os/exec would keep the last of two, but which of a
+	// duplicate pair wins is not a rule this should ask anyone to remember.
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "TERM=")
+	})
+	cmd.Env = append(env, "TERM=xterm-256color")
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		return nil, err
+	}
+	if cols > 0 && rows > 0 {
+		_ = pty.Setsize(ptmx, &pty.Winsize{Rows: rows, Cols: cols})
+	}
+	return &term{ptmx: ptmx, cmd: cmd}, nil
+}
+
 // termKey namespaces the registry by kind, so a workspace's Claude terminal and
 // its ssh shell coexist instead of replacing each other.
 func termKey(ws, kind string) string { return ws + "/" + kind }
+
+// localTermKey is the registry key of the single local shell. It cannot collide
+// with a workspace's: every termKey contains a "/", and this one does not.
+const localTermKey = "local"
 
 // termRegistry holds at most one live terminal per key, where a key is a
 // workspace *and* a kind (see termKey) — so a workspace's Claude session and its
@@ -172,9 +228,7 @@ func (r *termRegistry) closeAll() {
 }
 
 // handleTermStream opens (or re-opens) the workspace's terminal and streams its
-// output to the browser as Server-Sent Events. Each event's data is one
-// base64-encoded chunk of raw pty output, so terminal escape codes and newlines
-// survive SSE's line framing untouched.
+// output to the browser.
 func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 	ws, kind := r.PathValue("ws"), r.PathValue("kind")
 	if !validKind(kind) {
@@ -186,6 +240,22 @@ func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown workspace", http.StatusNotFound)
 		return
 	}
+	s.streamTerm(w, r, termKey(ws, kind), func(cols, rows uint16) (*term, error) {
+		return startTerm(h, ws, kind, cols, rows)
+	})
+}
+
+// handleLocalTermStream streams the local shell — the one terminal that belongs
+// to no workspace, so it needs no host lookup and has a path of its own.
+func (s *server) handleLocalTermStream(w http.ResponseWriter, r *http.Request) {
+	s.streamTerm(w, r, localTermKey, startLocalTerm)
+}
+
+// streamTerm starts a terminal with start, registers it under key, and streams
+// its output to the browser as Server-Sent Events. Each event's data is one
+// base64-encoded chunk of raw pty output, so terminal escape codes and newlines
+// survive SSE's line framing untouched.
+func (s *server) streamTerm(w http.ResponseWriter, r *http.Request, key string, start func(cols, rows uint16) (*term, error)) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -197,8 +267,7 @@ func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 	cols := parseDim(r.URL.Query().Get("cols"), 80)
 	rows := parseDim(r.URL.Query().Get("rows"), 24)
 
-	key := termKey(ws, kind)
-	t, err := startTerm(h, ws, kind, cols, rows)
+	t, err := start(cols, rows)
 	if err != nil {
 		http.Error(w, "start terminal: "+err.Error(), http.StatusBadGateway)
 		return
@@ -315,9 +384,18 @@ func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTermInput writes keystrokes from the browser to the workspace terminal.
-// The body is base64 (xterm sends arbitrary bytes, including control sequences).
 func (s *server) handleTermInput(w http.ResponseWriter, r *http.Request) {
-	t := s.terms.get(termKey(r.PathValue("ws"), r.PathValue("kind")))
+	s.termInput(w, r, termKey(r.PathValue("ws"), r.PathValue("kind")))
+}
+
+func (s *server) handleLocalTermInput(w http.ResponseWriter, r *http.Request) {
+	s.termInput(w, r, localTermKey)
+}
+
+// termInput writes keystrokes from the browser to the terminal held under key.
+// The body is base64 (xterm sends arbitrary bytes, including control sequences).
+func (s *server) termInput(w http.ResponseWriter, r *http.Request, key string) {
+	t := s.terms.get(key)
 	if t == nil {
 		http.Error(w, "no terminal", http.StatusNotFound)
 		return
@@ -342,7 +420,16 @@ func (s *server) handleTermInput(w http.ResponseWriter, r *http.Request) {
 // handleTermResize applies a browser resize to the pty, which propagates the new
 // window size through ssh to the remote tmux client.
 func (s *server) handleTermResize(w http.ResponseWriter, r *http.Request) {
-	t := s.terms.get(termKey(r.PathValue("ws"), r.PathValue("kind")))
+	s.termResize(w, r, termKey(r.PathValue("ws"), r.PathValue("kind")))
+}
+
+func (s *server) handleLocalTermResize(w http.ResponseWriter, r *http.Request) {
+	s.termResize(w, r, localTermKey)
+}
+
+// termResize applies a browser resize to the pty held under key.
+func (s *server) termResize(w http.ResponseWriter, r *http.Request, key string) {
+	t := s.terms.get(key)
 	if t == nil {
 		http.Error(w, "no terminal", http.StatusNotFound)
 		return

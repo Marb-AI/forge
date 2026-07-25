@@ -8,9 +8,10 @@
 //
 // Two terminals can be live at once: the workspace's Claude session (the main
 // stage, tmux-backed and persistent) and a shell in an overlay panel that keeps
-// running while hidden — either a workspace login shell ("ssh") or a shell on the
-// host as its own login user ("host"). Around them: a read-only file browser, the
-// checkpoint/restart/stop actions, and a wizard that can register a server.
+// running while hidden — a workspace login shell ("ssh"), a shell on the host as
+// its own login user ("host"), or a shell on this machine ("local"). Around them:
+// a read-only file browser, the checkpoint/restart/stop actions, and a wizard
+// that can register a server.
 
 const state = {
   workspaces: [],
@@ -18,10 +19,11 @@ const state = {
   active: null,   // workspace name
   claude: null,   // the Claude terminal session (main stage)
   shell: null,    // the shell session currently shown in the overlay panel, or null
-  shellByKey: {}, // `${ws}/${kind}` -> its shell session; each survives tab switches
-                  // and switching between the ssh/host shells, so a shell you leave
-                  // is exactly where you left it when you return
-  panelKindByWs: {}, // ws -> which shell kind ("ssh"|"host") its panel had open, if any
+  shellByKey: {}, // shellKey() -> its shell session; each survives tab switches
+                  // and switching between the shells, so a shell you leave is
+                  // exactly where you left it when you return
+  panelKindByWs: {}, // ws -> which shell kind ("ssh"|"host"|"local") its panel had
+                     // open, if any
   reconnectOnEnd: false, // after restart/checkpoint the session ends then comes back
   openFiles: [],  // [{path, name}] open in the read-only viewer
   activeFile: null, // path shown in the viewer, or null (terminal visible)
@@ -158,6 +160,10 @@ function renderStage() {
     // not something you should need a running session for. Only SENDING one
     // needs a session, and the rows inside say so themselves.
     if (b.dataset.action === "settings" || b.dataset.action === "prompts") continue;
+    // The local shell runs here, not on the server, so a host that stopped
+    // answering is the moment you most want it — not a reason to grey it out. It
+    // still opens in the workspace panel, so it needs a tab to open into.
+    if (b.dataset.action === "local") { b.disabled = !ws; continue; }
     b.disabled = !usable;
   }
   // Open while the session went away (or came back): the rows have to follow.
@@ -1086,9 +1092,10 @@ function applyTermTheme() {
   }
 }
 
-// A terminal session: one xterm bound to one server-side pty of a given kind
-// ("claude" — the persistent tmux session; "ssh" — a workspace login shell;
-// "host" — a shell on the host as its own login user).
+// A terminal session: one xterm bound to one pty behind the daemon, of a given
+// kind ("claude" — the persistent tmux session; "ssh" — a workspace login shell;
+// "host" — a shell on the host as its own login user; "local" — a shell on this
+// machine, the only kind whose pty is not on the far end of an ssh).
 function makeTerminal(ws, kind, el, onEnd) {
   const term = new Terminal({
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -1149,9 +1156,18 @@ function makeTerminal(ws, kind, el, onEnd) {
   return sess;
 }
 
+// Terminal endpoints are per (workspace, kind) — except the local shell, which is
+// no workspace's: it runs on this machine, so it has ws-less paths of its own and
+// there is exactly one of it.
+function termPath(ws, kind, action) {
+  return kind === "local"
+    ? `/api/term/local/${action}`
+    : `/api/term/${encodeURIComponent(ws)}/${kind}/${action}`;
+}
+
 function connectStream(sess, onEnd) {
   if (sess.disposed) return;
-  const url = `/api/term/${encodeURIComponent(sess.ws)}/${sess.kind}/stream` +
+  const url = termPath(sess.ws, sess.kind, "stream") +
     `?cols=${sess.term.cols}&rows=${sess.term.rows}`;
   const es = new EventSource(url);
   sess.es = es;
@@ -1187,7 +1203,7 @@ function disposeTerminal(sess) {
 }
 
 function postInput(ws, kind, data) {
-  fetch(`/api/term/${encodeURIComponent(ws)}/${kind}/input`, {
+  fetch(termPath(ws, kind, "input"), {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: b64encode(data),
@@ -1195,7 +1211,7 @@ function postInput(ws, kind, data) {
 }
 
 function postResize(ws, kind, cols, rows) {
-  fetch(`/api/term/${encodeURIComponent(ws)}/${kind}/resize`, {
+  fetch(termPath(ws, kind, "resize"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ cols, rows }),
@@ -1370,17 +1386,28 @@ function teardownTerminal() {
 }
 
 // ---- shells (overlay panel) ------------------------------------------------
-// The overlay panel hosts one shell at a time, of one of two kinds: a workspace
-// login shell ("ssh", as the workspace user) or a shell on the host as its own
+// The overlay panel hosts one shell at a time, of one of three kinds: a workspace
+// login shell ("ssh", as the workspace user), a shell on the host as its own
 // login user ("host" — the account `host prepare` connected as, for server-wide
-// work like installing a package). Every (workspace, kind) gets its own shell,
-// kept alive across tab switches AND across switching between the two kinds:
-// hiding the panel — or switching tab or kind — does NOT close a shell, its stream
-// stays open, so the shell (its cwd, scrollback, any running command) is right
-// where you left it. Each renders into its own host element inside #sshterm; only
-// the shell currently on screen is shown, the rest wait hidden.
-const SHELL_KINDS = ["ssh", "host"];
-function shellKey(ws, kind) { return ws + "/" + kind; }
+// work like installing a package), or a shell on this machine ("local", in your
+// home directory — for the commands that go with the servers but run here).
+//
+// The first two are the workspace's, so every (workspace, kind) gets its own; the
+// local one belongs to no workspace, so there is exactly ONE of it and every tab
+// shows that same shell. All of them are kept alive across tab switches AND
+// across switching kinds: hiding the panel — or switching tab or kind — does NOT
+// close a shell, its stream stays open, so the shell (its cwd, scrollback, any
+// running command) is right where you left it. Each renders into its own host
+// element inside #sshterm; only the shell currently on screen is shown, the rest
+// wait hidden.
+const SHELL_KINDS = ["ssh", "host", "local"];
+// The kinds that belong to a workspace, and so go away with it. "local" does not:
+// it outlives any one workspace, exactly as the machine it runs on does.
+const WS_SHELL_KINDS = ["ssh", "host"];
+function isLocalKind(kind) { return kind === "local"; }
+// One local machine, one local shell: its key carries no workspace, so every tab
+// resolves to the same session instead of spawning a shell per tab.
+function shellKey(ws, kind) { return isLocalKind(kind) ? "local" : ws + "/" + kind; }
 
 // The host's login user differs per server (root, or whatever sudo user it was
 // prepared as), so the host shell is named after the real account rather than
@@ -1390,7 +1417,18 @@ function hostUserFor(ws) {
   return (w && w.host_user) || "";
 }
 function shellLabel(kind, ws) {
-  return kind === "ssh" ? "SSH" : (hostUserFor(ws) || "host");
+  if (kind === "ssh") return "SSH";
+  if (isLocalKind(kind)) return "Local";
+  return hostUserFor(ws) || "host";
+}
+
+// The panel header says which shell you are in and, just as importantly, where it
+// is: the workspace for the two remote kinds, this machine for the local one —
+// which must never be labelled with a workspace name, since typing into it does
+// nothing to that workspace.
+function setPanelHead(kind, ws) {
+  document.getElementById("ssh-kind").textContent = shellLabel(kind, ws);
+  document.getElementById("ssh-ws").textContent = isLocalKind(kind) ? "this machine" : ws;
 }
 
 // setPanelActive lights the rail button whose shell the panel is showing (none
@@ -1413,7 +1451,10 @@ function ensureShell(ws, kind) {
   host.dataset.key = key;
   document.getElementById("sshterm").appendChild(host);
 
-  sess = makeTerminal(ws, kind, host, () => {
+  // The local shell has no workspace of its own — passing the tab it happened to
+  // be opened from would be a lie the moment you switch tabs (and the endpoints
+  // it talks to take no workspace anyway).
+  sess = makeTerminal(isLocalKind(kind) ? "" : ws, kind, host, () => {
     const s = state.shellByKey[key];
     if (s) s.note = "Shell exited. Hide and reopen the panel to start a new one.";
     if (state.shell === s) setSSHNote(s ? s.note : null);
@@ -1438,15 +1479,16 @@ function restoreShells(ws) {
   // Only reopen for a workspace the host can actually reach. If it went missing/
   // unreachable while you were away, keep the remembered kind but leave the panel
   // closed — so it comes back on its own once the host answers again, and until
-  // then you can't type into a shell the rest of the UI has disabled.
+  // then you can't type into a shell the rest of the UI has disabled. The local
+  // shell is exempt: it doesn't run on the host, so the host's state says nothing
+  // about whether it works.
   const wsObj = state.workspaces.find((w) => w.name === ws);
-  const usable = !!wsObj && isUsable(wsObj.status);
+  const usable = isLocalKind(kind) || (!!wsObj && isUsable(wsObj.status));
   if (sess && usable) {
     sess.host.hidden = false;
     panel.hidden = false;
     setPanelActive(kind);
-    document.getElementById("ssh-kind").textContent = shellLabel(kind, ws);
-    document.getElementById("ssh-ws").textContent = ws;
+    setPanelHead(kind, ws);
     setSSHNote(sess.note);
     // It was display:none until now, so xterm couldn't measure itself — refit
     // once it has a real box, and only if we're still on this workspace.
@@ -1472,10 +1514,12 @@ function disposeShell(ws, kind) {
   if (state.shell === sess) state.shell = null;
 }
 
-// Drop every shell belonging to a workspace (both kinds) — used when its user is
-// gone (deleted) or the workspace vanished from the list.
+// Drop every shell belonging to a workspace — used when its user is gone
+// (deleted) or the workspace vanished from the list. Only the workspace's own
+// kinds: the local shell is nobody's, and deleting a workspace is no reason to
+// kill the shell you were running commands in on your own machine.
 function disposeWsShells(ws) {
-  for (const kind of SHELL_KINDS) disposeShell(ws, kind);
+  for (const kind of WS_SHELL_KINDS) disposeShell(ws, kind);
   delete state.panelKindByWs[ws];
 }
 
@@ -1488,8 +1532,10 @@ function teardownAllShells() {
 }
 
 // Drop shells whose workspace no longer exists (deleted from another machine).
+// The local shell has no workspace to lose, so it is never pruned.
 function pruneShells() {
   for (const sess of Object.values(state.shellByKey)) {
+    if (isLocalKind(sess.kind)) continue;
     if (!state.workspaces.some((w) => w.name === sess.ws)) disposeShell(sess.ws, sess.kind);
   }
   for (const ws of Object.keys(state.panelKindByWs)) {
@@ -1602,10 +1648,9 @@ function openShell(kind) {
 
   const sess = ensureShell(ws, kind);
   state.shell = sess;
-  // Show this shell, hide every other (the other kind, or another tab's leftovers).
+  // Show this shell, hide every other (the other kinds, or another tab's leftovers).
   for (const s of Object.values(state.shellByKey)) if (s.host) s.host.hidden = s !== sess;
-  document.getElementById("ssh-kind").textContent = shellLabel(kind, ws);
-  document.getElementById("ssh-ws").textContent = ws;
+  setPanelHead(kind, ws);
   setSSHNote(sess.note);
   // The panel was display:none, so xterm couldn't measure itself — refit now that
   // it has a real box.
@@ -1640,6 +1685,7 @@ document.getElementById("rail").addEventListener("click", (e) => {
   switch (btn.dataset.action) {
     case "ssh": toggleShell("ssh"); break;
     case "host": toggleShell("host"); break;
+    case "local": toggleShell("local"); break;
     case "prompts": togglePrompts(); break;
     case "settings": openSettings(); break;
     case "checkpoint": doCheckpoint(); break;

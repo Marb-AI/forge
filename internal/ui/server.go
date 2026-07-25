@@ -1,16 +1,20 @@
 // Package ui serves Forge's local browser UI: tabs per workspace, a live
 // terminal into each workspace's Claude session, checkpoint/restart/stop, a
-// read-only file browser, and an ssh shell that overlays the terminal. It runs
-// as a detached daemon started by `forge ui`, binds to 127.0.0.1 only, and
-// reuses the same ssh/tmux plumbing the CLI uses — so the UI is a second front
-// end over the exact same actions, not a reimplementation of them.
+// read-only file browser, and shells that overlay the terminal — on the
+// workspace, on the host, and on this machine. It runs as a detached daemon
+// started by `forge ui`, binds to 127.0.0.1 only, and reuses the same ssh/tmux
+// plumbing the CLI uses — so the UI is a second front end over the exact same
+// actions, not a reimplementation of them.
 //
 // Security model (localhost, no login): the server binds to the loopback
 // interface, validates the Host header (so a rebound DNS name can't reach it),
 // gates every request on a random per-session token delivered once via the URL
 // and then held in a Strict-SameSite cookie, and rejects cross-origin
 // state-changing requests. That keeps another local user — or any web page open
-// in the same browser — from driving your workspaces, without a password.
+// in the same browser — from driving your workspaces, without a password. Note
+// what the token is worth: it has always been able to run commands as you on your
+// servers, and since the local shell it can do the same on this machine. The
+// checks above are what stand between it and anything else on your loopback.
 package ui
 
 import (
@@ -349,6 +353,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /api/term/{ws}/{kind}/stream", s.handleTermStream)
 	mux.HandleFunc("POST /api/term/{ws}/{kind}/input", s.handleTermInput)
 	mux.HandleFunc("POST /api/term/{ws}/{kind}/resize", s.handleTermResize)
+	// The local shell belongs to no workspace, so it gets paths without one.
+	mux.HandleFunc("GET /api/term/local/stream", s.handleLocalTermStream)
+	mux.HandleFunc("POST /api/term/local/input", s.handleLocalTermInput)
+	mux.HandleFunc("POST /api/term/local/resize", s.handleLocalTermResize)
 	mux.HandleFunc("POST /api/ws/{ws}/stop", s.handleStop)
 	mux.HandleFunc("POST /api/ws/{ws}/restart", s.handleRestart)
 	mux.HandleFunc("POST /api/ws/{ws}/checkpoint", s.handleCheckpoint)
