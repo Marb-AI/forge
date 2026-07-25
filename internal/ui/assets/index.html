@@ -27,6 +27,14 @@
           <span id="ws-topic-text"></span>
           <span id="ws-topic-age"></span>
         </div>
+        <!-- Where this workspace runs: which Claude login, which server. The topic
+             says what it is doing; these two say whose allowance it spends and
+             whose disk it fills — the rest of the identity, in the same corner. -->
+        <div id="ws-ident" hidden>
+          <span class="ident-chip" id="ws-login" hidden></span>
+          <span class="ident-chip" id="ws-server" hidden></span>
+          <span class="ident-chip" id="ws-ctx" hidden></span>
+        </div>
         <div id="track-banner" hidden>
           <div class="track-clocks">
             <span class="track-clock"
@@ -79,6 +87,25 @@
         </div>
         <div id="filetree" class="muted">Select a workspace.</div>
 
+        <!-- The Claude panel: one group per login, because a rate limit belongs to
+             an account and not to a workspace. Beside the servers panel and above
+             it, the two answering the same shape of question — what is running
+             out, and where. -->
+        <div id="logins">
+          <div class="pane-head" id="logins-head" title="Show/hide Claude usage">
+            <span>Claude</span>
+            <span class="pane-actions">
+              <span id="logins-count" class="muted"></span>
+              <button id="logins-toggle" title="Collapse">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </button>
+            </span>
+          </div>
+          <div id="loginlist" class="muted">Loading…</div>
+        </div>
         <!-- The servers panel: every registered machine and what it's using
              right now. Below the tree because it's ambient — you glance at it,
              you don't work in it. -->

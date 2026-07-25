@@ -177,6 +177,36 @@ button:hover { background: var(--bg-3); }
    rather than by hiding it and leaving the pane blank. */
 #ws-topic.stale #ws-topic-text { color: var(--fg-dim); }
 
+/* Where the workspace runs: its Claude login and its server, under the topic. Two
+   chips rather than a sentence — they are labels you check, and they must not push
+   the file tree down by a line each. */
+#ws-ident {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 10px 6px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+#ws-ident[hidden] { display: none; }
+.ident-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-3);
+  font-size: 10.5px;
+  color: var(--fg-dim);
+}
+.ident-chip[hidden] { display: none; }
+/* A workspace with no Claude login is a fact about it, not an error — dimmer than
+   a login, still there. */
+.ident-chip.dim { font-style: italic; }
+
 #track-banner {
   display: flex;
   align-items: center;
@@ -222,6 +252,67 @@ button:hover { background: var(--bg-3); }
    only root nodes ever get the .dotfile class. */
 #filetree:not(.show-hidden) .tnode.dotfile { display: none; }
 #filetree { flex: 1; overflow: auto; padding: 8px 10px; scrollbar-gutter: stable; }
+
+/* ---- Claude panel (one group per login, above the servers panel) ----
+   Same shape as the servers panel below it, because it answers the same shape of
+   question — what is running out, and where. Its own scroll cap for the same
+   reason: three logins with six workspaces each must not push the file tree out. */
+#logins { flex: none; border-top: 1px solid var(--border); background: var(--bg-2); }
+#logins-head { cursor: pointer; user-select: none; border-bottom: none; }
+#logins:not(.collapsed) #logins-head { border-bottom: 1px solid var(--border); }
+#logins-count { font-size: 10px; letter-spacing: 0; text-transform: none; }
+#logins.collapsed #logins-toggle svg { transform: rotate(-90deg); }
+#logins-toggle svg { transition: transform 0.12s ease; }
+#loginlist {
+  max-height: 30vh;
+  overflow: auto;
+  padding: 6px 10px 8px;
+  scrollbar-gutter: stable;
+}
+#logins.collapsed #loginlist { display: none; }
+/* One login per line: name on the left, its two windows on the right. Deliberately
+   flat — no bars, no nested rows — so three logins cost three lines and the file
+   tree keeps its height. */
+.lgn {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 11px;
+  min-width: 0;
+}
+.lgn-name {
+  flex: 1 1 auto;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+/* The windows never wrap away from each other or from their labels: the pair IS
+   the reading, and "5h" on one line with "13%" on the next is noise. */
+.lgn-windows { flex: none; display: flex; gap: 8px; white-space: nowrap; }
+.win { display: inline-flex; align-items: baseline; gap: 3px; }
+/* The label is furniture, the number is the signal — so the label stays dim and
+   small while the value carries the weight and the colour. */
+.win > i {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+.win > b {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+/* Same thresholds as a disk, so a spent login reads like a full one. */
+.win > b.warn { color: #f5a623; }
+.win > b.crit { color: #e0574c; }
+.lgn-nowin { flex: none; font-size: 10px; color: var(--fg-dim); }
+/* A reading nobody has refreshed for a while is history, not news — dimmed rather
+   than hidden, and the tooltip says how old it is. Same treatment as a stale
+   topic, for the same reason. */
+.lgn.stale { opacity: 0.55; }
 
 /* ---- servers panel (below the file tree) ----
    The tree owns the leftover height; this sits under it and takes only what its
