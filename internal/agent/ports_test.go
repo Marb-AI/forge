@@ -429,3 +429,71 @@ func TestEnsurePortsMemory(t *testing.T) {
 		t.Error("a workspace with no block should get no ports memory")
 	}
 }
+
+// `docker ps` succeeding and `docker inspect` failing is the case a pipeline hides:
+// inspect's exit status is thrown away, "used" comes out empty, and the command
+// cheerfully reports every port free. That is the most dangerous wrong answer it
+// can give, so it must fail instead.
+func TestPortsCmdFailsWhenInspectFails(t *testing.T) {
+	const psOkInspectBroken = `#!/bin/sh
+case "$1" in
+	ps) echo "aaa" ;;
+	inspect) exit 1 ;;
+esac
+`
+	out, err := runPortsCmd(t, psOkInspectBroken,
+		"FORGE_PORT_MIN=16000", "FORGE_PORT_MAX=16099", "COMPOSE_PROJECT_NAME=crm")
+	if err == nil {
+		t.Errorf("expected a non-zero exit, got:\n%s", out)
+	}
+	if strings.Contains(out, "free ") {
+		t.Errorf("must not report free ports when the answer is unknown:\n%s", out)
+	}
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("should say the answer is unknown, got:\n%s", out)
+	}
+}
+
+func TestBlockConflict(t *testing.T) {
+	base := t.TempDir()
+	defer func(old string) { baseDir = old }(baseDir)
+	baseDir = base
+
+	mk := func(name string, block *agentproto.PortBlock) {
+		t.Helper()
+		home := filepath.Join(base, name)
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeMetadata(home, name, block); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("crm", &agentproto.PortBlock{Start: 16000, Size: 100})
+	mk("shop", nil) // no block: never conflicts
+
+	cases := []struct {
+		name   string
+		except string
+		block  agentproto.PortBlock
+		want   string
+	}{
+		{"exact overlap", "new", agentproto.PortBlock{Start: 16000, Size: 100}, "crm"},
+		{"straddles the start", "new", agentproto.PortBlock{Start: 15950, Size: 100}, "crm"},
+		{"straddles the end", "new", agentproto.PortBlock{Start: 16099, Size: 100}, "crm"},
+		{"contained", "new", agentproto.PortBlock{Start: 16010, Size: 10}, "crm"},
+		// Adjacent, not overlapping — this is the off-by-one that would make every
+		// neighbouring block look like a conflict.
+		{"just below", "new", agentproto.PortBlock{Start: 15900, Size: 100}, ""},
+		{"just above", "new", agentproto.PortBlock{Start: 16100, Size: 100}, ""},
+		// Re-applying a workspace's own block is not a conflict with itself.
+		{"its own block", "crm", agentproto.PortBlock{Start: 16000, Size: 100}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := blockConflict(c.except, c.block); got != c.want {
+				t.Errorf("blockConflict(%q, %+v) = %q, want %q", c.except, c.block, got, c.want)
+			}
+		})
+	}
+}

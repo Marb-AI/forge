@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Host is a registered remote server. SSH is the only entry point; User is the
@@ -65,6 +66,73 @@ type Config struct {
 	// PortRange is the span of host ports Forge may hand out, and how big a block
 	// each workspace gets. Zero values mean "unset" — see PortRangeOr.
 	PortRange PortRange `json:"port_range,omitempty"`
+	// PortReservations are blocks promised to workspaces that are still being
+	// created. See PortReservation.
+	PortReservations []PortReservation `json:"port_reservations,omitempty"`
+}
+
+// PortReservation is a block handed to a workspace that does not exist yet.
+//
+// It closes a window that is much wider than it looks. A block becomes visible to
+// the next allocation only once the workspace is on its host and answers
+// `workspace-list` — and creating one installs Claude Code over the network, so
+// that is minutes, not milliseconds. Two creations started in that window (the UI
+// daemon and a terminal, or two terminals) would each read the same "lowest free"
+// block and hand it out twice, breaking the one guarantee the whole scheme rests
+// on, and surfacing much later as a tunnel that cannot bind.
+//
+// Writing the reservation is a single atomic config update, so the two creations
+// see each other immediately rather than minutes apart.
+type PortReservation struct {
+	Workspace string `json:"workspace"`
+	Host      string `json:"host"`
+	Start     int    `json:"start"`
+	// At is the unix second the block was promised, so a reservation left behind by
+	// a creation that died can be ignored rather than blocking that block forever.
+	At int64 `json:"at"`
+}
+
+// ReservationTTL is how long a reservation counts for. Generous, because the thing
+// it covers is slow: a workspace creation installs Claude Code from the network and
+// a slow host can take minutes. The cost of being too generous is one unusable
+// block for half an hour; the cost of being too eager is the double-allocation this
+// exists to prevent.
+const ReservationTTL = 30 * time.Minute
+
+// ReservePortBlock promises a block to a workspace about to be created, replacing
+// any reservation that workspace already had (a retried creation reserves again).
+func (c *Config) ReservePortBlock(workspace, host string, start int, now time.Time) {
+	c.ReleasePortBlock(workspace)
+	c.PortReservations = append(c.PortReservations, PortReservation{
+		Workspace: workspace, Host: host, Start: start, At: now.Unix(),
+	})
+}
+
+// ReleasePortBlock forgets a workspace's reservation — called once the workspace
+// exists (its block is now on the host, which is the real record) and also when
+// creating it failed.
+func (c *Config) ReleasePortBlock(workspace string) {
+	kept := c.PortReservations[:0]
+	for _, r := range c.PortReservations {
+		if r.Workspace != workspace {
+			kept = append(kept, r)
+		}
+	}
+	c.PortReservations = kept
+}
+
+// ActiveReservations returns the reservations still worth honouring, dropping any
+// whose creation must have died. Expiry is what keeps a crashed `workspace create`
+// from stranding a block permanently.
+func (c *Config) ActiveReservations(now time.Time) []PortReservation {
+	cutoff := now.Add(-ReservationTTL).Unix()
+	var live []PortReservation
+	for _, r := range c.PortReservations {
+		if r.At >= cutoff {
+			live = append(live, r)
+		}
+	}
+	return live
 }
 
 // PortRange is the territory Forge allocates from: every workspace on every host
@@ -130,6 +198,14 @@ func (c *Config) PortRangeOr() PortRange {
 // block, because a workspace with fewer ports than its neighbours would be a
 // surprise nobody asked for.
 func (r PortRange) Blocks() []int {
+	// A zero or negative block would step the loop below by nothing and never
+	// terminate. Callers are meant to come through PortRangeOr, which cannot
+	// produce one — but this is an exported method on an exported type, and a
+	// method whose contract is "call something else first or the process hangs"
+	// is a trap rather than an API.
+	if r.Block <= 0 || r.Start <= 0 {
+		return nil
+	}
 	var starts []int
 	for p := r.Start; p+r.Block-1 <= r.End; p += r.Block {
 		starts = append(starts, p)

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/config"
@@ -39,7 +40,8 @@ func portsList() int {
 	fmt.Printf("range %d-%d, blocks of %d (%d blocks)\n\n", r.Start, r.End, r.Block, len(r.Blocks()))
 
 	held, unreachable := heldBlocks(cfg)
-	if len(held) == 0 && len(unreachable) == 0 {
+	reserved := cfg.ActiveReservations(time.Now())
+	if len(held) == 0 && len(unreachable) == 0 && len(reserved) == 0 {
 		fmt.Println("no workspaces")
 		return 0
 	}
@@ -62,6 +64,14 @@ func portsList() int {
 			missing++
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\n", h.workspace, h.alias, ports)
+	}
+	// Reservations hold a block for a workspace that does not exist yet, so nothing
+	// above accounts for them. Shown because one can hold a block for half an hour
+	// after a creation died, and an invisible thing holding a block is the kind of
+	// state you end up reading the source to explain.
+	for _, res := range reserved {
+		fmt.Fprintf(w, "%s\t%s\t%d-%d (being created)\n",
+			res.Workspace, res.Host, res.Start, res.Start+r.Block-1)
 	}
 	if code := flush(w); code != 0 {
 		return code
@@ -202,13 +212,7 @@ func portsAssign(args []string) int {
 			strings.Join(unreachable, ", "))
 	}
 
-	taken := map[int]bool{}
-	for _, h := range held {
-		if h.block != nil {
-			taken[h.block.Start] = true
-		}
-	}
-
+	taken := takenBlocks(held, cfg.ActiveReservations(time.Now()))
 	r := cfg.PortRangeOr()
 	assigned := 0
 	for _, h := range held {
@@ -308,26 +312,69 @@ func nextFreeBlock(r config.PortRange, taken map[int]bool) (int, bool) {
 	return 0, false
 }
 
-// allocateBlock picks a block for a workspace about to be created. Same rules as
-// the backfill, and the same refusal to guess past an unreachable host.
-func allocateBlock(cfg *config.Config) (*agentproto.PortBlock, error) {
+// allocateBlock picks a block for a workspace about to be created and reserves it
+// in the same breath. Same rules as the backfill, and the same refusal to guess
+// past an unreachable host.
+//
+// The reservation is what makes concurrent creations safe. Reading the hosts is
+// slow and creating the workspace is slower still — minutes, while Claude Code
+// installs — so without one, everything started in that window picks the same
+// "lowest free" block. Choosing and reserving happen inside a single atomic config
+// update, so the second caller sees the first one's choice immediately instead of
+// after the first has finished.
+//
+// The hosts are read BEFORE that update, never inside it: config.Update holds a
+// lock that every other config write waits on, and an SSH round trip under it would
+// stall the UI daemon for as long as the slowest host takes to answer.
+func allocateBlock(cfg *config.Config, workspace, alias string) (*agentproto.PortBlock, error) {
 	held, unreachable := heldBlocks(cfg)
 	if len(unreachable) > 0 {
 		return nil, fmt.Errorf("cannot reach %s — its port blocks are unknown, and allocating without them risks handing out one twice",
 			strings.Join(unreachable, ", "))
 	}
+
+	r := cfg.PortRangeOr()
+	var block *agentproto.PortBlock
+	err := config.Update(func(c *config.Config) error {
+		taken := takenBlocks(held, c.ActiveReservations(time.Now()))
+		start, ok := nextFreeBlock(r, taken)
+		if !ok {
+			return fmt.Errorf("no free port block left in %d-%d — widen it with: forge ports range", r.Start, r.End)
+		}
+		c.ReservePortBlock(workspace, alias, start, time.Now())
+		block = &agentproto.PortBlock{Start: start, Size: r.Block}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return block, nil
+}
+
+// releaseBlock drops a workspace's reservation, once the workspace itself is the
+// record of the block — or once creating it has failed.
+func releaseBlock(workspace string) {
+	// Best-effort: a reservation that outlives its purpose expires on its own, and
+	// failing a creation over a bookkeeping write would be worse than the leak.
+	_ = config.Update(func(c *config.Config) error {
+		c.ReleasePortBlock(workspace)
+		return nil
+	})
+}
+
+// takenBlocks is every block position that is spoken for: held by a workspace that
+// exists, or reserved for one being created.
+func takenBlocks(held []holder, reserved []config.PortReservation) map[int]bool {
 	taken := map[int]bool{}
 	for _, h := range held {
 		if h.block != nil {
 			taken[h.block.Start] = true
 		}
 	}
-	r := cfg.PortRangeOr()
-	start, ok := nextFreeBlock(r, taken)
-	if !ok {
-		return nil, fmt.Errorf("no free port block left in %d-%d — widen it with: forge ports range", r.Start, r.End)
+	for _, r := range reserved {
+		taken[r.Start] = true
 	}
-	return &agentproto.PortBlock{Start: start, Size: r.Block}, nil
+	return taken
 }
 
 // warnRangeBusy reports anything already listening locally inside the range. It is

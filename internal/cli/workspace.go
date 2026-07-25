@@ -81,7 +81,11 @@ func createWorkspace(name, alias string) (*agentproto.PortBlock, error) {
 	// Before creating anything: allocation reads every host, and a failure here
 	// should leave nothing behind. A workspace created and then found to have no
 	// block would need cleaning up by hand.
-	block, err := allocateBlock(cfg)
+	//
+	// The block is reserved for the duration, because what follows is slow —
+	// creating a workspace installs Claude Code from the network — and until it
+	// lands, nothing else asking for a block would see this one taken.
+	block, err := allocateBlock(cfg, name, alias)
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +97,7 @@ func createWorkspace(name, alias string) (*agentproto.PortBlock, error) {
 		"--port-start", strconv.Itoa(block.Start),
 		"--port-size", strconv.Itoa(block.Size),
 	); err != nil {
+		releaseBlock(name)
 		return nil, err
 	}
 
@@ -102,6 +107,10 @@ func createWorkspace(name, alias string) (*agentproto.PortBlock, error) {
 	// another workspace created from a second tab.
 	if err := config.Update(func(c *config.Config) error {
 		c.AddWorkspace(name, alias)
+		// The workspace now holds the block on its host, which is the real record;
+		// the reservation has done its job. Dropped in the same update that records
+		// the workspace, so there is no moment where neither speaks for the block.
+		c.ReleasePortBlock(name)
 		return nil
 	}); err != nil {
 		return nil, err

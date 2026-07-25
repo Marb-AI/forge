@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/config"
 )
 
@@ -65,5 +66,30 @@ Dock      333 s1lent    9u  IPv4 0xdef0      0t0  TCP *:16000 (LISTEN)
 	// Header-only or truncated lines must not panic or produce ports.
 	if got := parseLsofPorts("COMMAND PID USER\nnode 1\n", 1, 65535); len(got) != 0 {
 		t.Errorf("short lines = %v, want none", got)
+	}
+}
+
+// A block promised to a workspace that is still being created has to count as
+// taken. Without it, everything started during a creation — minutes, while Claude
+// Code installs — picks the same "lowest free" block.
+func TestTakenBlocksCountsReservations(t *testing.T) {
+	held := []holder{
+		{workspace: "crm", alias: "srv", block: &agentproto.PortBlock{Start: 16000, Size: 100}},
+		{workspace: "shop", alias: "srv", block: nil}, // no block yet: nothing to take
+	}
+	reserved := []config.PortReservation{{Workspace: "new", Host: "srv", Start: 16100}}
+
+	taken := takenBlocks(held, reserved)
+	if !taken[16000] || !taken[16100] {
+		t.Errorf("taken = %v, want both 16000 and 16100", taken)
+	}
+	if len(taken) != 2 {
+		t.Errorf("taken = %v, want exactly two entries", taken)
+	}
+
+	r := config.PortRange{Start: 16000, End: 16299, Block: 100}
+	got, ok := nextFreeBlock(r, taken)
+	if !ok || got != 16200 {
+		t.Errorf("next free = %d, %v; want 16200 — the reserved block must be skipped", got, ok)
 	}
 }

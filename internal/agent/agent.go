@@ -100,6 +100,12 @@ func opCreate(args []string) int {
 	if _, err := os.Stat(home); err == nil {
 		return emitError("workspace %q already exists", *name)
 	}
+	if block != nil {
+		if other := blockConflict(*name, *block); other != "" {
+			return emitError("ports %d-%d overlap workspace %q, which already holds them",
+				block.Start, block.End(), other)
+		}
+	}
 
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return emitError("mkdir %s: %v", baseDir, err)
@@ -180,6 +186,37 @@ func opCreate(args []string) int {
 	}})
 }
 
+// blockConflict returns the name of a workspace already holding ports that overlap
+// b, or "" if none does. The workspace named by `except` is skipped, so re-applying
+// a block to its own owner is not a conflict with itself.
+//
+// The client allocates, because uniqueness spans hosts and a host cannot see the
+// others. But a host CAN see itself, and this is the one check that does not depend
+// on the client getting it right: two clients, or two racing creations from one
+// client, cannot put two workspaces on the same ports here.
+//
+// It is a guard, not the allocator: it can only refuse, and the caller is expected
+// to have picked a free block already.
+func blockConflict(except string, b agentproto.PortBlock) string {
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == except {
+			continue
+		}
+		other := readMetadata(e.Name()).PortBlock
+		if other == nil {
+			continue
+		}
+		if b.Start <= other.End() && other.Start <= b.End() {
+			return e.Name()
+		}
+	}
+	return ""
+}
+
 // parseBlockFlags turns the --port-start/--port-size pair into a block. Neither
 // given is "no block", both given is a block, and one of the two is an error rather
 // than a guess: a workspace silently created with half a block would publish ports
@@ -224,6 +261,10 @@ func opPortBlock(args []string) int {
 	home := filepath.Join(baseDir, *name)
 	if _, err := os.Stat(home); err != nil {
 		return emitError("no such workspace %q", *name)
+	}
+	if other := blockConflict(*name, *block); other != "" {
+		return emitError("ports %d-%d overlap workspace %q, which already holds them",
+			block.Start, block.End(), other)
 	}
 	if err := setMetadataBlock(*name, *block); err != nil {
 		return emitError("metadata: %v", err)
@@ -1636,8 +1677,15 @@ fi
 
 used=""
 if [ -n "$ids" ]; then
-	used=$(docker inspect --format '{{range $p, $bs := .HostConfig.PortBindings}}{{range $bs}}{{.HostPort}} {{end}}{{end}}' $ids 2>/dev/null |
-		tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n -u)
+	# Captured and checked BEFORE the pipeline, not through it: a pipeline's exit
+	# status is its last command's, so piping inspect straight into sort would
+	# throw away the one failure this has to report and leave "used" empty —
+	# which reads as "nothing is taken", the most dangerous wrong answer here.
+	if ! raw=$(docker inspect --format '{{range $p, $bs := .HostConfig.PortBindings}}{{range $bs}}{{.HostPort}} {{end}}{{end}}' $ids 2>/dev/null); then
+		echo "forge-ports: cannot inspect containers, so which ports are taken is unknown" >&2
+		exit 1
+	fi
+	used=$(printf '%s\n' "$raw" | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n -u)
 fi
 
 mine="" stray=""
