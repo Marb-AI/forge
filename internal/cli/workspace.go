@@ -44,10 +44,14 @@ func workspaceCreate(args []string) int {
 		return fail("usage: forge workspace create <name> <host-alias>")
 	}
 	name, alias := args[0], args[1]
-	if err := createWorkspace(name, alias); err != nil {
+	block, err := createWorkspace(name, alias)
+	if err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("created workspace %q on %s\n", name, alias)
+	if block != nil {
+		fmt.Printf("  host ports %d-%d — Claude knows; you never paste them\n", block.Start, block.End())
+	}
 	fmt.Printf("  next: forge workspace %s claude\n", name)
 	return 0
 }
@@ -55,35 +59,54 @@ func workspaceCreate(args []string) int {
 // createWorkspace provisions a workspace on a registered host and records it
 // locally. Shared by `forge workspace create` and the browser UI's wizard, so
 // both take exactly the same path.
-func createWorkspace(name, alias string) error {
+// It returns the port block the workspace was given, which is the one thing about
+// a new workspace the caller has to be told: it is what the ports in its repo will
+// have to be.
+func createWorkspace(name, alias string) (*agentproto.PortBlock, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	host := cfg.Hosts[alias]
 	if host == nil {
-		return fmt.Errorf("no such host %q (see: forge host list)", alias)
+		return nil, fmt.Errorf("no such host %q (see: forge host list)", alias)
 	}
 
 	pubkey, err := findPublicKey()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	enc := base64.StdEncoding.EncodeToString(pubkey)
 
+	// Before creating anything: allocation reads every host, and a failure here
+	// should leave nothing behind. A workspace created and then found to have no
+	// block would need cleaning up by hand.
+	block, err := allocateBlock(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	var res agentproto.CreateResult
-	if err := callAgent(host, &res, "workspace-create", "--name", name, "--pubkey", enc); err != nil {
-		return err
+	if err := callAgent(host, &res, "workspace-create",
+		"--name", name,
+		"--pubkey", enc,
+		"--port-start", strconv.Itoa(block.Start),
+		"--port-size", strconv.Itoa(block.Size),
+	); err != nil {
+		return nil, err
 	}
 
 	// Record it in its own step, and only it. The load above is minutes old by now
 	// (creating the user on the server is an SSH round trip), so saving that whole
 	// copy back would undo anything else written meanwhile — a prompt, the UI port,
 	// another workspace created from a second tab.
-	return config.Update(func(c *config.Config) error {
+	if err := config.Update(func(c *config.Config) error {
 		c.AddWorkspace(name, alias)
 		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
+	return block, nil
 }
 
 func workspaceDelete(args []string) int {

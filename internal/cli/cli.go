@@ -40,8 +40,13 @@ UI:
   forge ui status
   forge ui port <port>                           set the UI's localhost port
 
+Ports:
+  forge ports                                    which workspace owns which block
+  forge ports range [<start>-<end>] [--block=N]  the span Forge allocates blocks from
+  forge ports assign [name]                      give a block to workspaces without one
+
 Info:
-  forge show ports [host]                        listening + forwarded ports (paste to Claude)
+  forge show ports [host]                        listening + forwarded ports
 `
 
 // Main is the CLI entrypoint. It returns a process exit code.
@@ -59,6 +64,8 @@ func Main(args []string) int {
 		return forwardingCmd(args[1:])
 	case "show":
 		return showCmd(args[1:])
+	case "ports":
+		return portsCmd(args[1:])
 	case "spawn":
 		return spawnCmd(args[1:])
 	case "ui":

@@ -62,6 +62,79 @@ type Config struct {
 	// UIPort is the localhost port the browser UI (`forge ui`) binds to. Zero
 	// means "unset" — callers fall back to DefaultUIPort.
 	UIPort int `json:"ui_port,omitempty"`
+	// PortRange is the span of host ports Forge may hand out, and how big a block
+	// each workspace gets. Zero values mean "unset" — see PortRangeOr.
+	PortRange PortRange `json:"port_range,omitempty"`
+}
+
+// PortRange is the territory Forge allocates from: every workspace on every host
+// this client knows gets one immutable Block of it, and publishes only inside that
+// block.
+//
+// It lives in the CLIENT's config, not on a host, because it is the laptop that
+// suffers a collision. A workspace's remote port doubles as its local port, so the
+// range has to be unique across every server at once — and the client is the only
+// party that sees them all.
+//
+// Nothing depends on the range being remembered, which is why it is not copied to
+// the hosts: allocation avoids the blocks that actually exist (read back from every
+// host), not the ones the range predicts. A reinstalled laptop that falls back to
+// the default therefore still cannot collide — it would only start handing out
+// blocks from a different part of the space than the user originally picked.
+//
+// It is chosen once and deliberately generous: the port space costs nothing, and a
+// range wide enough that nobody ever runs out of blocks is what keeps block size
+// from being a decision anyone has to make.
+type PortRange struct {
+	Start int `json:"start,omitempty"`
+	End   int `json:"end,omitempty"`
+	// Block is how many ports each workspace gets. Uniform across the range, which
+	// is what makes a port readable: with blocks of 100 from 16000, 16104 is the
+	// fifth port of the second workspace. Per-workspace sizes would turn allocation
+	// into a packing problem with holes and make that arithmetic impossible.
+	Block int `json:"block,omitempty"`
+}
+
+// Defaults for PortRange. 16000–30000 in blocks of 100 is 140 workspaces, which is
+// far more than anyone will have — the range is free, so it is sized to make
+// "I ran out of blocks" a case that never happens rather than one to handle.
+//
+// High enough that nothing else is there: the bottom of the ephemeral range starts
+// at 32768 on Linux, and dev servers cluster in the low thousands (3000, 5173,
+// 8080), so this sits in the quiet gap between them.
+const (
+	DefaultPortStart = 16000
+	DefaultPortEnd   = 30000
+	DefaultPortBlock = 100
+)
+
+// PortRangeOr returns the configured range with any unset field defaulted, so
+// callers never have to check. A partially configured range is completed rather
+// than rejected: `forge ports range` can set the span without restating the block.
+func (c *Config) PortRangeOr() PortRange {
+	r := c.PortRange
+	if r.Start <= 0 {
+		r.Start = DefaultPortStart
+	}
+	if r.End <= 0 {
+		r.End = DefaultPortEnd
+	}
+	if r.Block <= 0 {
+		r.Block = DefaultPortBlock
+	}
+	return r
+}
+
+// Blocks returns every block position in the range, lowest first. The range is cut
+// into fixed-size blocks from Start; a tail too short for a whole block is not a
+// block, because a workspace with fewer ports than its neighbours would be a
+// surprise nobody asked for.
+func (r PortRange) Blocks() []int {
+	var starts []int
+	for p := r.Start; p+r.Block-1 <= r.End; p += r.Block {
+		starts = append(starts, p)
+	}
+	return starts
 }
 
 // DefaultUIPort is the localhost port `forge ui` uses when none is configured.

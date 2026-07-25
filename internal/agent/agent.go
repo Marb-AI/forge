@@ -44,7 +44,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 // Main is the forge-agent entrypoint; returns a process exit code.
 func Main(args []string) int {
 	if len(args) == 0 {
-		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc|workspace-usage|host-stats>")
+		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc|workspace-usage|workspace-port-block|host-stats>")
 	}
 	switch args[0] {
 	case "workspace-create":
@@ -63,6 +63,8 @@ func Main(args []string) int {
 		return opTrackInc(args[1:])
 	case "workspace-usage":
 		return opUsage()
+	case "workspace-port-block":
+		return opPortBlock(args[1:])
 	case "host-stats":
 		return opHostStats()
 	default:
@@ -74,11 +76,20 @@ func opCreate(args []string) int {
 	fs := flag.NewFlagSet("workspace-create", flag.ContinueOnError)
 	name := fs.String("name", "", "workspace name")
 	pubkeyB64 := fs.String("pubkey", "", "base64-encoded SSH public key")
+	portStart := fs.Int("port-start", 0, "first host port of this workspace's block")
+	portSize := fs.Int("port-size", 0, "how many host ports the block holds")
 	if err := fs.Parse(args); err != nil {
 		return emitError("bad arguments")
 	}
 	if !nameRe.MatchString(*name) {
 		return emitError("invalid workspace name %q", *name)
+	}
+	// A client older than this agent sends neither flag; the workspace is created
+	// without a block and `forge ports assign` can give it one later. Half a block
+	// is not a thing, though — that is a bug in the caller, not a default.
+	block, err := parseBlockFlags(*portStart, *portSize)
+	if err != nil {
+		return emitError("%v", err)
 	}
 	pubkey, err := base64.StdEncoding.DecodeString(*pubkeyB64)
 	if err != nil || len(pubkey) == 0 {
@@ -111,7 +122,7 @@ func opCreate(args []string) int {
 	if err := seedGhAuth(home, hostGhDir); err != nil {
 		return emitError("gh auth: %v", err)
 	}
-	if err := writeEnvFile(home, *name); err != nil {
+	if err := writeEnvFile(home, *name, block); err != nil {
 		return emitError("env file: %v", err)
 	}
 	if err := seedBashrc(home, *name); err != nil {
@@ -123,8 +134,15 @@ func opCreate(args []string) int {
 	if err := seedTmuxConf(home); err != nil {
 		return emitError("tmux conf: %v", err)
 	}
-	if err := writeMetadata(home, *name); err != nil {
+	if err := writeMetadata(home, *name, block); err != nil {
 		return emitError("metadata: %v", err)
+	}
+	if block != nil {
+		// Before the chown below, so the section lands with the rest of the home and
+		// is owned by the workspace user like everything else in it.
+		if err := setPortsMemory(home, *block); err != nil {
+			return emitError("ports memory: %v", err)
+		}
 	}
 	// Own everything by the workspace user.
 	if out, err := run("chown", "-R", *name+":"+*name, home); err != nil {
@@ -153,9 +171,68 @@ func opCreate(args []string) int {
 	if err := seedUsageCmd(home, *name); err != nil {
 		return emitError("usage cmd: %v", err)
 	}
+	if err := seedPortsCmd(home, *name); err != nil {
+		return emitError("ports cmd: %v", err)
+	}
 
 	return emit(agentproto.CreateResult{Workspace: agentproto.Workspace{
-		Name: *name, Owner: *name, Status: agentproto.StatusStopped,
+		Name: *name, Owner: *name, Status: agentproto.StatusStopped, PortBlock: block,
+	}})
+}
+
+// parseBlockFlags turns the --port-start/--port-size pair into a block. Neither
+// given is "no block", both given is a block, and one of the two is an error rather
+// than a guess: a workspace silently created with half a block would publish ports
+// nobody tunnels, and would look identical to one created correctly.
+func parseBlockFlags(start, size int) (*agentproto.PortBlock, error) {
+	switch {
+	case start == 0 && size == 0:
+		return nil, nil
+	case start <= 0 || size <= 0:
+		return nil, fmt.Errorf("--port-start and --port-size must be given together and be positive")
+	case start+size-1 > 65535:
+		return nil, fmt.Errorf("port block %d+%d runs past the end of the port space", start, size)
+	}
+	return &agentproto.PortBlock{Start: start, Size: size}, nil
+}
+
+// opPortBlock assigns (or re-assigns) a workspace's port block after creation. It
+// is how a workspace made before blocks existed gets one, without being re-created
+// and without touching anything else in it.
+//
+// The client is what decides which block: uniqueness spans every host it knows, and
+// a single host cannot see the others. So this op takes the number as given and only
+// puts it into effect — there is nothing here to allocate with.
+func opPortBlock(args []string) int {
+	fs := flag.NewFlagSet("workspace-port-block", flag.ContinueOnError)
+	name := fs.String("name", "", "workspace name")
+	portStart := fs.Int("port-start", 0, "first host port of this workspace's block")
+	portSize := fs.Int("port-size", 0, "how many host ports the block holds")
+	if err := fs.Parse(args); err != nil {
+		return emitError("bad arguments")
+	}
+	if !nameRe.MatchString(*name) {
+		return emitError("invalid workspace name %q", *name)
+	}
+	block, err := parseBlockFlags(*portStart, *portSize)
+	if err != nil {
+		return emitError("%v", err)
+	}
+	if block == nil {
+		return emitError("--port-start and --port-size are required")
+	}
+	home := filepath.Join(baseDir, *name)
+	if _, err := os.Stat(home); err != nil {
+		return emitError("no such workspace %q", *name)
+	}
+	if err := setMetadataBlock(*name, *block); err != nil {
+		return emitError("metadata: %v", err)
+	}
+	if err := applyPortBlock(home, *name, *block); err != nil {
+		return emitError("%v", err)
+	}
+	return emit(agentproto.CreateResult{Workspace: agentproto.Workspace{
+		Name: *name, Owner: *name, Status: sessionStatus(*name), PortBlock: block,
 	}})
 }
 
@@ -314,6 +391,10 @@ func opList() int {
 		name := e.Name()
 		list.Workspaces = append(list.Workspaces, agentproto.Workspace{
 			Name: name, Owner: name, Status: sessionStatus(name),
+			// The block rides along on the list because that is what the client
+			// allocates against: to hand out a new one it needs every block already
+			// taken, on every host, and this is the call it already makes to each.
+			PortBlock: readMetadata(name).PortBlock,
 		})
 	}
 	return emit(list)
@@ -363,6 +444,8 @@ func opActivity() int {
 		name := e.Name()
 		ensureActivityHooks(name)
 		ensureTopicCmd(name)
+		ensurePortsCmd(name)
+		ensurePortsMemory(name)
 		migrateMetadata(name) // piggy-back the metadata-file hide on the frequent sweep
 		a, haveActivity := readActivity(name)
 		// The topic outlives the attention state it was written under: a stopped
@@ -1424,6 +1507,239 @@ func ensureTopicCmd(name string) {
 	_ = seedTopicCmd(home, name)
 }
 
+// --- port blocks -----------------------------------------------------------
+//
+// A workspace publishes host ports only inside the block it owns. Two things carry
+// that rule into the session: this memory section, which states the range in words
+// Claude reads at the start of every session, and the `forge-ports` command below,
+// which answers the follow-up question — which of the block is already taken.
+//
+// The memory can be concrete because a block never moves. That is the whole payoff
+// of immutability: with a range that could change, the text would have to point at
+// a command ("ask what your ports are") and Claude would have to run something
+// before it could choose; with one that cannot, the numbers are simply true, and
+// picking a port needs no tool call at all.
+
+// memoryRelPath is Claude Code's user-level memory file inside a workspace — read
+// into context at the start of every session. User level, not project level:
+// project memory lives in the cloned repo, where it would be committed to somebody
+// else's codebase, and the port block is a fact about this machine, not that code.
+const memoryRelPath = ".claude/CLAUDE.md"
+
+// The managed section's fences. Everything between them belongs to Forge and is
+// rewritten wholesale; everything outside is the user's and is never touched. The
+// same shape as the .bashrc block, for the same reason — this file has other
+// occupants and we are a guest in it.
+const (
+	portsMemoryStart = "<!-- forge:ports:start -->"
+	portsMemoryEnd   = "<!-- forge:ports:end -->"
+)
+
+// portsMemory is the section for a workspace owning block b.
+//
+// It leads with the consequence rather than the rule, because "you may not" invites
+// a workaround and "it will not reach the developer" does not: a port outside the
+// range is not forbidden so much as useless, since Forge tunnels this block and
+// nothing else. Stating that is what makes the instruction hold without anyone
+// enforcing it.
+func portsMemory(b agentproto.PortBlock) string {
+	const body = `%[1]s
+## Host ports
+
+This workspace owns host ports **%[2]d–%[3]d** and no others. Forge tunnels exactly
+this range to the developer's machine, so a service published outside it is
+unreachable from there — and every other range belongs to a different workspace.
+
+Publish inside it: ` + "`%[2]d:3000`" + ` puts host port %[2]d in front of whatever the
+container listens on internally, which does not change. Run ` + "`forge-ports`" + ` to see
+which of the range is already taken before adding a service.
+%[4]s`
+	return fmt.Sprintf(body, portsMemoryStart, b.Start, b.End(), portsMemoryEnd)
+}
+
+// setPortsMemory writes the managed section into a workspace's memory file,
+// replacing an existing one and appending if there is none. Idempotent, so it can
+// run on every sweep: a workspace whose section is already right is left alone,
+// byte for byte.
+func setPortsMemory(home string, b agentproto.PortBlock) error {
+	path := filepath.Join(home, memoryRelPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	existing, _ := os.ReadFile(path) // absent is fine: we are about to write it
+	want := portsMemory(b)
+
+	out := replaceSection(string(existing), portsMemoryStart, portsMemoryEnd, want)
+	if out == string(existing) {
+		return nil
+	}
+	return os.WriteFile(path, []byte(out), 0o644)
+}
+
+// replaceSection swaps the fenced section of doc for want, appending it if the
+// fences are not there. A start fence with no end is treated as no section at all
+// and left alone — truncating everything after a stray marker would eat whatever
+// the user wrote below it, which is a far worse outcome than a duplicate section.
+func replaceSection(doc, start, end, want string) string {
+	i := strings.Index(doc, start)
+	if i >= 0 {
+		if j := strings.Index(doc[i:], end); j >= 0 {
+			return doc[:i] + want + doc[i+j+len(end):]
+		}
+	}
+	if doc == "" {
+		return want + "\n"
+	}
+	if !strings.HasSuffix(doc, "\n") {
+		doc += "\n"
+	}
+	return doc + "\n" + want + "\n"
+}
+
+// portsCmdRelPath is where the `forge-ports` command lives in a workspace home,
+// beside forge-topic and for the same reason: ~/.local/bin is on PATH (see
+// writeEnvFile), so the memory section can name it with no path.
+const portsCmdRelPath = ".local/bin/forge-ports"
+
+// portsCmdScript reports the workspace's block and which of it is in use. It
+// allocates nothing and reserves nothing — the block is fixed, so there is no race
+// to lose and no state to keep. It only saves Claude from reading `docker ps`
+// output and doing the arithmetic itself.
+//
+// Two details it would be wrong to get casually right:
+//
+// `docker inspect`, not `docker ps --format {{.Ports}}`, because ps prints an empty
+// PORTS column for a STOPPED container. A stopped container's published port is
+// still taken — its `docker start` tomorrow will bind it — so reusing it is exactly
+// the collision this command exists to prevent.
+//
+// A docker that cannot be read is reported as a failure, not as an empty list. "I
+// could not tell" and "nothing is using ports" are the same output otherwise, and
+// the second one invites the caller to reuse a port that is already bound.
+const portsCmdScript = `#!/bin/sh
+# forge-ports — the host ports this workspace owns, and which are already taken.
+# Forge assigns the block; this only reports. Ports outside the block are not
+# tunnelled to the developer's machine, so publishing there achieves nothing.
+set -u
+min=${FORGE_PORT_MIN:-0}
+max=${FORGE_PORT_MAX:-0}
+if [ "$min" -le 0 ] || [ "$max" -lt "$min" ]; then
+	echo "forge-ports: this workspace has no port block" >&2
+	echo "  assign one from the developer's machine: forge ports assign" >&2
+	exit 1
+fi
+
+if ! ids=$(docker ps -aq --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-}" 2>/dev/null); then
+	echo "forge-ports: cannot read docker, so which ports are taken is unknown" >&2
+	exit 1
+fi
+
+used=""
+if [ -n "$ids" ]; then
+	used=$(docker inspect --format '{{range $p, $bs := .HostConfig.PortBindings}}{{range $bs}}{{.HostPort}} {{end}}{{end}}' $ids 2>/dev/null |
+		tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n -u)
+fi
+
+mine="" stray=""
+for p in $used; do
+	if [ "$p" -ge "$min" ] && [ "$p" -le "$max" ]; then
+		mine="${mine:+$mine }$p"
+	else
+		stray="${stray:+$stray }$p"
+	fi
+done
+
+free="" n=0 p=$min
+while [ "$p" -le "$max" ] && [ "$n" -lt 5 ]; do
+	case " $mine " in
+		*" $p "*) ;;
+		*) free="${free:+$free }$p"; n=$((n + 1)) ;;
+	esac
+	p=$((p + 1))
+done
+
+printf '%-5s %s-%s\n' range "$min" "$max"
+printf '%-5s %s\n' used "${mine:-(none)}"
+printf '%-5s %s\n' free "${free:-(none — the block is full)}"
+if [ -n "$stray" ]; then
+	printf '%-5s %s — outside this block, so NOT tunnelled: republish inside the range\n' stray "$stray"
+fi
+`
+
+// seedPortsCmd installs the command into a workspace home, owned by the workspace
+// user — the same shape as seedTopicCmd.
+func seedPortsCmd(home, name string) error {
+	if err := writePortsCmd(home); err != nil {
+		return err
+	}
+	path := filepath.Join(home, portsCmdRelPath)
+	if out, err := run("chown", name+":"+name, path, filepath.Dir(path)); err != nil {
+		return fmt.Errorf("chown ports cmd: %v: %s", err, out)
+	}
+	return nil
+}
+
+// writePortsCmd writes the script and its directory; split out so it can be tested
+// without root, the same split as writeTopicCmd.
+func writePortsCmd(home string) error {
+	path := filepath.Join(home, portsCmdRelPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(portsCmdScript), 0o755)
+}
+
+// applyPortBlock puts a block into effect inside a workspace: the env file (so any
+// shell knows the range), the memory section (so Claude does), and the command (so
+// both can ask what is taken). Called at creation and again by the backfill op, so
+// a workspace that gains a block later ends up in exactly the same state as one
+// created with it.
+func applyPortBlock(home, name string, b agentproto.PortBlock) error {
+	if err := writeEnvFile(home, name, &b); err != nil {
+		return fmt.Errorf("env file: %w", err)
+	}
+	if err := setPortsMemory(home, b); err != nil {
+		return fmt.Errorf("memory: %w", err)
+	}
+	if err := seedPortsCmd(home, name); err != nil {
+		return err
+	}
+	// The env file and memory are written by root here; hand them back.
+	paths := []string{filepath.Join(home, envRelPath), filepath.Join(home, memoryRelPath)}
+	if out, err := run("chown", append([]string{name + ":" + name}, paths...)...); err != nil {
+		return fmt.Errorf("chown port block files: %v: %s", err, out)
+	}
+	return nil
+}
+
+// ensurePortsCmd installs the command into a workspace that predates it, or whose
+// copy is out of date — the same lazy backfill as ensureTopicCmd, on the same
+// sweep. A workspace with no block still gets the command: it is what prints the
+// "no port block, assign one" message, which is more use than "command not found".
+func ensurePortsCmd(name string) {
+	home := filepath.Join(baseDir, name)
+	if data, err := os.ReadFile(filepath.Join(home, portsCmdRelPath)); err == nil &&
+		string(data) == portsCmdScript {
+		return
+	}
+	_ = seedPortsCmd(home, name)
+}
+
+// ensurePortsMemory re-states the block in the workspace's memory on the same
+// sweep, so a reworded section reaches every workspace without a re-provision —
+// and so a section someone deleted comes back. setPortsMemory writes nothing when
+// the text already matches, which is the common case every few seconds.
+//
+// A workspace with no block is left alone: there is nothing true to say, and an
+// invented range would be worse than silence.
+func ensurePortsMemory(name string) {
+	block := readMetadata(name).PortBlock
+	if block == nil {
+		return
+	}
+	_ = setPortsMemory(filepath.Join(baseDir, name), *block)
+}
+
 // gatedHookCmd fires on Stop/Notification: the turn ended (or Claude notified),
 // but that is NOT the same as "waiting for you". If Claude left background work
 // running — a background shell or a background subagent — it will resume on its
@@ -1597,7 +1913,7 @@ func seedGitKey(home, keyDir string) error {
 const envRelPath = ".forge/env"
 
 // writeEnvFile creates the workspace environment file.
-func writeEnvFile(home, name string) error {
+func writeEnvFile(home, name string, block *agentproto.PortBlock) error {
 	dir := filepath.Join(home, ".forge")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -1609,12 +1925,20 @@ func writeEnvFile(home, name string) error {
 	// names the Remote Control session after the workspace instead of the default
 	// hostname — it's the *prefix* that Claude shows in the app (not --name), so
 	// sessions read as `marbai-01`, `marbai-02`… rather than `hostname-random`.
-	// Host ports live in each repo's own .env.
+	//
+	// FORGE_PORT_MIN/MAX are the workspace's port block, present so the ports this
+	// workspace may publish are readable from any shell in it without asking anyone
+	// — `forge-ports` reads them, and a compose file or Makefile can too. Absent
+	// (rather than zero) on a workspace with no block, so a script can tell "no
+	// block" from "a block starting at 0", which is not a port.
 	content := fmt.Sprintf(
 		"COMPOSE_PROJECT_NAME=%[1]s\n"+
 			"PATH=$HOME/.local/bin:$PATH\n"+
 			"CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX=%[1]s\n",
 		name)
+	if block != nil {
+		content += fmt.Sprintf("FORGE_PORT_MIN=%d\nFORGE_PORT_MAX=%d\n", block.Start, block.End())
+	}
 	return os.WriteFile(filepath.Join(home, envRelPath), []byte(content), 0o644)
 }
 
@@ -1753,20 +2077,69 @@ func childMap(m map[string]any, key string) map[string]any {
 	return child
 }
 
-func writeMetadata(home, name string) error {
+// metadata is the shape of metadataFile. Typed rather than a map because one field
+// is now read back and acted on — the port block, which is this file's whole reason
+// for being read at all (see readMetadata).
+type metadata struct {
+	Name        string `json:"name"`
+	Owner       string `json:"owner"`
+	TmuxSession string `json:"tmux_session"`
+	CreatedAt   string `json:"created_at"`
+	LastUsed    string `json:"last_used"`
+	// PortBlock is the ports this workspace owns, absent on one created before
+	// blocks existed. This file is where a block LIVES: not a registry of its own,
+	// because a block belongs to exactly one workspace and dies with it — `userdel
+	// -r` takes the home directory and the block is released by the same act.
+	PortBlock *agentproto.PortBlock `json:"port_block,omitempty"`
+}
+
+// readMetadata loads a workspace's metadata file. A missing or malformed file is
+// not an error: every caller wants "no block on record" rather than a failure, and
+// this file is not something a workspace can't live without.
+func readMetadata(name string) metadata {
+	var m metadata
+	data, err := os.ReadFile(filepath.Join(baseDir, name, metadataFile))
+	if err != nil {
+		return metadata{}
+	}
+	_ = json.Unmarshal(data, &m)
+	return m
+}
+
+func writeMetadata(home, name string, block *agentproto.PortBlock) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	meta := map[string]string{
-		"name":         name,
-		"owner":        name,
-		"tmux_session": agentproto.TmuxSession,
-		"created_at":   now,
-		"last_used":    now,
+	meta := metadata{
+		Name:        name,
+		Owner:       name,
+		TmuxSession: agentproto.TmuxSession,
+		CreatedAt:   now,
+		LastUsed:    now,
+		PortBlock:   block,
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(home, metadataFile), data, 0o644)
+}
+
+// setMetadataBlock records a port block on a workspace that already exists, keeping
+// every other field as it was. Used by the backfill op, which is how a workspace
+// made before blocks existed gets one without being re-created.
+func setMetadataBlock(name string, block agentproto.PortBlock) error {
+	m := readMetadata(name)
+	if m.Name == "" {
+		// Nothing readable on disk (an old workspace with no metadata at all, or a
+		// corrupt file). Write a usable one rather than refusing: the fields we can
+		// reconstruct are the ones that are derived from the name anyway.
+		m = metadata{Name: name, Owner: name, TmuxSession: agentproto.TmuxSession}
+	}
+	m.PortBlock = &block
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(baseDir, name, metadataFile), data, 0o644)
 }
 
 // migrateMetadata renames a workspace's pre-rename visible workspace.json to the

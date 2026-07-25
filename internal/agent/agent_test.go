@@ -34,7 +34,7 @@ func TestNameValidation(t *testing.T) {
 
 func TestWriteEnvFile(t *testing.T) {
 	home := t.TempDir()
-	if err := writeEnvFile(home, "crm"); err != nil {
+	if err := writeEnvFile(home, "crm", nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(home, envRelPath))
@@ -80,7 +80,7 @@ func TestSeedSSHAuthorizedKeys(t *testing.T) {
 
 func TestWriteMetadata(t *testing.T) {
 	home := t.TempDir()
-	if err := writeMetadata(home, "crm"); err != nil {
+	if err := writeMetadata(home, "crm", nil); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(filepath.Join(home, metadataFile))

@@ -25,11 +25,43 @@ const (
 	StatusUnreachable = "unreachable"
 )
 
+// PortBlock is the span of host ports one workspace owns — the only host ports it
+// is allowed to publish on, and the only ones Forge will tunnel for it.
+//
+// It is assigned once, at creation, and never moves. That immutability is what the
+// whole design rests on: because the block cannot change, the same number means the
+// same service forever, so a port can be written into a repo's compose file, an
+// OAuth redirect URI or a CORS whitelist and stay correct. It is also why the
+// workspace can be *told* its range in plain text (see PortsMemory) instead of
+// having to ask at runtime.
+//
+// Blocks are unique across every host a client knows, not just within one — the
+// client allocates them from a single range so that a workspace's remote port can
+// also be its local port, with no mapping table and no chance that two servers hand
+// out the same number and collide on the laptop that tunnels both.
+type PortBlock struct {
+	Start int `json:"start"`
+	Size  int `json:"size"`
+}
+
+// End is the last port in the block. Inclusive: a block at 16000 of size 100 is
+// 16000–16099, and the next block starts at 16100. Spelled out here because an
+// off-by-one would put two neighbouring workspaces on the same port.
+func (b PortBlock) End() int { return b.Start + b.Size - 1 }
+
+// Contains reports whether port is inside the block.
+func (b PortBlock) Contains(port int) bool { return port >= b.Start && port <= b.End() }
+
 // Workspace is the agent's view of a single workspace.
 type Workspace struct {
 	Name   string `json:"name"`
 	Owner  string `json:"owner"`
 	Status string `json:"status"`
+	// PortBlock is the workspace's port block, or nil for one that has none — a
+	// workspace created before this existed. Absent rather than zero because the
+	// client allocates blocks by taking the lowest one nobody holds, and a zero
+	// block would read as a workspace holding the bottom of the range.
+	PortBlock *PortBlock `json:"port_block,omitempty"`
 }
 
 // ListResult is returned by `forge-agent workspace-list`.
