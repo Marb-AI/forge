@@ -252,6 +252,44 @@ func workspacesTrack() (map[string]agentproto.Track, error) {
 	return out, nil
 }
 
+// workspacesUsage asks each host once for the Claude usage of the workspaces on it —
+// the login each is signed in as, its context and cost, and where that login stands
+// against its rate limits — and keeps only the ones this client owns. Same host
+// fan-out and ownership filter as workspacesActivity.
+//
+// The hosts are asked one after another, like the other two sweeps and unlike
+// hostsStats: those fan out because the servers panel asks every registered machine
+// including the empty ones, while this only ever visits hosts we actually keep
+// workspaces on. A host that cannot be reached contributes nothing and its logins
+// keep the reading they last gave, which is why the sample carries its own timestamp.
+func workspacesUsage() (map[string]agentproto.Usage, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	needed := map[string]bool{}
+	for _, alias := range cfg.Workspaces {
+		needed[alias] = true
+	}
+	out := map[string]agentproto.Usage{}
+	for alias := range needed {
+		host := cfg.Hosts[alias]
+		if host == nil {
+			continue
+		}
+		var res agentproto.UsageResult
+		if err := callAgent(host, &res, "workspace-usage"); err != nil {
+			continue // unreachable, or an agent too old to know the op
+		}
+		for name, u := range res.Usage {
+			if cfg.Workspaces[name] == alias { // ours, on this host
+				out[name] = u
+			}
+		}
+	}
+	return out, nil
+}
+
 // trackInc adds seconds of user-present time to a workspace's session tracking, via
 // the agent on its host. The browser flushes accumulated activity here; a flush that
 // can't reach the host simply doesn't land and the next one carries the arrears.

@@ -219,6 +219,7 @@ func runUI(_ []string) int {
 		ListWorkspaces:    listWorkspacesInfo,
 		WorkspaceActivity: workspaceActivityInfo,
 		WorkspaceTrack:    workspaceTrackInfo,
+		WorkspaceUsage:    workspaceUsageInfo,
 		TrackInc:          trackInc,
 		HostStats:         hostsStats,
 		HostFor: func(name string) *config.Host {
@@ -309,6 +310,42 @@ func workspaceTrackInfo() (map[string]ui.Track, error) {
 	out := make(map[string]ui.Track, len(tr))
 	for name, t := range tr {
 		out[name] = ui.Track{SessionStart: t.SessionStart, ActiveSeconds: t.ActiveSeconds}
+	}
+	return out, nil
+}
+
+// workspaceUsageInfo adapts the agent's usage map into the ui package's own type, so
+// ui need not import agentproto (same split as workspaceActivityInfo). The rate-limit
+// windows stay pointers through the conversion: a nil window is a login that has not
+// reported one, and flattening that to a zeroed struct would show a full allowance
+// where we have no reading at all.
+func workspaceUsageInfo() (map[string]ui.Usage, error) {
+	use, err := workspacesUsage()
+	if err != nil {
+		return nil, err
+	}
+	window := func(w *agentproto.RateWindow) *ui.RateWindow {
+		if w == nil {
+			return nil
+		}
+		return &ui.RateWindow{UsedPercent: w.UsedPercent, ResetsAt: w.ResetsAt}
+	}
+	out := make(map[string]ui.Usage, len(use))
+	for name, u := range use {
+		out[name] = ui.Usage{
+			Account: ui.Account{
+				UUID: u.Account.UUID, Email: u.Account.Email,
+				Name: u.Account.Name, Org: u.Account.Org,
+			},
+			Auth:        u.Auth,
+			TS:          u.TS,
+			Model:       u.Model,
+			ContextUsed: u.ContextUsed,
+			ContextSize: u.ContextSize,
+			CostUSD:     u.CostUSD,
+			FiveHour:    window(u.FiveHour),
+			SevenDay:    window(u.SevenDay),
+		}
 	}
 	return out, nil
 }

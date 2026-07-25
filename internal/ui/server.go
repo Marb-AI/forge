@@ -74,6 +74,55 @@ type Track struct {
 	ActiveSeconds int64 `json:"active_seconds"`
 }
 
+// RateWindow is one of a Claude subscription's rate-limit windows: how much of it
+// is spent and when it starts over. A nil window in Usage means absent, which is not
+// the same as 0% — see Usage.Auth for the case where it is absent by nature.
+type RateWindow struct {
+	UsedPercent float64 `json:"used_percent"`
+	ResetsAt    int64   `json:"resets_at,omitempty"`
+}
+
+// Account identifies the Claude login a workspace is signed in as. UUID is the key
+// the UI groups by — one group per login, since that is the unit a rate limit is
+// measured against — and the rest are labels for the group's header. An empty UUID
+// means no Claude.ai login: an API-credit workspace has none.
+type Account struct {
+	UUID  string `json:"uuid"`
+	Email string `json:"email,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Org   string `json:"org,omitempty"`
+}
+
+// Usage is one workspace's Claude usage for the browser: the login it runs as, how
+// full its context window is, what its session has cost, and that login's rate-limit
+// windows. The cli package fills it in from the agent (the ui package must not
+// import agentproto).
+//
+// The rate-limit windows belong to the login, not the workspace — several workspaces
+// on one login report the same figures, because they spend the same allowance — so
+// the panel groups by Account.UUID and takes the freshest sample in each group rather
+// than adding anything up. What IS per workspace, and therefore per row: the context
+// window, the cost, the model.
+//
+// TS says when the sample was taken. Nothing here refreshes while a workspace's
+// Claude is not running, so a group's figures are as old as its liveliest member and
+// the panel says so rather than presenting them as current.
+type Usage struct {
+	Account Account `json:"account"`
+	// Auth is how the workspace pays: "subscription", "api", "bedrock", "vertex", or
+	// empty when nothing on the host says. It decides what the row can claim — only a
+	// Claude.ai subscription HAS a 5-hour or weekly window, so for anything else their
+	// absence is the nature of the thing and not a gap in our reading.
+	Auth        string      `json:"auth,omitempty"`
+	TS          int64       `json:"ts,omitempty"`
+	Model       string      `json:"model,omitempty"`
+	ContextUsed int64       `json:"context_used,omitempty"`
+	ContextSize int64       `json:"context_size,omitempty"`
+	CostUSD     float64     `json:"cost_usd,omitempty"`
+	FiveHour    *RateWindow `json:"five_hour,omitempty"`
+	SevenDay    *RateWindow `json:"seven_day,omitempty"`
+}
+
 // HostStat is one registered server's resource usage, for the panel under the
 // file tree. The cli package fills it in from the agent (the ui package must not
 // import agentproto).
@@ -127,6 +176,12 @@ type Deps struct {
 	// drive the tracking banner's two clocks. Optional, like WorkspaceActivity:
 	// handleTrack nil-checks it and reports no tracking rather than failing.
 	WorkspaceTrack func() (map[string]Track, error)
+	// WorkspaceUsage returns each workspace's Claude usage — login, context, cost and
+	// that login's rate-limit windows — keyed by name. Polled by the UI to group the
+	// workspaces by login and show which logins are near their limit. Optional, like
+	// WorkspaceActivity: handleUsage nil-checks it and reports none rather than
+	// failing to start.
+	WorkspaceUsage func() (map[string]Usage, error)
 	// TrackInc adds seconds of user-present time to a workspace's tracking. The UI
 	// flushes its accumulated activity here periodically. Optional: handleTrackInc
 	// nil-checks it, so a caller that doesn't wire it just doesn't persist activity.
@@ -352,6 +407,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /api/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("GET /api/activity", s.handleActivity)
 	mux.HandleFunc("GET /api/track", s.handleTrack)
+	mux.HandleFunc("GET /api/usage", s.handleUsage)
 	mux.HandleFunc("POST /api/track/{ws}/inc", s.handleTrackInc)
 	mux.HandleFunc("GET /api/term/{ws}/{kind}/stream", s.handleTermStream)
 	mux.HandleFunc("POST /api/term/{ws}/{kind}/input", s.handleTermInput)
@@ -559,6 +615,22 @@ func (s *server) handleTrack(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, tr)
+}
+
+// handleUsage returns each workspace's Claude usage, keyed by name — the browser
+// groups it by login itself, since that grouping is a matter of presentation and the
+// per-workspace figures are wanted alongside it either way. Like handleActivity it is
+// polled and degrades quietly: a host we can't reach leaves its workspaces reporting
+// the sample they last gave, which each carries its own timestamp for.
+func (s *server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	use := map[string]Usage{}
+	if s.deps.WorkspaceUsage != nil {
+		if u, err := s.deps.WorkspaceUsage(); err == nil && u != nil {
+			use = u
+		}
+	}
+	writeJSON(w, use)
 }
 
 // statsFresh is how long a measurement is handed to further callers instead of

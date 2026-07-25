@@ -86,6 +86,106 @@ type TrackResult struct {
 	Sessions map[string]Track `json:"sessions"`
 }
 
+// RateWindow is one of a Claude subscription's rate-limit windows — how much of
+// it is spent and when it starts over. Both numbers come from Claude Code itself
+// (the statusLine payload), which is the only place they exist: nothing on the
+// disk records them, they arrive with an API response.
+//
+// A window is reported as a pointer everywhere it appears, because absent and
+// zero are different answers. Absent means nobody has asked the API yet under
+// this login; 0% means the window is genuinely untouched. Showing an empty bar
+// for the first would be a confident lie.
+type RateWindow struct {
+	UsedPercent float64 `json:"used_percent"`
+	// ResetsAt is the unix second the window rolls over, or 0 if Claude did not
+	// say.
+	ResetsAt int64 `json:"resets_at,omitempty"`
+}
+
+// Account identifies the Claude login a workspace is signed in as, read from that
+// workspace's own ~/.claude.json. Workspaces on one server can be signed in as
+// different accounts — each is a separate Linux user with its own credentials —
+// and the account is what the rate-limit windows above are actually measured
+// against, so it is the key the UI groups by.
+//
+// UUID is that key, not Email: the address is the label a human reads, but the
+// same person signed into two organisations is two accounts with two sets of
+// limits. Everything but UUID may be empty — a login that has not fetched its
+// profile yet has the id and little else.
+type Account struct {
+	UUID  string `json:"uuid"`
+	Email string `json:"email,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Org   string `json:"org,omitempty"`
+}
+
+// How a workspace's Claude pays for itself. Not every deployment is a Claude.ai
+// subscription, and the difference decides which of the numbers below mean
+// anything: the 5-hour and weekly windows exist only for Pro/Max, while an
+// organisation on API credits has no such windows at all — for them the honest
+// headline is spend, not a percentage of an allowance that isn't there.
+//
+// It is detected, never configured, and reported so the UI can group and label
+// truthfully instead of showing a workspace with no rate limits as one whose limits
+// are unknown. AuthUnknown is the honest answer when nothing on the host says.
+const (
+	AuthSubscription = "subscription" // signed in to a Claude.ai account (Pro/Max)
+	AuthAPIKey       = "api"          // an Anthropic API key, i.e. credits
+	AuthBedrock      = "bedrock"      // Amazon Bedrock
+	AuthVertex       = "vertex"       // Google Vertex AI
+	AuthUnknown      = ""             // nothing on the host says
+)
+
+// Usage is one workspace's Claude usage: which login it runs as, how full its
+// context window is, what the session has cost, and where that login stands
+// against its 5-hour and weekly limits.
+//
+// The two halves have different lifetimes, which is why an entry can hold either
+// alone. Account comes from ~/.claude.json and survives everything — a stopped
+// workspace still reports the login it will come back as, which is the whole
+// point of showing it. The rest is a sample the statusLine command left behind
+// the last time Claude rendered, so it is only as current as TS says.
+//
+// The rate-limit windows are per account, not per workspace: three workspaces on
+// one login all report the same 5-hour figure, because they are all spending the
+// same allowance. They ride along on each workspace because that is where the
+// sample is taken, and the UI groups them back together.
+type Usage struct {
+	Account Account `json:"account"`
+	// Auth is how this workspace pays — one of the Auth* constants above. It is what
+	// tells "this login has 41% of its week left" apart from "this workspace has no
+	// weekly window because it bills credits", which are the same absent fields.
+	Auth string `json:"auth,omitempty"`
+	// TS is the unix second the sample was written. Zero means there is no sample
+	// — the statusLine command has not run in this workspace yet — and every
+	// field below it is meaningless rather than zero.
+	TS int64 `json:"ts,omitempty"`
+	// Model is Claude's display name for the model the session is on ("Opus 4.6").
+	Model string `json:"model,omitempty"`
+	// ContextUsed is the tokens currently in the context window (fresh input plus
+	// cache reads and writes, which is how Claude Code itself counts it);
+	// ContextSize is the window they are measured against. A zero ContextSize is
+	// "not reported" — no session has a zero-token window — so the UI can tell an
+	// unmeasured context from an empty one, the same way HostStats does.
+	ContextUsed int64 `json:"context_used,omitempty"`
+	ContextSize int64 `json:"context_size,omitempty"`
+	// CostUSD is what this session has spent so far, as Claude Code accounts it.
+	CostUSD float64 `json:"cost_usd,omitempty"`
+	// FiveHour and SevenDay are the login's rate-limit windows, absent unless the
+	// account is a Claude.ai subscription that has made at least one API call this
+	// session.
+	FiveHour *RateWindow `json:"five_hour,omitempty"`
+	SevenDay *RateWindow `json:"seven_day,omitempty"`
+}
+
+// UsageResult is returned by `forge-agent workspace-usage`: one entry per
+// workspace that has a login on record or a usage sample (a workspace nobody has
+// signed into has neither, and simply has no entry) — the same shape as
+// ActivityResult.
+type UsageResult struct {
+	Usage map[string]Usage `json:"usage"`
+}
+
 // HostStats is one server's resource usage at the moment it was asked, and the
 // whole payload of `forge-agent host-stats` (no wrapper: a host speaks for
 // itself). Byte counts rather than percentages, because "83% full" and "12 GB
@@ -168,11 +268,31 @@ const SessionFile = ".forge-session.json"
 // and because that directory is already hidden from the file tree.
 const TopicFile = ".claude/forge-topic"
 
+// UsageFile is the per-workspace usage sample, relative to the workspace home. It
+// holds one JSON object — see the agent's usageCmdScript, which writes it — read
+// by the agent on its usage sweep. It sits in ~/.claude beside forge-activity and
+// forge-topic for the same reasons: it is Claude's own account of its own session,
+// and that directory is already hidden from the file tree.
+const UsageFile = ".claude/forge-usage"
+
+// AccountFile is where Claude Code keeps the signed-in account, relative to the
+// workspace home. Its `oauthAccount` object is the only record of which login a
+// workspace uses, and unlike the usage sample it is there whether or not Claude is
+// running.
+const AccountFile = ".claude.json"
+
 // TopicMaxRunes is how much of a topic survives to the UI. A topic is a label, not
 // a summary: it goes in a narrow sidebar and a tab tooltip, so anything longer is
 // cut. Enforced on the way out (rune-safe) as well as on the way in, because the
 // file is plain text that anything could have written.
 const TopicMaxRunes = 120
+
+// LabelMaxRunes bounds the short labels that come out of a workspace's own Claude
+// state — the model name, and the login's email, display name and organisation.
+// Shorter than a topic because these are identifiers, not sentences: they go in a
+// group header in a narrow column, and anything longer is something odd in a file
+// nobody promised us the shape of.
+const LabelMaxRunes = 80
 
 // ClearSession removes the tracking file, run as the workspace user. Appended to
 // the stop and restart commands so a stopped or hard-restarted session starts its
