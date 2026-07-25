@@ -173,3 +173,36 @@ func TestServiceRe(t *testing.T) {
 		}
 	}
 }
+
+// The container states each action has work to do on. A service already in the
+// requested state must be left alone rather than handed to docker, so that
+// "already stopped" cannot be reported as a failure.
+func TestActionableStates(t *testing.T) {
+	stop := strings.Join(actionable[actionStop], " ")
+	start := strings.Join(actionable[actionStart], " ")
+
+	for _, st := range []string{"running", "paused", "restarting"} {
+		if !strings.Contains(stop, st) {
+			t.Errorf("stop should act on a %s container", st)
+		}
+		if strings.Contains(start, st) {
+			t.Errorf("start should not act on a %s container", st)
+		}
+	}
+	for _, st := range []string{"exited", "created"} {
+		if !strings.Contains(start, st) {
+			t.Errorf("start should act on an %s container", st)
+		}
+		if strings.Contains(stop, st) {
+			t.Errorf("stop should not act on an %s container", st)
+		}
+	}
+	// A dead container can be neither started nor stopped; asking docker to try is
+	// an error report for something nobody can fix from a button.
+	if strings.Contains(stop, "dead") || strings.Contains(start, "dead") {
+		t.Error("a dead container is not actionable")
+	}
+	if len(actionable) != 2 {
+		t.Errorf("actionable has %d entries; only start and stop exist", len(actionable))
+	}
+}

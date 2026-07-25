@@ -3337,7 +3337,11 @@ function renderPorts() {
   const rows = (info && info.rows) || [];
   if (!rows.length) {
     list.className = "muted";
+    // A note means the daemon knows why the panel is empty — a server it could
+    // not reach — and saying so beats sitting on "Loading…" for a machine that is
+    // never going to answer.
     if (!state.active) list.textContent = "Select a workspace.";
+    else if (info && info.note) list.textContent = info.note;
     else if (!ports.loaded) list.textContent = "Loading…";
     else if (info && info.block) list.textContent = `Nothing published yet (${info.block}).`;
     else list.textContent = "Nothing published yet.";

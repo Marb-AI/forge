@@ -2,15 +2,28 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/Marb-AI/forge/internal/config"
 )
 
+// portsServer wires HostFor to recognise "crm" and nothing else — both handlers
+// gate on it, the way every other per-workspace endpoint does.
 func portsServer(t *testing.T, d Deps) *server {
 	t.Helper()
+	if d.HostFor == nil {
+		d.HostFor = func(ws string) *config.Host {
+			if ws == "crm" {
+				return &config.Host{Alias: "srv"}
+			}
+			return nil
+		}
+	}
 	return &server{deps: d}
 }
 
@@ -191,5 +204,81 @@ func TestPortsPanelIsInTheDocument(t *testing.T) {
 	css := embeddedAsset(t, "app.css")
 	if !strings.Contains(css, "#ports.collapsed #portlist { display: none; }") {
 		t.Error("app.css has no rule hiding the list when the panel is collapsed")
+	}
+}
+
+// A workspace this client does not have is a 404, like every other per-workspace
+// endpoint — not a transient failure that polling might fix.
+func TestPortsHandlersRejectUnknownWorkspace(t *testing.T) {
+	reached := false
+	s := portsServer(t, Deps{
+		Ports:           func(string) (WorkspacePortsInfo, error) { reached = true; return WorkspacePortsInfo{}, nil },
+		ContainerAction: func(string, string, string) error { reached = true; return nil },
+	})
+
+	get := httptest.NewRequest("GET", "/api/ports/ghost", nil)
+	get.SetPathValue("ws", "ghost")
+	gw := httptest.NewRecorder()
+	s.handlePorts(gw, get)
+	if gw.Code != http.StatusNotFound {
+		t.Errorf("GET unknown = %d, want 404", gw.Code)
+	}
+
+	post := httptest.NewRequest("POST", "/api/ports/ghost/container", strings.NewReader(`{"service":"web","action":"stop"}`))
+	post.SetPathValue("ws", "ghost")
+	pw := httptest.NewRecorder()
+	s.handleContainerAction(pw, post)
+	if pw.Code != http.StatusNotFound {
+		t.Errorf("POST unknown = %d, want 404", pw.Code)
+	}
+	if reached {
+		t.Error("an unknown workspace reached the deps")
+	}
+}
+
+// A host that cannot be reached is a panel that says so, not a failed request.
+// The browser keeps its last good answer on a failure — and on first load there
+// is no last good answer, so a 502 would leave "Loading…" up for as long as the
+// server stays down.
+func TestPortsHandlerReportsAnUnreachableHostAsANote(t *testing.T) {
+	s := portsServer(t, Deps{
+		Ports: func(string) (WorkspacePortsInfo, error) {
+			return WorkspacePortsInfo{}, errors.New("ssh: connect to host remote-dev-01 port 22: Operation timed out\nsecond line")
+		},
+	})
+	r := httptest.NewRequest("GET", "/api/ports/crm", nil)
+	r.SetPathValue("ws", "crm")
+	w := httptest.NewRecorder()
+	s.handlePorts(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 so the panel can render the reason", w.Code)
+	}
+	var got WorkspacePortsInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Note == "" {
+		t.Fatal("no note: the panel would sit on Loading… with nothing to say")
+	}
+	if strings.Contains(got.Note, "second line") {
+		t.Errorf("note is multi-line, which turns the panel into a paragraph: %q", got.Note)
+	}
+	if len(got.Rows) != 0 {
+		t.Errorf("rows = %+v, want none", got.Rows)
+	}
+}
+
+// The panel has to prefer that note over its own placeholders, or the reason is
+// computed and then never shown.
+func TestBrowserShowsTheNoteBeforeLoading(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	note := strings.Index(js, "info && info.note")
+	loading := strings.Index(js, `list.textContent = "Loading…"`)
+	if note < 0 {
+		t.Fatal("renderPorts never reads info.note")
+	}
+	if loading >= 0 && note > loading {
+		t.Error("the Loading… branch wins over the note, so an unreachable host renders as Loading…")
 	}
 }

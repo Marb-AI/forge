@@ -2,6 +2,7 @@ package agent
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -316,23 +317,64 @@ func opContainer(args []string) int {
 		return emitError("no such workspace %q", *name)
 	}
 
-	ids, err := run("docker", "ps", "-aq",
-		"--filter", "label=com.docker.compose.project="+*name,
-		"--filter", "label=com.docker.compose.service="+*service)
+	// Two questions, deliberately separate: does this service have containers at
+	// all, and do any of them need the action. Collapsing them would answer "the
+	// container is already stopped" with the same error as "there is no such
+	// container", and only one of those is something to tell the user about.
+	all, err := serviceContainers(*name, *service)
 	if err != nil {
-		return emitError("docker ps: %v: %s", err, ids)
+		return emitError("%v", err)
 	}
-	list := strings.Fields(ids)
-	if len(list) == 0 {
-		// Nothing to act on. Not an error the UI should swallow: the button was
-		// drawn from an observation, so an empty answer means the container went
-		// away underneath it.
+	if len(all) == 0 {
+		// The button was drawn from an observation, so an empty answer means the
+		// container went away underneath it. Worth saying.
 		return emitError("workspace %q has no container for service %q", *name, *service)
 	}
-	if out, err := run("docker", append([]string{*action}, list...)...); err != nil {
+	todo, err := serviceContainers(*name, *service, actionable[*action]...)
+	if err != nil {
+		return emitError("%v", err)
+	}
+	if len(todo) == 0 {
+		// Already where it was asked to be. Success: the caller wanted a state, not
+		// a state transition, and reporting a failure for reaching it anyway would
+		// make a harmless double-click look broken.
+		return emit(agentproto.OK{OK: true})
+	}
+	if out, err := run("docker", append([]string{*action}, todo...)...); err != nil {
 		return emitError("docker %s: %v: %s", *action, err, tailLines(out, 3))
 	}
 	return emit(agentproto.OK{OK: true})
+}
+
+// actionable is the container states each action has work to do on. Docker ORs
+// repeated status filters, so these select exactly the containers that are not
+// already where the action would put them.
+//
+// "dead" is in neither list: it cannot be started and there is nothing to stop.
+var actionable = map[string][]string{
+	actionStop:  {"running", "paused", "restarting"},
+	actionStart: {"exited", "created"},
+}
+
+// serviceContainers lists the ids of a workspace's containers for one compose
+// service, optionally narrowed to a set of states.
+//
+// The compose project label is what scopes this to the workspace: a service name
+// alone is not unique across the host, and taking a container id from the caller
+// would let a request reach any container on the machine.
+func serviceContainers(workspace, service string, states ...string) ([]string, error) {
+	args := []string{"ps", "-aq",
+		"--filter", "label=com.docker.compose.project=" + workspace,
+		"--filter", "label=com.docker.compose.service=" + service,
+	}
+	for _, st := range states {
+		args = append(args, "--filter", "status="+st)
+	}
+	out, err := run("docker", args...)
+	if err != nil {
+		return nil, fmt.Errorf("docker ps: %v: %s", err, out)
+	}
+	return strings.Fields(out), nil
 }
 
 // serviceRe bounds what can be passed as a compose service. These become docker
