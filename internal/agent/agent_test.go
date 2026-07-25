@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
 )
@@ -359,22 +362,259 @@ func TestActivityHooksMarker(t *testing.T) {
 	if err := writeClaudeConfig(home); err != nil {
 		t.Fatal(err)
 	}
-	// ensureActivityHooks re-seeds unless it finds BOTH the activity file and the
-	// background_tasks gate — the fingerprint of the current hooks. Requiring both
-	// keeps an unrelated user hook that happens to mention one word from blocking
-	// our seeding, and still forces an upgrade from the older ungated version.
+	// ensureActivityHooks re-seeds unless it finds ALL of the activity file, the
+	// background_tasks gate and the topic file — the fingerprint of the current
+	// hooks. Requiring all three keeps an unrelated user hook that happens to
+	// mention one word from blocking our seeding, and still forces an upgrade from
+	// each earlier version.
 	seeded := string(mustRead(t, filepath.Join(home, ".claude", "settings.json")))
-	if !strings.Contains(seeded, "forge-activity") || !strings.Contains(seeded, "background_tasks") {
-		t.Errorf("seeded settings.json lacks the current-version marker: %s", seeded)
+	for _, want := range []string{"forge-activity", "background_tasks", "forge-topic"} {
+		if !strings.Contains(seeded, want) {
+			t.Errorf("seeded settings.json lacks %q from the current-version marker: %s", want, seeded)
+		}
 	}
 	marked := func(s string) bool {
-		return strings.Contains(s, "forge-activity") && strings.Contains(s, "background_tasks")
+		return strings.Contains(s, "forge-activity") && strings.Contains(s, "background_tasks") &&
+			strings.Contains(s, "forge-topic")
 	}
 	if marked(`{"hooks":{"Stop":[{"hooks":[{"command":"printf idle > $HOME/.claude/forge-activity"}]}]}}`) {
 		t.Error("the older ungated hooks (forge-activity, no gate) must not match — they'd never upgrade")
 	}
 	if marked(`{"hooks":{"Stop":[{"hooks":[{"command":"echo my background_tasks helper"}]}]}}`) {
 		t.Error("an unrelated hook mentioning only background_tasks must not match — we'd never seed")
+	}
+	// The version before the topic nudge: gated, reporting activity, but never
+	// asking Claude to label the workspace. It must still be upgraded.
+	if marked(`{"hooks":{"Stop":[{"hooks":[{"command":"python3 -c background_tasks ~/.claude/forge-activity"}]}]}}`) {
+		t.Error("the pre-topic hooks must not match the marker — a workspace would never start reporting a topic")
+	}
+}
+
+// The hook commands are single-quoted shell words carrying a python program, and
+// they are assembled here rather than at a shell prompt where a syntax error would
+// be obvious. One apostrophe anywhere inside — in the nudge text, in a comment,
+// in a python string — closes the quote early and the hook becomes gibberish the
+// shell tries to run. Two quotes, the outer pair, is the whole invariant.
+func TestHookCommandsCarryNoStrayQuotes(t *testing.T) {
+	for name, cmd := range map[string]string{
+		"busyHookCmd":  busyHookCmd,
+		"gatedHookCmd": gatedHookCmd(agentproto.ActivityIdle),
+	} {
+		if got := strings.Count(cmd, "'"); got != 2 {
+			t.Errorf("%s has %d single quotes, want exactly the outer 2: %s", name, got, cmd)
+		}
+	}
+}
+
+// The nudge is the only thing that tells Claude what to run, and the script is the
+// only thing that answers to that name. A rename of one without the other leaves a
+// workspace being asked, every prompt, to run a command it does not have.
+func TestTopicNudgeNamesTheInstalledCommand(t *testing.T) {
+	cmd := filepath.Base(topicCmdRelPath)
+	if !strings.Contains(topicNudge, cmd) {
+		t.Errorf("the nudge never names %q, so nothing tells Claude what to run: %s", cmd, topicNudge)
+	}
+	if !strings.Contains(busyHookCmd, topicNudge) {
+		t.Error("busyHookCmd does not carry the nudge — the topic would never set itself")
+	}
+	// The gate is the difference between a prompt and a nag: without a comparison
+	// against the session start the nudge would ride along on every single prompt.
+	if !strings.Contains(busyHookCmd, agentproto.SessionFile) {
+		t.Error("the nudge is ungated: it must compare the topic against the session start")
+	}
+}
+
+// The hook is a python program embedded in a Go string, wrapped in a shell word,
+// stored in JSON — four layers deep, and nothing else here ever runs it. So this
+// runs it: once with no topic (it must ask for one), once with a fresh topic (it
+// must stay quiet), once with a topic older than the session (it must ask again,
+// which is what makes a stop/restart start a new label).
+func TestBusyHookReportsBusyAndGatesTheNudge(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not installed; the hook needs it on the server, not here")
+	}
+	home := t.TempDir()
+
+	fire := func() string {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", busyHookCmd)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		cmd.Stdin = strings.NewReader("{}")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("hook failed: %v (stderr: %s)", err, err.(*exec.ExitError).Stderr)
+		}
+		return string(out)
+	}
+
+	// No topic at all: report busy, and ask for one.
+	out := fire()
+	activity := string(mustRead(t, filepath.Join(home, ".claude", "forge-activity")))
+	if got, _ := parseActivity([]byte(activity)); got.State != agentproto.ActivityBusy || got.TS == 0 {
+		t.Errorf("hook wrote %q, want a stamped busy state", activity)
+	}
+	if !strings.Contains(out, topicNudge) {
+		t.Errorf("a workspace with no topic was not asked for one, got %q", out)
+	}
+
+	// A topic newer than the session start: say nothing. This is the state a
+	// checkpoint leaves behind, where the work is continuing under its own label.
+	now := time.Now().Unix()
+	writeFile := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(agentproto.SessionFile, fmt.Sprintf(`{"session_start":%d,"active_seconds":0}`, now-600))
+	writeFile(agentproto.TopicFile, fmt.Sprintf("%d refactoring auth to use JWT", now-300))
+	if out = fire(); strings.Contains(out, topicNudge) {
+		t.Errorf("a current topic was asked to be re-set — the nudge would nag every prompt: %q", out)
+	}
+
+	// A topic from before this session began: ask again. That is a stop/restart,
+	// where the tracking file was cleared and the session start moved forward.
+	writeFile(agentproto.SessionFile, fmt.Sprintf(`{"session_start":%d,"active_seconds":0}`, now))
+	writeFile(agentproto.TopicFile, fmt.Sprintf("%d yesterdays work", now-86400))
+	if out = fire(); !strings.Contains(out, topicNudge) {
+		t.Errorf("a topic older than the session was left in place, got %q", out)
+	}
+}
+
+func TestParseTopic(t *testing.T) {
+	long := strings.Repeat("é", agentproto.TopicMaxRunes+40)
+	cases := []struct {
+		name string
+		in   string
+		ok   bool
+		want string
+		ts   int64
+	}{
+		{"plain", "1784386328 refactoring auth to use JWT\n", true, "refactoring auth to use JWT", 1784386328},
+		{"inner whitespace collapses", "42 one\ttwo   three", true, "one two three", 42},
+		{"control characters are stripped", "42 drop\x1b[31m the escape", true, "drop [31m the escape", 42},
+		{"no timestamp", "refactoring auth", false, "", 0},
+		{"no text", "1784386328", false, "", 0},
+		{"no text after the stamp", "1784386328    \n", false, "", 0},
+		{"empty", "", false, "", 0},
+	}
+	for _, c := range cases {
+		text, ts, ok := parseTopic([]byte(c.in))
+		if ok != c.ok || text != c.want || ts != c.ts {
+			t.Errorf("%s: parseTopic(%q) = (%q, %d, %v), want (%q, %d, %v)",
+				c.name, c.in, text, ts, ok, c.want, c.ts, c.ok)
+		}
+	}
+
+	// Truncation is rune-safe: a byte cut through this multi-byte text would leave
+	// half a character, which travels through JSON to the browser as a replacement
+	// glyph. The ellipsis is not counted against the limit.
+	text, _, ok := parseTopic([]byte("42 " + long))
+	if !ok {
+		t.Fatal("a long topic should still parse")
+	}
+	if runes := []rune(text); len(runes) != agentproto.TopicMaxRunes+1 || runes[len(runes)-1] != '…' {
+		t.Errorf("long topic cut to %d runes ending %q, want %d and an ellipsis",
+			len([]rune(text)), string([]rune(text)[len([]rune(text))-1]), agentproto.TopicMaxRunes+1)
+	}
+	if !utf8.ValidString(text) {
+		t.Error("truncation left invalid UTF-8 — the cut went through a character")
+	}
+}
+
+// The end of the loop that matters: the script Claude runs must write exactly what
+// the agent reads back. These are two separate pieces of text in two languages,
+// and nothing else checks that they agree on the format.
+func TestTopicCmdWritesWhatTheAgentReads(t *testing.T) {
+	base := t.TempDir()
+	defer func(old string) { baseDir = old }(baseDir)
+	baseDir = base
+
+	home := filepath.Join(base, "crm")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTopicCmd(home); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, topicCmdRelPath)
+
+	runTopic := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("sh", append([]string{script}, args...)...)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("forge-topic %v: %v: %s", args, err, out)
+		}
+	}
+
+	before := time.Now().Unix()
+	runTopic("refactoring", "auth", "to", "use", "JWT")
+	text, ts, ok := readTopic("crm")
+	if !ok {
+		t.Fatal("readTopic: nothing readable after forge-topic ran")
+	}
+	if text != "refactoring auth to use JWT" {
+		t.Errorf("topic = %q, want the words as given", text)
+	}
+	if ts < before || ts > time.Now().Unix() {
+		t.Errorf("topic stamped %d, outside the window [%d, %d] the command ran in",
+			ts, before, time.Now().Unix())
+	}
+
+	// A multi-line argument must not become a multi-line file: the second line would
+	// be read as a topic with no timestamp, i.e. as nothing.
+	runTopic("first line\nsecond line")
+	if text, _, ok = readTopic("crm"); !ok || text != "first line second line" {
+		t.Errorf("multi-line topic = (%q, %v), want it flattened to one line", text, ok)
+	}
+
+	// No argument clears it — how a workspace says it is between jobs.
+	runTopic()
+	if text, _, ok = readTopic("crm"); ok {
+		t.Errorf("forge-topic with no argument left %q behind, want the topic cleared", text)
+	}
+}
+
+// A workspace made before this existed — or one whose copy of the script is from an
+// older forge — gets the current one on the next activity sweep, with no
+// re-provision. Contents, not existence, or a changed script would never land.
+func TestEnsureTopicCmdBackfillsAndRefreshes(t *testing.T) {
+	base := t.TempDir()
+	defer func(old string) { baseDir = old }(baseDir)
+	baseDir = base
+
+	home := filepath.Join(base, "crm")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, topicCmdRelPath)
+
+	// Missing entirely (the pre-topic workspace).
+	ensureTopicCmd("crm")
+	if got := string(mustRead(t, script)); got != topicCmdScript {
+		t.Fatalf("ensureTopicCmd did not install the command: %q", got)
+	}
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("forge-topic is not executable (mode %v) — the nudge would ask for a command that cannot run",
+			info.Mode().Perm())
+	}
+
+	// Stale (an older forge's version).
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ensureTopicCmd("crm")
+	if got := string(mustRead(t, script)); got != topicCmdScript {
+		t.Errorf("a stale forge-topic was left in place: %q", got)
 	}
 }
 

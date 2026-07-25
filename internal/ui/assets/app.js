@@ -37,7 +37,7 @@ const state = {
   // The reattach loop that runs while the link is down. `busy` is what keeps a
   // slow attempt from overlapping the next one — see scheduleReconnect.
   reconnect: { timer: null, tries: 0, busy: false, pending: false },
-  activity: {},   // ws name -> {state, ts}: Claude's attention state, polled
+  activity: {},   // ws name -> {state, ts, topic, topic_ts}: what Claude's up to, polled
 };
 
 // ---- theme ----------------------------------------------------------------
@@ -368,7 +368,11 @@ function renderTabs() {
     const tab = document.createElement("button");
     tab.className = "tab" + (active ? " active" : "") +
       (ws.status === "running" ? " running" : "");
-    tab.title = `${ws.host} · ${sessionLabel(ws.status)}`;
+    // The topic goes in the tooltip rather than the strip: it is a sentence, and a
+    // sentence per tab would make twenty workspaces unreadable at the one moment
+    // you have twenty. Hovering is the cheap way to ask "which one was that".
+    const topic = topicFor(ws.name);
+    tab.title = `${ws.host} · ${sessionLabel(ws.status)}` + (topic ? `\n${topic.text}` : "");
 
     // Real tab semantics, since we claim role="tablist": screen readers get told
     // which one is selected, and a roving tabindex keeps Tab from walking through
@@ -553,6 +557,7 @@ async function pollActivity() {
   } catch { return; }
   if (!act) return;
   state.activity = act;
+  renderTopic();
   if (state.active && !document.hidden) ackActivity(state.active); // you're looking at it
   // Repaint the tabs only when the flagged set changed, and never mid-drag — a
   // reorder owns the strip. paintBrowserTab rides along inside renderTabs; call it
@@ -657,6 +662,44 @@ function renderTrackBanner() {
   pause.title = track.paused ? "Resume activity tracking" : "Pause activity tracking";
 }
 
+// ---- workspace topic --------------------------------------------------------
+// What the workspace is working on, in Claude's own words. Claude writes it with
+// `forge-topic`; a UserPromptSubmit hook asks it to whenever the label is missing
+// or predates the current session. Nobody types one by hand — which is the only
+// way twenty of them stay current.
+
+function topicFor(ws) {
+  const a = ws ? state.activity[ws] : null;
+  return a && a.topic ? { text: a.topic, ts: a.topic_ts || 0 } : null;
+}
+
+// Coarse on purpose: the only question an age answers here is "is this still what's
+// going on", and "3d" answers it as well as a timestamp would, in a corner of a
+// narrow pane.
+function fmtAge(sec) {
+  if (sec < 90) return "now";
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86400)}d`;
+}
+
+function renderTopic() {
+  const box = document.getElementById("ws-topic");
+  const t = topicFor(state.active);
+  box.hidden = !t;
+  if (!t) return;
+  const age = Math.max(0, Math.floor(Date.now() / 1000) - t.ts);
+  // "Stale" means here what it means to the hook that nudges for a new one: the
+  // label predates the session it claims to describe. A workspace with no running
+  // session is all history, so it counts too — dimmed, not hidden, because what it
+  // was last doing is exactly what you came to the tab to remember.
+  const start = (track.data[state.active] || {}).session_start || 0;
+  box.classList.toggle("stale", !start || (t.ts > 0 && t.ts < start));
+  document.getElementById("ws-topic-text").textContent = t.text;
+  document.getElementById("ws-topic-age").textContent = t.ts ? fmtAge(age) : "";
+  box.title = t.ts ? `${t.text}\nSet ${fmtAge(age)} ago by Claude.` : t.text;
+}
+
 // Merge a fresh server poll, keeping the activity count monotonic within a session:
 // a poll that raced ahead of an in-flight flush must not make the clock tick
 // backwards. A changed session_start (a restart) legitimately resets it.
@@ -678,6 +721,7 @@ async function pollTrack() {
     if (t) mergeTrack(t);
   } catch { /* unreachable host: clocks just don't advance their base this round */ }
   renderTrackBanner();
+  renderTopic(); // a changed session_start can flip a topic to stale
 }
 
 // Flush accrued activity for a workspace. Optimistically fold it into the local
@@ -1070,6 +1114,7 @@ function selectWs(name) {
   else document.getElementById("filetree").innerHTML =
     '<div class="muted">No files to show.</div>';
 
+  renderTopic();       // say what this workspace is about before anything loads
   renderTrackBanner(); // reflect the new workspace's clocks immediately
   pollTrack();         // and fetch its start/active without waiting for the interval
 }

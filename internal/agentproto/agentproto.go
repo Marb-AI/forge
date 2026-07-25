@@ -46,17 +46,25 @@ const (
 	ActivityWaiting = "waiting" // Claude needs your input or a decision
 )
 
-// Activity is one workspace's attention state plus the unix second the hook that
-// set it fired. The timestamp is what lets the UI tell a fresh "waiting for you"
-// from one it has already shown and dismissed.
+// Activity is what a workspace's Claude is up to: its attention state plus the
+// unix second the hook that set it fired. The timestamp is what lets the UI tell a
+// fresh "waiting for you" from one it has already shown and dismissed.
+//
+// Topic rides along because it answers the neighbouring question — not "does this
+// workspace want me" but "what was I even doing in there", which is the one you
+// can't answer yourself once you keep twenty of them. Claude writes it (see
+// TopicFile); TopicTS is when, so the UI can say a topic is days old rather than
+// present it as current. Both are empty/zero for a workspace that has none.
 type Activity struct {
-	State string `json:"state"`
-	TS    int64  `json:"ts"`
+	State   string `json:"state"`
+	TS      int64  `json:"ts"`
+	Topic   string `json:"topic,omitempty"`
+	TopicTS int64  `json:"topic_ts,omitempty"`
 }
 
 // ActivityResult is returned by `forge-agent workspace-activity`: one entry per
-// workspace that has an activity state on record (workspaces whose Claude has not
-// run since the hooks were installed simply have no entry).
+// workspace that has an activity state or a topic on record (a workspace whose
+// Claude has not run since the hooks were installed simply has no entry).
 type ActivityResult struct {
 	Activity map[string]Activity `json:"activity"`
 }
@@ -152,6 +160,19 @@ const (
 // tracked. The agent reads it (workspace-track); the workspace user's own commands
 // below create and clear it. A hidden dotfile so it stays out of the file tree.
 const SessionFile = ".forge-session.json"
+
+// TopicFile is the per-workspace topic file, relative to the workspace home. It
+// holds "<unix-seconds> <one line of text>" — written by the `forge-topic` command
+// Claude runs, read by the agent on its activity sweep. It sits in ~/.claude
+// beside forge-activity because it is Claude's own scribble about its own session,
+// and because that directory is already hidden from the file tree.
+const TopicFile = ".claude/forge-topic"
+
+// TopicMaxRunes is how much of a topic survives to the UI. A topic is a label, not
+// a summary: it goes in a narrow sidebar and a tab tooltip, so anything longer is
+// cut. Enforced on the way out (rune-safe) as well as on the way in, because the
+// file is plain text that anything could have written.
+const TopicMaxRunes = 120
 
 // ClearSession removes the tracking file, run as the workspace user. Appended to
 // the stop and restart commands so a stopped or hard-restarted session starts its

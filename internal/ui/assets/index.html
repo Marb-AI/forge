@@ -20,6 +20,13 @@
 
     <div id="body">
       <aside id="filepane">
+        <!-- What this workspace is working on, in Claude's own words. Above the
+             clocks and the tree because it answers the first question you have
+             when you land on a tab you last touched on Tuesday. -->
+        <div id="ws-topic" hidden>
+          <span id="ws-topic-text"></span>
+          <span id="ws-topic-age"></span>
+        </div>
         <div id="track-banner" hidden>
           <div class="track-clocks">
             <span class="track-clock"

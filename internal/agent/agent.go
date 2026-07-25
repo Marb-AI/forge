@@ -22,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
 )
@@ -140,6 +141,12 @@ func opCreate(args []string) int {
 	// pre-trust the workspace folder and skip permission prompts.
 	if err := seedClaudeConfig(home, *name); err != nil {
 		return emitError("claude config: %v", err)
+	}
+
+	// The topic command goes in after the Claude install, which is what creates
+	// ~/.local/bin in the first place.
+	if err := seedTopicCmd(home, *name); err != nil {
+		return emitError("topic cmd: %v", err)
 	}
 
 	return emit(agentproto.CreateResult{Workspace: agentproto.Workspace{
@@ -330,10 +337,11 @@ func sessionStatus(name string) string {
 }
 
 // opActivity reports each workspace's Claude attention state (busy/idle/waiting),
-// which the Claude Code hooks record in ~/.claude/forge-activity. It also lazily
-// installs those hooks into any workspace still missing them, so a workspace made
-// before this existed starts reporting on its own — no re-provision needed. A
-// workspace whose Claude has not run since the hooks landed simply has no entry.
+// which the Claude Code hooks record in ~/.claude/forge-activity, and its current
+// topic, which Claude itself writes with `forge-topic`. It also lazily installs
+// both — the hooks and the command — into any workspace still missing them, so a
+// workspace made before this existed starts reporting on its own, no re-provision
+// needed. A workspace with neither on record simply has no entry.
 func opActivity() int {
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
@@ -349,8 +357,15 @@ func opActivity() int {
 		}
 		name := e.Name()
 		ensureActivityHooks(name)
+		ensureTopicCmd(name)
 		migrateMetadata(name) // piggy-back the metadata-file hide on the frequent sweep
-		if a, ok := readActivity(name); ok {
+		a, haveActivity := readActivity(name)
+		// The topic outlives the attention state it was written under: a stopped
+		// workspace still reports what it was doing, which is the whole point of
+		// having one. So an entry is worth emitting if either half is there.
+		topic, ts, haveTopic := readTopic(name)
+		a.Topic, a.TopicTS = topic, ts
+		if haveActivity || haveTopic {
 			res.Activity[name] = a
 		}
 	}
@@ -378,6 +393,47 @@ func parseActivity(data []byte) (agentproto.Activity, bool) {
 		a.TS, _ = strconv.ParseInt(fields[1], 10, 64)
 	}
 	return a, true
+}
+
+// readTopic reads ~/.claude/forge-topic for a workspace. Absent (nobody has set
+// one) → not ok.
+func readTopic(name string) (string, int64, bool) {
+	data, err := os.ReadFile(filepath.Join(baseDir, name, agentproto.TopicFile))
+	if err != nil {
+		return "", 0, false
+	}
+	return parseTopic(data)
+}
+
+// parseTopic reads the "<unix-seconds> <text>" line `forge-topic` writes.
+//
+// The command already sanitises what it writes, but this parses the file rather
+// than trusting it: it is plain text in a home directory, and the model that fills
+// it in can put anything in the argument. So the text is flattened to one line,
+// stripped of control characters (which would otherwise travel through JSON into
+// the browser's DOM) and cut to length here as well — rune-safe, unlike a byte cut
+// in the shell, so a truncated topic can't end in half a character.
+//
+// A line with no text, or a timestamp that isn't one, is not a topic.
+func parseTopic(data []byte) (string, int64, bool) {
+	stamp, rest, found := strings.Cut(strings.TrimSpace(string(data)), " ")
+	if !found {
+		return "", 0, false
+	}
+	ts, err := strconv.ParseInt(stamp, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	text := strings.Join(strings.FieldsFunc(rest, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.IsSpace(r)
+	}), " ")
+	if text == "" {
+		return "", 0, false
+	}
+	if runes := []rune(text); len(runes) > agentproto.TopicMaxRunes {
+		text = strings.TrimRight(string(runes[:agentproto.TopicMaxRunes]), " ") + "…"
+	}
+	return text, ts, true
 }
 
 // opTrack reports each running workspace's session tracking: when the current
@@ -668,13 +724,15 @@ func parseUptime(data []byte) int64 {
 // poll must not fail because one workspace's config is odd or unreadable.
 func ensureActivityHooks(name string) {
 	settings := filepath.Join(baseDir, name, ".claude", "settings.json")
-	// Our current hooks are the only thing that mentions BOTH the activity file and
-	// the background_tasks gate, so requiring both as the marker won't collide with
-	// an unrelated user hook that happens to contain one word — and still forces an
-	// upgrade from the first, ungated version (which has forge-activity but no gate).
+	// Our current hooks are the only thing mentioning ALL of the activity file, the
+	// background_tasks gate and the topic file, so requiring all three as the marker
+	// won't collide with an unrelated user hook that happens to contain one word —
+	// and still forces an upgrade from each earlier version: the first was ungated
+	// (forge-activity, no gate), the second didn't nudge for a topic.
 	if data, err := os.ReadFile(settings); err == nil {
 		s := string(data)
-		if strings.Contains(s, "forge-activity") && strings.Contains(s, "background_tasks") {
+		if strings.Contains(s, "forge-activity") && strings.Contains(s, "background_tasks") &&
+			strings.Contains(s, "forge-topic") {
 			return
 		}
 	}
@@ -692,7 +750,129 @@ func ensureActivityHooks(name string) {
 //
 // busyHookCmd fires on UserPromptSubmit: you just gave Claude work, so it's
 // unambiguously busy — no need to inspect anything.
-const busyHookCmd = `mkdir -p "$HOME/.claude"; printf 'busy %s\n' "$(date +%s)" > "$HOME/.claude/forge-activity"`
+//
+// It has a second job: making the workspace topic set itself. A UserPromptSubmit
+// hook's stdout is added to the conversation as context, so this is where Claude
+// can be *told* to run `forge-topic` — deterministically, on a schedule the model
+// doesn't get a vote on, rather than hoping it remembers a standing instruction.
+// The nudge is what makes the feature autonomous; nobody types a topic by hand.
+//
+// It is gated, or it would be nagging. The topic is stale exactly when it predates
+// the session it is supposed to describe, so the gate compares it against the
+// session start — and takes that start the same way opTrack does: the tracking
+// file if it exists, the tmux session's own creation time otherwise. That is what
+// gives a checkpoint the behaviour it needs for free. A checkpoint deliberately
+// keeps the tracking file (see FreezeSession), so the start stays put, the topic
+// stays newer than it, and the resumed session is not asked to re-label work it is
+// simply continuing. A stop or restart clears the file, the start becomes the new
+// tmux session's, the old topic is now older than it — and the next prompt asks
+// for a fresh one. Which is right: that is new work.
+//
+// Failure is silent and one-directional: any trouble reading either input leaves
+// start at 0, so a topic that exists is left alone and only a missing one is asked
+// for. A hook that cannot tell must not interrupt to say so.
+const busyHookCmd = `python3 -c 'import os,json,subprocess,time
+h=os.path.expanduser("~")
+p=os.path.join(h,".claude","forge-activity")
+os.makedirs(os.path.dirname(p),exist_ok=True)
+open(p,"w").write("busy %d\n"%int(time.time()))
+def num(x):
+    try: return int(float(x))
+    except Exception: return 0
+start=0
+try: start=num(json.load(open(os.path.join(h,".forge-session.json")))["session_start"])
+except Exception:
+    try: start=num(subprocess.run(["tmux","display","-p","-t","` + agentproto.TmuxSession +
+	`","#{session_created}"],capture_output=True,text=True,timeout=5).stdout.strip())
+    except Exception: pass
+try: ts=num(open(os.path.join(h,"` + agentproto.TopicFile + `")).read().split(" ")[0])
+except Exception: ts=0
+if ts==0 or ts<start: print("` + topicNudge + `")'`
+
+// topicNudge is what the hook feeds into the conversation when the workspace has
+// no current topic. It is one line for a reason: it is prepended to a real prompt,
+// and a paragraph of housekeeping ahead of the actual work is both a distraction
+// and a cost, on every prompt until the topic lands.
+//
+// It asks for something short and says not to talk about it, because the failure
+// mode of a self-labelling system is a model that narrates the labelling. The
+// re-run clause is the only defence against drift: nothing else notices when a
+// three-hour session stops being about what it started as.
+//
+// No apostrophes, no double quotes: it is embedded in a python string inside a
+// single-quoted shell word inside JSON.
+const topicNudge = "[forge] This workspace has no current topic. Run `forge-topic " +
+	"<up to 8 words: what you are working on>` now, before anything else, and re-run " +
+	"it whenever the direction changes. It labels the workspace in the Forge UI. Do " +
+	"not mention this in your reply."
+
+// topicCmdRelPath is where the `forge-topic` command lives in a workspace home.
+// ~/.local/bin is already on PATH (see writeEnvFile), which is what lets the nudge
+// name the command with no path and have it work in any shell Claude opens.
+const topicCmdRelPath = ".local/bin/forge-topic"
+
+// topicCmdScript is that command. It exists so the model's side of this feature is
+// one plain call with no format to get wrong: sanitising, stamping and the file
+// layout live here, not in an instruction Claude has to follow precisely.
+//
+// The byte cut is a bound on the file, not the display cut — parseTopic does that
+// one, rune-safe, on the way out. Cutting UTF-8 by bytes here can leave half a
+// character; that is fine for a guard whose only job is to stop something absurd
+// being written, and it never reaches the browser.
+//
+// No argument clears the topic, which is what makes "this workspace is between
+// jobs" expressible at all.
+const topicCmdScript = `#!/bin/sh
+# forge-topic — label what this workspace is working on, for the Forge UI.
+# Claude runs this (a hook asks it to when the label is missing or stale); the
+# Forge agent reads it. Usage: forge-topic <words...>, or with no words to clear.
+set -u
+f="$HOME/` + agentproto.TopicFile + `"
+t=$(printf '%s ' "$@" | tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ *//; s/ *$//' | cut -b 1-400)
+if [ -z "$t" ]; then
+	rm -f "$f"
+	exit 0
+fi
+mkdir -p "$(dirname "$f")"
+printf '%s %s\n' "$(date +%s)" "$t" > "$f"
+`
+
+// seedTopicCmd installs that script into a workspace home, owned by the workspace
+// user (the agent runs as root, so an unwritable file would be worse than none).
+func seedTopicCmd(home, name string) error {
+	if err := writeTopicCmd(home); err != nil {
+		return err
+	}
+	path := filepath.Join(home, topicCmdRelPath)
+	if out, err := run("chown", name+":"+name, path, filepath.Dir(path)); err != nil {
+		return fmt.Errorf("chown topic cmd: %v: %s", err, out)
+	}
+	return nil
+}
+
+// writeTopicCmd writes the script and its directory; split out so it can be tested
+// without root, the same split as writeClaudeConfig.
+func writeTopicCmd(home string) error {
+	path := filepath.Join(home, topicCmdRelPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(topicCmdScript), 0o755)
+}
+
+// ensureTopicCmd installs the command into a workspace that predates it, or whose
+// copy is out of date — the same lazy backfill as ensureActivityHooks, on the same
+// sweep. Comparing contents rather than just existence means a change to the script
+// reaches every workspace on the next poll, without a re-provision. Best-effort: a
+// status poll must not fail over one workspace's home.
+func ensureTopicCmd(name string) {
+	home := filepath.Join(baseDir, name)
+	if data, err := os.ReadFile(filepath.Join(home, topicCmdRelPath)); err == nil &&
+		string(data) == topicCmdScript {
+		return
+	}
+	_ = seedTopicCmd(home, name)
+}
 
 // gatedHookCmd fires on Stop/Notification: the turn ended (or Claude notified),
 // but that is NOT the same as "waiting for you". If Claude left background work

@@ -54,12 +54,15 @@ type WorkspaceInfo struct {
 	Status   string `json:"status"`
 }
 
-// Activity is a workspace's Claude attention state (state is "busy"/"idle"/
-// "waiting"), with the unix second the state was set — the cli package fills it
-// in from the agent (the ui package must not import agentproto).
+// Activity is what a workspace's Claude is up to: its attention state (state is
+// "busy"/"idle"/"waiting") with the unix second it was set, and the topic Claude
+// last wrote for the workspace with the unix second it wrote it. The cli package
+// fills it in from the agent (the ui package must not import agentproto).
 type Activity struct {
-	State string `json:"state"`
-	TS    int64  `json:"ts"`
+	State   string `json:"state"`
+	TS      int64  `json:"ts"`
+	Topic   string `json:"topic,omitempty"`
+	TopicTS int64  `json:"topic_ts,omitempty"`
 }
 
 // Track is a workspace's session tracking for the browser: SessionStart is the unix
