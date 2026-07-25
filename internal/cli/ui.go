@@ -254,7 +254,13 @@ func runUI(_ []string) int {
 			sort.Strings(aliases)
 			return aliases, nil
 		},
-		CreateWorkspace: createWorkspace,
+		// The block the workspace was given is dropped here: the browser wizard has
+		// nowhere to say it yet. Nothing is lost — it is on the workspace, and
+		// `forge ports` reports it.
+		CreateWorkspace: func(name, host string) error {
+			_, err := createWorkspace(name, host)
+			return err
+		},
 		PrepareHost:     runHostPrepare,
 		DeleteWorkspace: deleteWorkspace,
 		RemoveHost:      removeHost,

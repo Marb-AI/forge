@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Host is a registered remote server. SSH is the only entry point; User is the
@@ -62,6 +63,154 @@ type Config struct {
 	// UIPort is the localhost port the browser UI (`forge ui`) binds to. Zero
 	// means "unset" — callers fall back to DefaultUIPort.
 	UIPort int `json:"ui_port,omitempty"`
+	// PortRange is the span of host ports Forge may hand out, and how big a block
+	// each workspace gets. Zero values mean "unset" — see PortRangeOr.
+	PortRange PortRange `json:"port_range,omitempty"`
+	// PortReservations are blocks promised to workspaces that are still being
+	// created. See PortReservation.
+	PortReservations []PortReservation `json:"port_reservations,omitempty"`
+}
+
+// PortReservation is a block handed to a workspace that does not exist yet.
+//
+// It closes a window that is much wider than it looks. A block becomes visible to
+// the next allocation only once the workspace is on its host and answers
+// `workspace-list` — and creating one installs Claude Code over the network, so
+// that is minutes, not milliseconds. Two creations started in that window (the UI
+// daemon and a terminal, or two terminals) would each read the same "lowest free"
+// block and hand it out twice, breaking the one guarantee the whole scheme rests
+// on, and surfacing much later as a tunnel that cannot bind.
+//
+// Writing the reservation is a single atomic config update, so the two creations
+// see each other immediately rather than minutes apart.
+type PortReservation struct {
+	Workspace string `json:"workspace"`
+	Host      string `json:"host"`
+	Start     int    `json:"start"`
+	// At is the unix second the block was promised, so a reservation left behind by
+	// a creation that died can be ignored rather than blocking that block forever.
+	At int64 `json:"at"`
+}
+
+// ReservationTTL is how long a reservation counts for. Generous, because the thing
+// it covers is slow: a workspace creation installs Claude Code from the network and
+// a slow host can take minutes. The cost of being too generous is one unusable
+// block for half an hour; the cost of being too eager is the double-allocation this
+// exists to prevent.
+const ReservationTTL = 30 * time.Minute
+
+// ReservePortBlock promises a block to a workspace about to be created, replacing
+// any reservation that workspace already had (a retried creation reserves again).
+func (c *Config) ReservePortBlock(workspace, host string, start int, now time.Time) {
+	c.ReleasePortBlock(workspace)
+	c.PortReservations = append(c.PortReservations, PortReservation{
+		Workspace: workspace, Host: host, Start: start, At: now.Unix(),
+	})
+}
+
+// ReleasePortBlock forgets a workspace's reservation — called once the workspace
+// exists (its block is now on the host, which is the real record) and also when
+// creating it failed.
+func (c *Config) ReleasePortBlock(workspace string) {
+	kept := c.PortReservations[:0]
+	for _, r := range c.PortReservations {
+		if r.Workspace != workspace {
+			kept = append(kept, r)
+		}
+	}
+	c.PortReservations = kept
+}
+
+// ActiveReservations returns the reservations still worth honouring, dropping any
+// whose creation must have died. Expiry is what keeps a crashed `workspace create`
+// from stranding a block permanently.
+func (c *Config) ActiveReservations(now time.Time) []PortReservation {
+	cutoff := now.Add(-ReservationTTL).Unix()
+	var live []PortReservation
+	for _, r := range c.PortReservations {
+		if r.At >= cutoff {
+			live = append(live, r)
+		}
+	}
+	return live
+}
+
+// PortRange is the territory Forge allocates from: every workspace on every host
+// this client knows gets one immutable Block of it, and publishes only inside that
+// block.
+//
+// It lives in the CLIENT's config, not on a host, because it is the laptop that
+// suffers a collision. A workspace's remote port doubles as its local port, so the
+// range has to be unique across every server at once — and the client is the only
+// party that sees them all.
+//
+// Nothing depends on the range being remembered, which is why it is not copied to
+// the hosts: allocation avoids the blocks that actually exist (read back from every
+// host), not the ones the range predicts. A reinstalled laptop that falls back to
+// the default therefore still cannot collide — it would only start handing out
+// blocks from a different part of the space than the user originally picked.
+//
+// It is chosen once and deliberately generous: the port space costs nothing, and a
+// range wide enough that nobody ever runs out of blocks is what keeps block size
+// from being a decision anyone has to make.
+type PortRange struct {
+	Start int `json:"start,omitempty"`
+	End   int `json:"end,omitempty"`
+	// Block is how many ports each workspace gets. Uniform across the range, which
+	// is what makes a port readable: with blocks of 100 from 16000, 16104 is the
+	// fifth port of the second workspace. Per-workspace sizes would turn allocation
+	// into a packing problem with holes and make that arithmetic impossible.
+	Block int `json:"block,omitempty"`
+}
+
+// Defaults for PortRange. 16000–30000 in blocks of 100 is 140 workspaces, which is
+// far more than anyone will have — the range is free, so it is sized to make
+// "I ran out of blocks" a case that never happens rather than one to handle.
+//
+// High enough that nothing else is there: the bottom of the ephemeral range starts
+// at 32768 on Linux, and dev servers cluster in the low thousands (3000, 5173,
+// 8080), so this sits in the quiet gap between them.
+const (
+	DefaultPortStart = 16000
+	DefaultPortEnd   = 30000
+	DefaultPortBlock = 100
+)
+
+// PortRangeOr returns the configured range with any unset field defaulted, so
+// callers never have to check. A partially configured range is completed rather
+// than rejected: `forge ports range` can set the span without restating the block.
+func (c *Config) PortRangeOr() PortRange {
+	r := c.PortRange
+	if r.Start <= 0 {
+		r.Start = DefaultPortStart
+	}
+	if r.End <= 0 {
+		r.End = DefaultPortEnd
+	}
+	if r.Block <= 0 {
+		r.Block = DefaultPortBlock
+	}
+	return r
+}
+
+// Blocks returns every block position in the range, lowest first. The range is cut
+// into fixed-size blocks from Start; a tail too short for a whole block is not a
+// block, because a workspace with fewer ports than its neighbours would be a
+// surprise nobody asked for.
+func (r PortRange) Blocks() []int {
+	// A zero or negative block would step the loop below by nothing and never
+	// terminate. Callers are meant to come through PortRangeOr, which cannot
+	// produce one — but this is an exported method on an exported type, and a
+	// method whose contract is "call something else first or the process hangs"
+	// is a trap rather than an API.
+	if r.Block <= 0 || r.Start <= 0 {
+		return nil
+	}
+	var starts []int
+	for p := r.Start; p+r.Block-1 <= r.End; p += r.Block {
+		starts = append(starts, p)
+	}
+	return starts
 }
 
 // DefaultUIPort is the localhost port `forge ui` uses when none is configured.

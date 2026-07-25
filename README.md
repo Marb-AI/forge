@@ -145,8 +145,8 @@ forge workspace shop ssh
 #     cd shop
 #     git config user.name  "You"
 #     git config user.email "you@example.com"
-forge show ports myserver                         # paste the taken ports to Claude,
-#     …Claude edits .env / compose to pick free host ports…
+#     …Claude picks host ports from the workspace's own block — it knows the
+#        range without being told, so there is nothing to paste…
 #     make dev            # or `docker compose up`, whatever the project uses
 
 # Tunnel the dev servers and open the session:
@@ -220,8 +220,13 @@ UI
   forge ui status
   forge ui port <port>                             change the port it listens on
 
+Ports
+  forge ports                                      which workspace owns which block
+  forge ports range [<start>-<end>] [--block=N]     the span blocks are allocated from
+  forge ports assign [name]                        give a block to workspaces without one
+
 Info
-  forge show ports [host]                          ports in use on the server (paste to Claude)
+  forge show ports [host]                          ports in use on the server
 ```
 
 `claude renew` = stop + fresh start; use it to clear a bloated context window.
@@ -381,10 +386,27 @@ blip or a server reboot — a service that's momentarily down is fine, it just
 starts working once it's up. A wrong SSH key is reported instead of retried
 forever.
 
-**Ports: reported, not assigned.** Claude sets the ports on your project. Forge
-just tells you what's already taken — `forge show ports` lists everything
-listening on the server plus what it's forwarding. Paste it to Claude: *"pick
-ports that avoid these."*
+**Ports: every workspace owns a block.** Forge allocates from one range —
+`16000–30000` by default — and gives each workspace 100 consecutive host ports of
+it, once, at creation. That block never moves, so a port written into a compose
+file, an OAuth redirect URI or a CORS whitelist stays correct forever.
+
+The block is what removes you from the loop. Claude is *told* its range, in the
+workspace's own Claude memory, so it picks a port without asking anyone and without
+you pasting anything — and `forge-ports`, inside the workspace, says which of the
+range is already taken. You never look up a port again.
+
+Blocks are unique across **every** server you've registered, not just within one.
+That's what lets a workspace's host port double as the port on your laptop: no
+mapping to remember, and no chance that two servers hand out the same number and
+collide on the machine tunnelling both. It's also why allocating refuses to guess
+past an unreachable host — its blocks are unknown, not absent.
+
+```sh
+forge ports                       # which workspace owns which block
+forge ports range 16000-30000     # the span to allocate from (--block=N per workspace)
+forge ports assign                # give a block to workspaces made before this existed
+```
 
 **Parallel work stays isolated.** Each workspace scopes `docker compose` to its
 own project name automatically, so the same repo cloned into several workspaces
@@ -398,10 +420,10 @@ own project name automatically, so the same repo cloned into several workspaces
 on one project. Name the workspace after the project.
 
 **Parallel sessions on one repo.** Create several workspaces from the same repo
-(`crm`, `crm-2`, `crm-feature`). Compose projects/networks won't collide; give
-each a different host port (parameterize it in the repo's `.env` and let Claude
-pick free ones from `forge show ports`), then `forge forwarding start` tunnels
-each independently.
+(`crm`, `crm-2`, `crm-feature`). Compose projects and networks won't collide, and
+neither will their ports: each workspace holds its own block, so the same repo
+brought up in three of them lands on three different sets of host ports with no
+per-workspace editing. `forge forwarding start` then tunnels each independently.
 
 **Backend + frontend across two repos.** Run them as separate projects. If the
 frontend is a container, put it on the backend's docker network and reach it by
