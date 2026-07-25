@@ -294,23 +294,27 @@ same code, not a reimplementation that quietly drifts.
   terminal with syntax highlighting. Read-only is the point: Claude writes the
   code, you inspect it. Dotfiles at the root (plus `.git` and `.claude` anywhere)
   hide behind the eye toggle.
-- **The Claude panel**, above the servers: one group per Claude login, because a
-  rate limit belongs to an *account* — three workspaces signed into the same login
-  are all drawing down the same five-hour window. Each group carries that window
-  and the weekly one, ambering and reddening on the same thresholds as a disk, so
-  the login about to stop working sorts to the top and you see it before a turn
-  dies mid-sentence. Under the bars are the workspaces spending it, each with how
-  full its context is and what its session has cost — the bars say the allowance is
-  nearly gone, the rows say which workspace is eating it. Nothing is summed: the
-  window is one number reported by every workspace on the login, so the group shows
-  the freshest report and stamps it with how old that is. An organisation on API
-  credits has no such windows at all, so its group shows spend instead of two bars
-  implying an allowance that doesn't exist. Numbers come from Claude's own status
-  line, which Forge installs in each workspace — chaining any status line that was
-  already there rather than replacing it.
-- **The login and the server** as two chips under the topic: the topic says what a
-  workspace is doing, these say whose allowance it spends and whose disk it fills.
-  At twenty tabs that is three facts nobody keeps in their head per tab.
+- **The Claude panel**, above the servers: one line per Claude login — `5h 92%
+  7d 56%` — because a rate limit belongs to an *account*, and three workspaces
+  signed into the same login are all drawing down the same five-hour window. The
+  percentage ambers at three-quarters and reddens at ninety, the same thresholds as
+  a disk, and the fullest login sorts to the top, so you see the one about to stop
+  working before a turn dies mid-sentence. Nothing is summed: the window is one
+  number reported identically by every workspace on the login, so the line shows
+  the freshest report — and dims when that report is old, because these figures
+  only move while a workspace's Claude is running. A login on API credits has no
+  such windows at all and says so rather than showing two zeroes that would imply
+  an allowance it doesn't have. Which workspaces draw on a login, when each window
+  resets, and how old the reading is are in the tooltip; the panel itself stays
+  three lines for three logins. Numbers come from Claude's own status line, which
+  Forge installs in each workspace — chaining any status line that was already
+  there rather than replacing it.
+- **The login, the server and the context** as chips under the topic: the topic says
+  what a workspace is doing, these say whose allowance it spends, whose disk it
+  fills, and how full its context window is. Context lives here rather than in the
+  panel below because it belongs to one session — several workspaces on one login
+  have several different contexts, and a global figure would be a number about
+  nothing.
 - **The servers panel** under the tree: every registered machine with its CPU,
   memory and disk usage, refreshed every ten seconds. It answers the question you
   otherwise ssh in to ask — which box has room, and why one feels slow — and turns

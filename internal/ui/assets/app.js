@@ -706,21 +706,34 @@ function renderTopic() {
   box.title = t.ts ? `${t.text}\nSet ${fmtAge(age)} ago by Claude.` : t.text;
 }
 
-// ---- workspace identity (login + server) ------------------------------------
-// The topic says what this workspace is doing. These two say where it is doing it:
-// whose Claude allowance it spends, and whose disk it fills. Both are properties
-// you otherwise have to remember per tab, and at twenty tabs nobody does.
+// ---- workspace identity (login, server, context) ----------------------------
+// The topic says what this workspace is doing. These say where it is doing it —
+// whose Claude allowance it spends, whose disk it fills — and how full its context
+// window is. All three are properties of THIS workspace, which is why they live up
+// here with the topic rather than in the panel below: the context window is per
+// session, and a global view of it would be a number about nothing.
 //
 // The server is known from the workspace list, so it is there immediately. The
-// login has to come from the host, so its chip appears when the first usage poll
-// lands — and stays put afterwards, because a login does not change while you look
-// at it.
+// login and the context come from the host, so they appear when the first usage
+// poll lands.
 function renderIdent() {
   const box = document.getElementById("ws-ident");
   const loginChip = document.getElementById("ws-login");
   const serverChip = document.getElementById("ws-server");
+  const ctxChip = document.getElementById("ws-ctx");
   const ws = state.workspaces.find((w) => w.name === state.active);
   const u = state.active ? usage.data[state.active] : null;
+
+  // Percentage only, and no bar: this is the one number, and it sits on a line
+  // with two labels that also have to fit.
+  const ctx = contextPercent(u);
+  ctxChip.hidden = ctx == null;
+  if (ctx != null) {
+    ctxChip.textContent = `ctx ${Math.round(ctx)}%`;
+    ctxChip.title = `Context window: ${fmtTokens(u.context_used)} of ${fmtTokens(u.context_size)} tokens` +
+      (u.model ? `\n${u.model}` : "") +
+      "\nResets when the session is compacted or restarted.";
+  }
 
   const host = ws ? ws.host : "";
   serverChip.hidden = !host;
@@ -740,7 +753,15 @@ function renderIdent() {
     if (u.note) lines.push(u.note);
     loginChip.title = lines.join("\n");
   }
-  box.hidden = loginChip.hidden && serverChip.hidden;
+  box.hidden = loginChip.hidden && serverChip.hidden && ctxChip.hidden;
+}
+
+// Token counts are for the tooltip, where "128k of 200k" answers the question the
+// percentage can't: how much room is actually left.
+function fmtTokens(n) {
+  if (!n) return "0";
+  if (n < 1000) return String(n);
+  return `${Math.round(n / 1000)}k`;
 }
 
 // Merge a fresh server poll, keeping the activity count monotonic within a session:
@@ -979,7 +1000,7 @@ function loginGroups() {
         ts: 0,
         five: null,
         seven: null,
-        rows: [],
+        names: [],
       };
       groups.set(key, g);
     }
@@ -990,9 +1011,11 @@ function loginGroups() {
       g.five = u.five_hour || null;
       g.seven = u.seven_day || null;
     }
-    g.rows.push({ name: ws.name, host: ws.host, usage: u });
+    // Names only — which workspaces draw on this login is a tooltip question, not
+    // a row each.
+    g.names.push(ws.name);
   }
-  for (const g of groups.values()) g.rows.sort((a, b) => a.name.localeCompare(b.name));
+  for (const g of groups.values()) g.names.sort((a, b) => a.localeCompare(b));
   // Closest to a limit first: the panel exists to be glanced at, and the login
   // about to stop working is the one worth putting at the top. Groups with no
   // window to compare fall to the bottom in name order.
@@ -1018,67 +1041,62 @@ function renderLogins() {
   list.replaceChildren(...groups.map(loginGroupRow));
 }
 
+// One login, one line: who it is and how much of each window it has spent. No
+// bars and no rows underneath — a login's workspaces are named by the chip at the
+// top of the pane, and the point of this panel is to be readable at a glance
+// without pushing the file tree down. Everything that doesn't fit on the line
+// (which workspaces, when each window resets, how old the reading is) is in the
+// tooltip.
 function loginGroupRow(g) {
   const row = document.createElement("div");
-  row.className = "lgn";
+  row.className = "lgn" + (staleSample(g.ts) ? " stale" : "");
   row.title = loginTitle(g);
 
-  const head = document.createElement("div");
-  head.className = "lgn-head";
   const name = document.createElement("span");
   name.className = "lgn-name";
   // textContent, always: every string here came out of a file in a workspace home.
   name.textContent = g.label;
-  const note = document.createElement("span");
-  note.className = "lgn-note";
-  note.textContent = g.ts ? fmtAge(nowSeconds() - g.ts) : "no sample";
-  head.append(name, note);
-  row.appendChild(head);
+  row.appendChild(name);
 
-  // Only a Claude.ai subscription HAS these windows. For anything else their
-  // absence is the nature of the thing, so the group shows what it does have —
-  // what it has spent — rather than two bars implying an untouched allowance.
+  const windows = document.createElement("span");
+  windows.className = "lgn-windows";
   if (g.five || g.seven) {
-    row.append(
-      meterRow("5h", g.five ? g.five.used_percent : null),
-      meterRow("7d", g.seven ? g.seven.used_percent : null),
-    );
+    windows.append(windowSpan("5h", g.five), windowSpan("7d", g.seven));
   } else {
-    const spend = document.createElement("div");
-    spend.className = "lgn-spend";
-    spend.textContent = g.auth && g.auth !== "subscription"
-      ? `no limit windows · ${fmtCost(groupCost(g))} this session`
-      : `${fmtCost(groupCost(g))} this session`;
-    row.appendChild(spend);
+    // Only a Claude.ai subscription HAS these windows. For anything else their
+    // absence is the nature of the thing, not a gap in our reading — so say that
+    // rather than showing two figures that would imply an untouched allowance.
+    const none = document.createElement("span");
+    none.className = "lgn-nowin";
+    none.textContent = g.ts ? "no limit windows" : "no sample";
+    windows.appendChild(none);
   }
-
-  for (const r of g.rows) row.appendChild(loginWorkspaceRow(r));
+  row.appendChild(windows);
   return row;
 }
 
-// One workspace inside its login's group: what it is called, where it runs, how
-// full its context is and what it has cost. This is what makes a group actionable
-// — the window says the login is nearly spent, these rows say which workspace is
-// spending it.
-function loginWorkspaceRow(r) {
-  const el = document.createElement("div");
-  el.className = "lgn-ws" + (r.name === state.active ? " active" : "");
-  const name = document.createElement("span");
-  name.className = "lgn-ws-name";
-  name.textContent = r.name;
-  const figures = document.createElement("span");
-  figures.className = "lgn-ws-figures";
-  const bits = [];
-  const ctx = contextPercent(r.usage);
-  if (ctx != null) bits.push(`ctx ${Math.round(ctx)}%`);
-  if (r.usage.cost_usd) bits.push(fmtCost(r.usage.cost_usd));
-  // A dash where the figures would be, exactly as the meters do it: a workspace
-  // that has not reported has no numbers, and a row trailing off into blank space
-  // reads as a rendering fault rather than as an answer. Why it hasn't reported —
-  // never started, or a status line it doesn't own — is in the tooltip.
-  figures.textContent = bits.length ? bits.join(" · ") : "—";
-  el.append(name, figures);
-  el.title = workspaceUsageTitle(r);
+// One window as label + percentage, kept in one element so the pair reads as a
+// pair and never wraps apart. The percentage carries the colour — amber at 75,
+// red at 90, the same thresholds a disk uses — because that is the whole signal:
+// which login is about to stop working.
+function windowSpan(label, w) {
+  const el = document.createElement("span");
+  el.className = "win";
+  const tag = document.createElement("i");
+  tag.textContent = label;
+  const val = document.createElement("b");
+  if (!w) {
+    // The window exists for this login but was not in the last sample. A dash,
+    // as the server meters do it — not a confident 0%.
+    val.textContent = "—";
+    val.className = "unknown";
+  } else {
+    const pct = Math.max(0, Math.min(100, w.used_percent));
+    val.textContent = Math.round(pct) + "%";
+    if (pct >= 90) val.className = "crit";
+    else if (pct >= 75) val.className = "warn";
+  }
+  el.append(tag, val);
   return el;
 }
 
@@ -1087,53 +1105,31 @@ function contextPercent(u) {
   return Math.max(0, Math.min(100, (u.context_used / u.context_size) * 100));
 }
 
-function groupCost(g) {
-  return g.rows.reduce((sum, r) => sum + (r.usage.cost_usd || 0), 0);
-}
+// How old a reading may be before the row stops presenting it as current. These
+// figures only move while a workspace's Claude is running, so a group whose
+// members are all stopped would otherwise show an hour-old percentage as fact.
+// Dimming costs no space, which a visible age would.
+const SAMPLE_STALE_S = 600;
+function staleSample(ts) { return !ts || nowSeconds() - ts > SAMPLE_STALE_S; }
 
-// Cents matter here: a session that has cost eleven cents is a different fact from
-// one that has cost nothing, and "$0" for both would hide it.
-function fmtCost(usd) {
-  if (!usd) return "$0";
-  return usd < 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(usd < 10 ? 2 : 0)}`;
-}
-
-// The tooltip carries what the bars can't: which organisation, when each window
-// resets, and how old the reading is.
+// The tooltip carries everything the line has no room for: the organisation, the
+// workspaces on this login, when each window resets, and how old the reading is.
 function loginTitle(g) {
   const lines = [g.label + (g.org ? ` · ${g.org}` : "")];
   if (g.auth) lines.push(`Paying by: ${AUTH_LABELS[g.auth] || g.auth}`);
+  if (g.names.length) lines.push(`Workspaces: ${g.names.join(", ")}`);
   for (const [label, w] of [["5-hour", g.five], ["Weekly", g.seven]]) {
     if (!w) continue;
     const resets = w.resets_at ? `, resets ${fmtReset(w.resets_at)}` : "";
     lines.push(`${label}: ${Math.round(w.used_percent)}% used${resets}`);
   }
-  if (!g.five && !g.seven) {
+  if (!g.five && !g.seven && g.ts) {
     lines.push("No rate-limit windows — Claude.ai subscriptions only.");
   }
   lines.push(g.ts
     ? `Read ${fmtAge(nowSeconds() - g.ts)} ago. Figures only move while a workspace's Claude is running.`
     : "No workspace on this login has reported yet.");
   return lines.join("\n");
-}
-
-function workspaceUsageTitle(r) {
-  const u = r.usage;
-  const lines = [r.name + (r.host ? ` · ${r.host}` : "")];
-  if (u.model) lines.push(`Model: ${u.model}`);
-  if (u.context_size) {
-    lines.push(`Context: ${fmtTokens(u.context_used)} of ${fmtTokens(u.context_size)}`);
-  }
-  if (u.cost_usd) lines.push(`Session cost: ${fmtCost(u.cost_usd)}`);
-  if (u.note) lines.push(u.note + " — so this workspace cannot report its usage.");
-  if (!u.ts) lines.push("No sample yet: Claude has not rendered here since Forge asked it to.");
-  return lines.join("\n");
-}
-
-function fmtTokens(n) {
-  if (!n) return "0";
-  if (n < 1000) return String(n);
-  return `${Math.round(n / 1000)}k`;
 }
 
 // A reset is only ever a few hours or days out, so what you want is "in 2h", not a

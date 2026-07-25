@@ -270,45 +270,50 @@ button:hover { background: var(--bg-3); }
   scrollbar-gutter: stable;
 }
 #logins.collapsed #loginlist { display: none; }
-.lgn { padding: 4px 0 6px; }
-.lgn + .lgn { border-top: 1px solid var(--border); margin-top: 2px; }
-.lgn-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 3px; }
-/* The login gives way before its age does, on the same reasoning as a server's
-   name: a clipped address is still recognisable, while "4h" is either there or
-   meaningless. */
+/* One login per line: name on the left, its two windows on the right. Deliberately
+   flat — no bars, no nested rows — so three logins cost three lines and the file
+   tree keeps its height. */
+.lgn {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 11px;
+  min-width: 0;
+}
 .lgn-name {
   flex: 1 1 auto;
   min-width: 4em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
   color: var(--fg);
 }
-.lgn-note {
-  flex: none;
+/* The windows never wrap away from each other or from their labels: the pair IS
+   the reading, and "5h" on one line with "13%" on the next is noise. */
+.lgn-windows { flex: none; display: flex; gap: 8px; white-space: nowrap; }
+.win { display: inline-flex; align-items: baseline; gap: 3px; }
+/* The label is furniture, the number is the signal — so the label stays dim and
+   small while the value carries the weight and the colour. */
+.win > i {
+  font-style: normal;
   font-size: 10px;
   color: var(--fg-dim);
+}
+.win > b {
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
+  color: var(--fg);
 }
-/* What a group shows when it has no rate-limit windows to show — an organisation
-   on credits has none, and this is the number that means something to them. */
-.lgn-spend { font-size: 10.5px; color: var(--fg-dim); margin: 1px 0 2px; }
-/* The workspaces spending this login. Indented under the bars, because that is the
-   relationship: the bars are the account's, the rows are what draws on it. */
-.lgn-ws {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 1px 0 1px 8px;
-  font-size: 10.5px;
-  color: var(--fg-dim);
-  min-width: 0;
-}
-.lgn-ws-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lgn-ws-figures { flex: none; font-variant-numeric: tabular-nums; }
-/* The tab you are on, findable without reading the list. */
-.lgn-ws.active .lgn-ws-name { color: var(--fg); }
+/* Same thresholds as a disk, so a spent login reads like a full one. */
+.win > b.warn { color: #f5a623; }
+.win > b.crit { color: #e0574c; }
+.win > b.unknown { color: var(--fg-dim); }
+.lgn-nowin { flex: none; font-size: 10px; color: var(--fg-dim); }
+/* A reading nobody has refreshed for a while is history, not news — dimmed rather
+   than hidden, and the tooltip says how old it is. Same treatment as a stale
+   topic, for the same reason. */
+.lgn.stale { opacity: 0.55; }
 
 /* ---- servers panel (below the file tree) ----
    The tree owns the leftover height; this sits under it and takes only what its

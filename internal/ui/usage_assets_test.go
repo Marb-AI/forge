@@ -27,9 +27,46 @@ func TestLoginPanelGroupsByAccountAndDoesNotSumWindows(t *testing.T) {
 	if regexp.MustCompile(`(five|seven)[^\n]*\+=`).MatchString(body) {
 		t.Error("rate-limit windows must never be accumulated across a group")
 	}
-	// Cost and context ARE per workspace and stay on their own rows.
-	if !strings.Contains(body, "g.rows.push(") {
-		t.Error("each workspace should keep its own row inside the group")
+	// A group carries its members' names for the tooltip, not a row each — the panel
+	// is one line per login.
+	if !strings.Contains(body, "g.names.push(") {
+		t.Error("a group should collect its workspace names for the tooltip")
+	}
+}
+
+// The context window is a property of one session, so it belongs with the other
+// per-workspace facts at the top of the pane and nowhere else. A context figure in
+// the login panel would be a number about nothing: several workspaces on one login
+// have several different contexts.
+func TestContextIsShownPerWorkspaceOnly(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	index := embeddedAsset(t, "index.html")
+
+	if !strings.Contains(index, `id="ws-ctx"`) {
+		t.Error("index.html has no #ws-ctx — the per-workspace context has nowhere to render")
+	}
+	if !strings.Contains(jsFunc(t, js, "renderIdent"), "contextPercent(") {
+		t.Error("renderIdent should render the context percentage")
+	}
+	if strings.Contains(jsFunc(t, js, "loginGroupRow"), "contextPercent(") {
+		t.Error("the login panel must not show a context figure — it is per session, not per login")
+	}
+}
+
+// Money was deliberately taken out of this panel: nothing actionable follows from
+// it, and on a subscription the figure isn't even a bill. This test exists so it
+// doesn't drift back in.
+func TestLoginPanelShowsNoCosts(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	for _, fn := range []string{"loginGroupRow", "windowSpan", "loginTitle", "renderIdent"} {
+		body := jsFunc(t, js, fn)
+		if strings.Contains(body, "cost_usd") {
+			t.Errorf("%s() reads cost_usd — the panel deliberately shows no costs", fn)
+		}
+	}
+	// And no formatter survives to be called from anywhere else.
+	if strings.Contains(js, "function fmtCost(") {
+		t.Error("app.js still carries a currency formatter")
 	}
 }
 
@@ -40,7 +77,7 @@ func TestLoginPanelGroupsByAccountAndDoesNotSumWindows(t *testing.T) {
 func TestLoginPanelRendersTextNotMarkup(t *testing.T) {
 	js := embeddedAsset(t, "app.js")
 
-	for _, fn := range []string{"loginGroupRow", "loginWorkspaceRow", "renderIdent"} {
+	for _, fn := range []string{"loginGroupRow", "windowSpan", "renderIdent"} {
 		body := jsFunc(t, js, fn)
 		if strings.Contains(body, ".innerHTML") {
 			t.Errorf("%s() writes innerHTML; a login label is untrusted text", fn)
@@ -56,23 +93,27 @@ func TestLoginPanelRendersTextNotMarkup(t *testing.T) {
 }
 
 // Absent is not zero, all the way to the last pixel. An organisation on API credits
-// has no five-hour window at all, and two bars sitting at 0% would tell them they
-// have plenty of an allowance that does not exist — so a group with no windows shows
-// what it does have (spend) instead of bars.
+// has no five-hour window at all, and two figures reading 0% would tell them they
+// have plenty of an allowance that does not exist — so such a group says it has no
+// windows instead of showing numbers.
 func TestLoginPanelDoesNotDrawBarsForWindowsThatDoNotExist(t *testing.T) {
 	js := embeddedAsset(t, "app.js")
 	body := jsFunc(t, js, "loginGroupRow")
 
 	if !strings.Contains(body, "if (g.five || g.seven)") {
-		t.Error("the bars must be conditional on a window existing")
+		t.Error("the percentages must be conditional on a window existing")
 	}
-	if !strings.Contains(body, "lgn-spend") {
-		t.Error("a group with no windows should show its spend rather than empty bars")
+	if !strings.Contains(body, "lgn-nowin") {
+		t.Error("a group with no windows should say so rather than showing two figures")
 	}
-	// A window that exists but was not reported this round is a different thing
-	// again, and the meter's own "—" says so: null, not 0.
-	if !strings.Contains(body, "g.five ? g.five.used_percent : null") {
-		t.Error("a missing window must reach meterRow as null, so it renders as — and not as 0%")
+	// A window that exists for this login but was not in the last sample is a third
+	// state again, and it renders as the same dash an unmeasured disk gets — not 0%.
+	if !strings.Contains(jsFunc(t, js, "windowSpan"), `"—"`) {
+		t.Error("an unreported window must render as a dash, not as 0%")
+	}
+	// Flat by construction: no meters, so three logins cost three lines.
+	if strings.Contains(body, "meterRow(") {
+		t.Error("the login panel should not draw meters — it is one line per login")
 	}
 }
 
