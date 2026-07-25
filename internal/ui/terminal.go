@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,10 +128,15 @@ func startLocalTerm(cols, rows uint16) (*term, error) {
 		cmd.Dir = home
 	}
 	// The daemon has no terminal of its own, so TERM is whatever `forge ui`
-	// inherited — often unset. The far end is xterm.js: say so, or full-screen
-	// programs (vim, htop, less) draw as if into a teletype. Appended last, which
-	// is the value exec keeps when the environment already carries one.
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	// inherited — often unset, sometimes the terminal you started it from. The far
+	// end is xterm.js: say so, or full-screen programs (vim, htop, less) draw as
+	// if into a teletype. Replaced rather than appended, so the shell is handed
+	// exactly one TERM: os/exec would keep the last of two, but which of a
+	// duplicate pair wins is not a rule this should ask anyone to remember.
+	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "TERM=")
+	})
+	cmd.Env = append(env, "TERM=xterm-256color")
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {

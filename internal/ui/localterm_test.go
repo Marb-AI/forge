@@ -21,6 +21,9 @@ import (
 // or vim and htop draw into a teletype.
 func TestLocalShellIsALoginShellInYourHome(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
+	// The daemon inheriting a TERM of its own is the case worth pinning: it must be
+	// replaced, not joined by a second entry.
+	t.Setenv("TERM", "dumb")
 
 	tm, err := startLocalTerm(80, 24)
 	if err != nil {
@@ -36,8 +39,13 @@ func TestLocalShellIsALoginShellInYourHome(t *testing.T) {
 	if home, err := os.UserHomeDir(); err == nil && tm.cmd.Dir != home {
 		t.Errorf("shell starts in %q, want your home %q", tm.cmd.Dir, home)
 	}
-	if !hasEnv(tm.cmd.Env, "TERM", "xterm-256color") {
-		t.Error("TERM is not xterm-256color: full-screen programs would render for the daemon's terminal, not the browser's")
+	// Exactly one TERM, and the browser's: two entries would leave the answer to
+	// whoever reads the environment, and the daemon's own TERM is the one thing it
+	// must not pass on — it describes the terminal `forge ui` was started from, not
+	// the one on the other end of the stream.
+	if got := envValues(tm.cmd.Env, "TERM"); len(got) != 1 || got[0] != "xterm-256color" {
+		t.Errorf("TERM entries = %q, want exactly one xterm-256color — "+
+			"full-screen programs would render for the wrong terminal", got)
 	}
 
 	// And it has to actually BE a shell: run a command and read its output back.
@@ -51,17 +59,16 @@ func TestLocalShellIsALoginShellInYourHome(t *testing.T) {
 	}
 }
 
-// hasEnv reports whether key resolves to want in a process environment, taking
-// the LAST occurrence — which is the one exec keeps when a key appears twice
-// (startLocalTerm appends TERM onto an environment that may already carry one).
-func hasEnv(env []string, key, want string) bool {
-	got, found := "", false
+// envValues returns every value a process environment gives key — every one,
+// because "how many" is half of what the caller is checking.
+func envValues(env []string, key string) []string {
+	var vals []string
 	for _, kv := range env {
 		if v, ok := strings.CutPrefix(kv, key+"="); ok {
-			got, found = v, true
+			vals = append(vals, v)
 		}
 	}
-	return found && got == want
+	return vals
 }
 
 // readUntil reads the terminal until marker shows up or the deadline passes,
