@@ -121,6 +121,10 @@ type Usage struct {
 	CostUSD     float64     `json:"cost_usd,omitempty"`
 	FiveHour    *RateWindow `json:"five_hour,omitempty"`
 	SevenDay    *RateWindow `json:"seven_day,omitempty"`
+	// Note is the few words saying why a workspace's figures are missing or frozen
+	// when the reason is knowable — a higher-precedence Claude Code setting owning
+	// the status line Forge collects through. Empty when there is nothing to explain.
+	Note string `json:"note,omitempty"`
 }
 
 // HostStat is one registered server's resource usage, for the panel under the

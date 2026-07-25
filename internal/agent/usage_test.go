@@ -391,8 +391,8 @@ func TestEnsureUsageBackfills(t *testing.T) {
 
 	ensureUsageStatusLine("crm")
 	line := statusLineOf(t, filepath.Join(home, ".claude", "settings.json"))
-	if cmd, _ := line["command"].(string); cmd != usageStatusLineCmd {
-		t.Errorf("statusLine command = %q, want %q", cmd, usageStatusLineCmd)
+	if cmd, _ := line["command"].(string); cmd != usageStatusLinePrefix {
+		t.Errorf("statusLine command = %q, want %q", cmd, usageStatusLinePrefix)
 	}
 	// Without the timer the numbers stop moving the moment the session goes quiet,
 	// which is exactly when a stale rate limit is most misleading.
@@ -401,8 +401,11 @@ func TestEnsureUsageBackfills(t *testing.T) {
 	}
 
 	// An out-of-date entry from an earlier version is brought up to date.
-	writeFile(t, filepath.Join(home, ".claude", "settings.json"),
-		`{"statusLine":{"type":"command","command":`+usageStatusLineCmd+`,"refreshInterval":600}}`)
+	writeSettings(t, filepath.Join(home, ".claude", "settings.json"), map[string]any{
+		"statusLine": map[string]any{
+			"type": "command", "command": usageStatusLinePrefix, "refreshInterval": 600,
+		},
+	})
 	ensureUsageStatusLine("crm")
 	line = statusLineOf(t, filepath.Join(home, ".claude", "settings.json"))
 	if n, _ := line["refreshInterval"].(float64); int(n) != usageRefreshSeconds {
@@ -411,11 +414,11 @@ func TestEnsureUsageBackfills(t *testing.T) {
 	}
 }
 
-// Claude's status line is a single slot, and one somebody deliberately configured is
-// theirs. Forge does not take it — that workspace reports no sample, which is a
-// smaller loss than silently replacing a row of somebody's screen. (Contrast the
-// activity hooks, which are appended: there is room for everyone's.)
-func TestEnsureUsageStatusLineLeavesTheirsAlone(t *testing.T) {
+// Claude's status line is a single slot, so Forge has to take it — but taking it is
+// not the same as losing what was there. A command the workspace already had is
+// passed to ours as an argument and keeps printing, so somebody's prompt survives a
+// feature they never asked for.
+func TestEnsureUsageStatusLineChainsTheirs(t *testing.T) {
 	base := t.TempDir()
 	defer func(old string) { baseDir = old }(baseDir)
 	baseDir = base
@@ -424,22 +427,167 @@ func TestEnsureUsageStatusLineLeavesTheirsAlone(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	theirs := `{"statusLine":{"type":"command","command":"~/bin/my-prompt.sh"},` +
-		`"permissions":{"defaultMode":"bypassPermissions"}}`
-	writeFile(t, settings, theirs)
+	// A real one: the jq example from the docs, quotes and all, which is exactly the
+	// shape that a naive concatenation would mangle.
+	theirs := `jq -r '"[\(.model.display_name)] \(.workspace.current_dir)"'`
+	writeSettings(t, settings, map[string]any{
+		"statusLine":  map[string]any{"type": "command", "command": theirs},
+		"permissions": map[string]any{"defaultMode": "bypassPermissions"},
+	})
 
 	ensureUsageStatusLine("crm")
-	if got := string(mustRead(t, settings)); got != theirs {
-		t.Errorf("settings.json was rewritten:\n%s", got)
+	line := statusLineOf(t, settings)
+	cmd, _ := line["command"].(string)
+	if !strings.HasPrefix(cmd, usageStatusLinePrefix) {
+		t.Fatalf("command = %q, want it to start with ours", cmd)
+	}
+	if want := agentproto.ShellQuote(theirs); !strings.HasSuffix(cmd, want) {
+		t.Errorf("command = %q, want it to carry %s", cmd, want)
+	}
+	// Their other settings are untouched — we merge, we don't rewrite.
+	var m map[string]any
+	if err := json.Unmarshal(mustRead(t, settings), &m); err != nil {
+		t.Fatal(err)
+	}
+	if perms, _ := m["permissions"].(map[string]any); perms["defaultMode"] != "bypassPermissions" {
+		t.Errorf("the rest of settings.json did not survive: %v", m)
 	}
 
-	// Nor is a settings.json we cannot parse replaced wholesale — losing somebody's
+	// And our own upgrades carry it: the tail is theirs and travels as found, so a
+	// changed refresh interval must not quietly drop their command.
+	writeSettings(t, settings, map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": cmd, "refreshInterval": 600},
+	})
+	ensureUsageStatusLine("crm")
+	if got, _ := statusLineOf(t, settings)["command"].(string); got != cmd {
+		t.Errorf("after a refresh the command became %q, want %q", got, cmd)
+	}
+
+	// A settings.json we cannot parse is not replaced wholesale — losing somebody's
 	// configuration costs more than this workspace's usage numbers are worth.
 	broken := "{ this is not json"
 	writeFile(t, settings, broken)
 	ensureUsageStatusLine("crm")
 	if got := string(mustRead(t, settings)); got != broken {
 		t.Errorf("a malformed settings.json was overwritten:\n%s", got)
+	}
+}
+
+// The other half of chaining: the script must actually run what it was handed, give
+// it the same stdin Claude Code gave us (a status line is entitled to the session
+// snapshot, not to our leftovers), and print it as its own row above ours.
+func TestUsageCmdRunsTheChainedStatusLine(t *testing.T) {
+	requirePython(t)
+	base := t.TempDir()
+	defer func(old string) { baseDir = old }(baseDir)
+	baseDir = base
+
+	home := filepath.Join(base, "crm")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUsageCmd(home); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reads the payload from ITS stdin, so this passes only if we forwarded it.
+	out := runUsageCmd(t, home, statusLinePayload,
+		`printf 'mine: '; sed -n 's/.*"session_id": "\([^"]*\)".*/\1/p'`)
+	rows := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("output was %d rows (%q), want theirs then ours", len(rows), out)
+	}
+	if !strings.Contains(rows[0], "mine: 8f96089e-1f8d-4d6f-b072-cc18fb6afac3") {
+		t.Errorf("their row = %q, want it fed the session snapshot", rows[0])
+	}
+	if !strings.Contains(rows[1], "ctx 64%") {
+		t.Errorf("our row = %q, want our own summary below theirs", rows[1])
+	}
+	if _, ok := readUsage("crm"); !ok {
+		t.Error("chaining cost us the sample")
+	}
+
+	// A command of theirs that fails is their row's problem, not ours: we still print
+	// and still file the sample.
+	out = runUsageCmd(t, home, statusLinePayload, "exit 3")
+	if !strings.Contains(out, "ctx 64%") {
+		t.Errorf("a failing chained command took our row with it: %q", out)
+	}
+	if _, ok := readUsage("crm"); !ok {
+		t.Error("a failing chained command cost us the sample")
+	}
+}
+
+// Our entry can be perfectly installed and still never run: Claude Code merges
+// settings from scopes that outrank the user-level file we write, and a managed
+// policy cannot be overridden by anything at all. Without noticing, such a workspace
+// looks exactly like one nobody has opened — so the reason is reported.
+func TestStatusLineTakenBy(t *testing.T) {
+	base := t.TempDir()
+	managedDir := t.TempDir()
+	defer func(oldBase, oldPath, oldDir string) {
+		baseDir, managedSettingsPath, managedSettingsDir = oldBase, oldPath, oldDir
+	}(baseDir, managedSettingsPath, managedSettingsDir)
+	baseDir = base
+	managedSettingsPath = filepath.Join(managedDir, "managed-settings.json")
+	managedSettingsDir = filepath.Join(managedDir, "managed-settings.d")
+
+	claudeDir := filepath.Join(base, "crm", ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(managedSettingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ours in the user file is the whole point: that alone is not a takeover.
+	writeSettings(t, filepath.Join(claudeDir, "settings.json"), map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": usageStatusLinePrefix},
+	})
+	if got := statusLineTakenBy("crm"); got != "" {
+		t.Errorf("statusLineTakenBy = %q with only our own entry, want nothing", got)
+	}
+
+	// Local scope outranks user scope.
+	local := filepath.Join(claudeDir, "settings.local.json")
+	writeSettings(t, local, map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": "~/bin/mine.sh"},
+	})
+	if got := statusLineTakenBy("crm"); got != "settings.local.json" {
+		t.Errorf("statusLineTakenBy = %q, want settings.local.json", got)
+	}
+	if err := os.Remove(local); err != nil {
+		t.Fatal(err)
+	}
+
+	// Managed policy outranks everything, including the command line — the case a
+	// company hits and can do nothing about.
+	writeSettings(t, managedSettingsPath, map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": "/opt/corp/statusline"},
+	})
+	if got := statusLineTakenBy("crm"); got != "managed policy" {
+		t.Errorf("statusLineTakenBy = %q, want managed policy", got)
+	}
+	if err := os.Remove(managedSettingsPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Managed settings also arrive as drop-ins.
+	writeSettings(t, filepath.Join(managedSettingsDir, "50-statusline.json"), map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": "/opt/corp/statusline"},
+	})
+	if got := statusLineTakenBy("crm"); got != "managed policy" {
+		t.Errorf("a managed drop-in was missed: statusLineTakenBy = %q", got)
+	}
+
+	// A file that mentions statusLine without setting a command claims nothing, and
+	// nor does one we cannot read: a wrong explanation is worse than none.
+	writeSettings(t, filepath.Join(managedSettingsDir, "50-statusline.json"), map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": "   "},
+	})
+	writeFile(t, filepath.Join(claudeDir, "settings.local.json"), "{ not json")
+	if got := statusLineTakenBy("crm"); got != "" {
+		t.Errorf("statusLineTakenBy = %q, want nothing claimed", got)
 	}
 }
 
@@ -481,8 +629,14 @@ func TestEnsureUsageStatusLineStopsWriting(t *testing.T) {
 // reverse also holds: an API-credit workspace has no login and must still appear.
 func TestOpUsageReportsEitherHalf(t *testing.T) {
 	base := t.TempDir()
-	defer func(old string) { baseDir = old }(baseDir)
+	// Pointed at nothing, so a managed policy on the machine running the tests can't
+	// make the answer depend on where it ran.
+	defer func(oldBase, oldPath, oldDir string) {
+		baseDir, managedSettingsPath, managedSettingsDir = oldBase, oldPath, oldDir
+	}(baseDir, managedSettingsPath, managedSettingsDir)
 	baseDir = base
+	managedSettingsPath = filepath.Join(t.TempDir(), "absent.json")
+	managedSettingsDir = filepath.Join(t.TempDir(), "absent.d")
 
 	// Signed in, never rendered: login only.
 	signedIn := filepath.Join(base, "signedin")
@@ -504,12 +658,26 @@ func TestOpUsageReportsEitherHalf(t *testing.T) {
 	writeFile(t, filepath.Join(credits, agentproto.UsageFile),
 		`{"ts":1784386328,"context_used":1000,"context_size":200000,"cost_usd":2.5}`)
 
+	// Nothing of its own to report, but a reason it never will: a status line in a
+	// scope that outranks ours. Reportable precisely because there are no numbers.
+	outranked := filepath.Join(base, "outranked")
+	if err := os.MkdirAll(filepath.Join(outranked, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSettings(t, filepath.Join(outranked, ".claude", "settings.local.json"), map[string]any{
+		"statusLine": map[string]any{"type": "command", "command": "~/bin/mine.sh"},
+	})
+
 	// Nobody has ever run anything here: no login, no sample, nothing to say.
 	if err := os.MkdirAll(filepath.Join(base, "fresh"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	res := captureUsage(t)
+	if got := res.Usage["outranked"]; !strings.Contains(got.Note, "settings.local.json") {
+		t.Errorf("outranked workspace note = %q, want it to name what owns the status line", got.Note)
+	}
+	delete(res.Usage, "outranked")
 	if len(res.Usage) != 2 {
 		t.Fatalf("reported %d workspaces (%v), want the two that have something to say",
 			len(res.Usage), res.Usage)
@@ -551,11 +719,12 @@ func captureUsage(t *testing.T) agentproto.UsageResult {
 }
 
 // runUsageCmd feeds a statusLine payload to the installed command and returns what
-// it printed. A non-zero exit is a failure in itself: Claude Code runs this on every
-// render, and a command that errors is a broken status line.
-func runUsageCmd(t *testing.T, home, payload string) string {
+// it printed, optionally with a chained status line of the user's as its argument. A
+// non-zero exit is a failure in itself: Claude Code runs this on every render, and a
+// command that errors is a broken status line.
+func runUsageCmd(t *testing.T, home, payload string, chained ...string) string {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(home, usageCmdRelPath))
+	cmd := exec.Command(filepath.Join(home, usageCmdRelPath), chained...)
 	cmd.Env = append(os.Environ(), "HOME="+home)
 	cmd.Stdin = strings.NewReader(payload)
 	out, err := cmd.CombinedOutput()
@@ -563,6 +732,17 @@ func runUsageCmd(t *testing.T, home, payload string) string {
 		t.Fatalf("forge-usage on %q: %v: %s", payload, err, out)
 	}
 	return string(out)
+}
+
+// writeSettings writes a settings.json from a map, so a test never has to escape a
+// command into a JSON string literal by hand.
+func writeSettings(t *testing.T, path string, m map[string]any) {
+	t.Helper()
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(data))
 }
 
 // statusLineOf reads back the statusLine entry of a settings.json.

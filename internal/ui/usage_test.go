@@ -53,7 +53,12 @@ func TestUsageEndpointReturnsMap(t *testing.T) {
 func TestUsageEndpointKeepsAbsentWindowsAbsent(t *testing.T) {
 	s, h := testServer(t)
 	s.deps.WorkspaceUsage = func() (map[string]Usage, error) {
-		return map[string]Usage{"api": {Auth: "api", TS: 1700000000, CostUSD: 12.5}}, nil
+		return map[string]Usage{
+			"api": {Auth: "api", TS: 1700000000, CostUSD: 12.5},
+			// No numbers at all, and the reason why — the one case where a row exists
+			// solely to explain itself.
+			"corp": {Note: "status line owned by managed policy"},
+		}, nil
 	}
 	body := authorized(h, "/api/usage").Body.String()
 	if strings.Contains(body, "five_hour") || strings.Contains(body, "seven_day") {
@@ -66,6 +71,9 @@ func TestUsageEndpointKeepsAbsentWindowsAbsent(t *testing.T) {
 	}
 	if got["api"].Account.UUID != "" || got["api"].Auth != "api" {
 		t.Errorf("credit workspace = %+v, want no login and the auth kind that explains why", got["api"])
+	}
+	if got["corp"].Note != "status line owned by managed policy" {
+		t.Errorf("note = %q, want the reason there are no numbers", got["corp"].Note)
 	}
 }
 

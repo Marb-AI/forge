@@ -176,6 +176,12 @@ type Usage struct {
 	// session.
 	FiveHour *RateWindow `json:"five_hour,omitempty"`
 	SevenDay *RateWindow `json:"seven_day,omitempty"`
+	// Note is the few words explaining why this workspace's figures are missing or
+	// frozen when the reason is knowable and is not "Claude hasn't run" — today, a
+	// higher-precedence Claude Code setting owning the status line we collect
+	// through. Empty when there is nothing to explain. Same idea as HostStats' note:
+	// a panel saying why it has no number beats one that just doesn't.
+	Note string `json:"note,omitempty"`
 }
 
 // UsageResult is returned by `forge-agent workspace-usage`: one entry per
@@ -328,20 +334,20 @@ func ResumeClaude(workspace, stamp string) string {
 	name := workspace + " " + stamp
 	prompt := name + " — continue from memory: read the handoff you just wrote and carry on from it."
 
-	named := "claude -n " + shellQuote(name) + " " + shellQuote(prompt)
-	plain := "claude " + shellQuote(prompt)
+	named := "claude -n " + ShellQuote(name) + " " + ShellQuote(prompt)
+	plain := "claude " + ShellQuote(prompt)
 	// Asking Claude what it supports beats guessing from a version string, and it
 	// costs one local --help on a path that already takes minutes.
 	inner := "if claude --help 2>/dev/null | grep -q -- --name; then " + named + "; else " + plain + "; fi"
 
-	return SourceEnv + "tmux new -d -s " + TmuxSession + " " + shellQuote(inner)
+	return SourceEnv + "tmux new -d -s " + TmuxSession + " " + ShellQuote(inner)
 }
 
-// shellQuote wraps s so a POSIX shell reads it back as one literal argument.
+// ShellQuote wraps s so a POSIX shell reads it back as one literal argument.
 // These commands are assembled here and run verbatim on the server, through two
 // shells (ssh's, then the one tmux starts), so each layer has to be quoted on the
 // way in — an em dash or an apostrophe in a prompt must not become syntax.
-func shellQuote(s string) string {
+func ShellQuote(s string) string {
 	// A single quote can't appear inside single quotes, so each one closes the
 	// string, contributes an escaped quote, and opens it again: ' -> '\''
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

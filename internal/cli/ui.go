@@ -345,6 +345,7 @@ func workspaceUsageInfo() (map[string]ui.Usage, error) {
 			CostUSD:     u.CostUSD,
 			FiveHour:    window(u.FiveHour),
 			SevenDay:    window(u.SevenDay),
+			Note:        u.Note,
 		}
 	}
 	return out, nil

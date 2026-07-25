@@ -579,10 +579,15 @@ func opUsage() int {
 		account, haveAccount := readAccount(name)
 		u.Account = account
 		u.Auth = detectAuth(name, haveAccount)
+		if taken := statusLineTakenBy(name); taken != "" {
+			u.Note = "status line owned by " + taken
+		}
 		// A workspace paying by credits has no login and no windows, so it would
 		// otherwise vanish from the panel entirely — the auth kind is enough to report
 		// it, and its context and spend are exactly what such a workspace has to show.
-		if haveSample || haveAccount || u.Auth != agentproto.AuthUnknown {
+		// A note is reportable on its own for the same reason: it exists precisely
+		// where there are no numbers to carry it.
+		if haveSample || haveAccount || u.Auth != agentproto.AuthUnknown || u.Note != "" {
 			res.Usage[name] = u
 		}
 	}
@@ -684,6 +689,67 @@ func parseAccount(data []byte) (agentproto.Account, bool) {
 	}, true
 }
 
+// Claude Code merges settings from several scopes, and two of them outrank the
+// user-level file the agent writes. Paths, not constants, so tests can point them
+// somewhere writable.
+//
+// Project scope does not appear here, and that is not an omission: it is
+// `.claude/settings.json` read from the directory the session runs in, and Forge
+// starts Claude in the workspace home — where that path IS the user file we write.
+// A cloned repo's settings only outrank ours for a session started inside the repo,
+// which is not the session Forge attaches to.
+var (
+	managedSettingsPath = "/etc/claude-code/managed-settings.json"
+	managedSettingsDir  = "/etc/claude-code/managed-settings.d"
+)
+
+// statusLineTakenBy names the higher-precedence scope that defines a status line for
+// this workspace's sessions, or "" when ours is the one that runs.
+//
+// Without this the feature has a silent blind spot. Our entry can be perfectly
+// installed and still never execute — an organisation that sets a status line by
+// managed policy cannot be overridden by anything, by design — and the workspace
+// would simply report no numbers, indistinguishable from one nobody has opened. The
+// UI can say "a managed policy owns the status line here"; it cannot guess it.
+func statusLineTakenBy(name string) string {
+	local := filepath.Join(baseDir, name, ".claude", "settings.local.json")
+	if definesStatusLine(local) {
+		return "settings.local.json"
+	}
+	// Managed policy is host-wide, so every workspace on the box is in the same
+	// position, and it wins over everything including the command line.
+	if definesStatusLine(managedSettingsPath) {
+		return "managed policy"
+	}
+	drops, _ := filepath.Glob(filepath.Join(managedSettingsDir, "*.json"))
+	for _, drop := range drops {
+		if definesStatusLine(drop) {
+			return "managed policy"
+		}
+	}
+	return ""
+}
+
+// definesStatusLine reports whether a settings file sets statusLine at all. An
+// unreadable or malformed file defines nothing: this decides what to tell the user
+// about missing numbers, and a wrong claim there is worse than silence.
+func definesStatusLine(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal(data, &m) != nil {
+		return false
+	}
+	line, ok := m["statusLine"].(map[string]any)
+	if !ok {
+		return false
+	}
+	cmd, _ := line["command"].(string)
+	return strings.TrimSpace(cmd) != ""
+}
+
 // detectAuth works out how a workspace's Claude pays for itself, so the UI can
 // group and label it honestly. A Claude.ai subscription has 5-hour and weekly
 // windows; an organisation on API credits, Bedrock or Vertex has none — and those
@@ -776,11 +842,25 @@ func workspaceEnv(name string) (map[string]string, bool) {
 // install already puts things.
 const usageCmdRelPath = ".local/bin/forge-usage"
 
-// usageStatusLineCmd is what settings.json runs. Spelled with $HOME rather than as
-// a bare name on PATH: PATH does carry ~/.local/bin (see writeEnvFile), but only
-// for a session started through the workspace env file, and a status line that
-// quietly does nothing in the other case would be very hard to notice.
-const usageStatusLineCmd = `"$HOME/` + usageCmdRelPath + `"`
+// usageStatusLinePrefix is the command settings.json runs, before any status line
+// of the user's chained onto it. Spelled with $HOME rather than as a bare name on
+// PATH: PATH does carry ~/.local/bin (see writeEnvFile), but only for a session
+// started through the workspace env file, and a status line that quietly does
+// nothing in the other case would be very hard to notice.
+const usageStatusLinePrefix = `"$HOME/` + usageCmdRelPath + `"`
+
+// usageStatusLine builds the command, keeping tail — an already shell-quoted
+// argument holding a status line the workspace had before us. Claude's status line
+// is a single slot, so taking it over is the only way in; passing the old command
+// along as an argument, for our script to run and print, is what makes that a
+// takeover rather than a loss. The tail travels verbatim once quoted, so carrying it
+// across our own upgrades costs no unquoting and cannot corrupt it.
+func usageStatusLine(tail string) string {
+	if tail == "" {
+		return usageStatusLinePrefix
+	}
+	return usageStatusLinePrefix + " " + tail
+}
 
 // usageRefreshSeconds re-runs the status line on a timer as well as on session
 // events. It is the whole reason the rate-limit numbers can be trusted: the event
@@ -805,10 +885,14 @@ const usageCmdScript = `#!/usr/bin/env python3
 # forge-usage — the Claude Code status line Forge installs in each workspace.
 # It writes ~/` + agentproto.UsageFile + ` for the Forge agent to read, and prints
 # a one-line summary for whoever is looking at the session.
-import json, os, sys, tempfile, time
+#
+# A status line the workspace already had is passed to us as our first argument and
+# still gets to print, above our own row: the slot is single, the screen is not.
+import json, os, subprocess, sys, tempfile, time
 
+raw = sys.stdin.read()
 try:
-    d = json.loads(sys.stdin.read() or "{}")
+    d = json.loads(raw or "{}")
 except Exception:
     d = {}
 
@@ -852,6 +936,19 @@ try:
     os.replace(tmp, path)
 except Exception:
     pass  # the status line still has a line to print
+
+# Theirs first, and given the same stdin we were given — a status line command is
+# entitled to the session snapshot, not to whatever we left of it. Its failure is
+# not ours to report: a bad command of theirs costs its own row and nothing else.
+if len(sys.argv) > 1 and sys.argv[1].strip():
+    try:
+        r = subprocess.run(["sh", "-c", sys.argv[1]], input=raw,
+                           capture_output=True, text=True, timeout=5)
+        theirs = r.stdout.rstrip("\n")
+        if theirs:
+            print(theirs)
+    except Exception:
+        pass
 
 bits = []
 if sample["model"]:
@@ -902,14 +999,14 @@ func ensureUsageCmd(name string) {
 // ensureUsageStatusLine points a workspace's settings.json at that command, for
 // workspaces that predate this. Best-effort and quiet, like ensureActivityHooks.
 //
-// It refuses in one case, and that refusal is the design: a status line the
-// workspace user configured themselves stays. Claude's status line is one row of
-// somebody's screen that they deliberately set up, and Forge does not get to take
-// it — such a workspace reports no sample, and the UI shows it as having none.
-// (Hooks are appended, which is why setActivityHooks can be less careful: there is
-// room for everyone's. A status line is a single slot.)
+// A status line the workspace already had is not discarded but chained: ours runs,
+// files the sample, then runs theirs and prints its output above our row. The slot
+// is single — unlike hooks, which is why setActivityHooks can simply append — but
+// the screen is not, and a workspace that reported nothing because somebody liked
+// their prompt was the wrong trade.
 func ensureUsageStatusLine(name string) {
 	settings := filepath.Join(baseDir, name, ".claude", "settings.json")
+	tail := ""
 	if data, err := os.ReadFile(settings); err == nil {
 		var m map[string]any
 		// A settings.json we cannot parse is one mergeJSON would replace wholesale.
@@ -919,11 +1016,18 @@ func ensureUsageStatusLine(name string) {
 			return
 		}
 		if line, ok := m["statusLine"].(map[string]any); ok {
-			if cmd, _ := line["command"].(string); !strings.Contains(cmd, usageCmdRelPath) {
-				return // theirs, untouched
-			}
-			if usageStatusLineCurrent(line) {
-				return // already ours, already current: no write at all
+			raw, _ := line["command"].(string) // a non-string command is no command
+			cmd := strings.TrimSpace(raw)
+			switch {
+			case strings.HasPrefix(cmd, usageStatusLinePrefix):
+				if usageStatusLineCurrent(line) {
+					return // already ours, already current: no write at all
+				}
+				// Ours, but out of date. Whatever we chained last time is still theirs
+				// and still quoted, so it comes along unexamined.
+				tail = strings.TrimSpace(strings.TrimPrefix(cmd, usageStatusLinePrefix))
+			case cmd != "":
+				tail = agentproto.ShellQuote(cmd) // theirs: take the slot, keep the line
 			}
 		}
 	}
@@ -934,7 +1038,7 @@ func ensureUsageStatusLine(name string) {
 	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
 		return
 	}
-	if err := mergeJSON(settings, setUsageStatusLine); err != nil {
+	if err := mergeJSON(settings, func(m map[string]any) { setUsageStatusLine(m, tail) }); err != nil {
 		return
 	}
 	// The workspace user owns its config; the agent runs as root. The directory too,
@@ -942,23 +1046,25 @@ func ensureUsageStatusLine(name string) {
 	_, _ = run("chown", name+":"+name, filepath.Dir(settings), settings)
 }
 
-// setUsageStatusLine writes the statusLine entry. The caller has already decided
-// there is nothing of the user's to protect here.
-func setUsageStatusLine(m map[string]any) {
+// setUsageStatusLine writes the statusLine entry, chaining tail (an already
+// shell-quoted status line of the user's) when there is one.
+func setUsageStatusLine(m map[string]any, tail string) {
 	m["statusLine"] = map[string]any{
 		"type":            "command",
-		"command":         usageStatusLineCmd,
+		"command":         usageStatusLine(tail),
 		"refreshInterval": usageRefreshSeconds,
 	}
 }
 
 // usageStatusLineCurrent reports whether an existing (ours) statusLine entry is
-// what we would write today. Comparing the values rather than just the command is
-// what lets a change to the refresh interval reach every workspace on the next
-// sweep, the same way ensureUsageCmd compares the script's contents.
+// what we would write today. It checks the interval rather than the whole command,
+// because the command's tail is the user's and is carried forward as found —
+// comparing that too would rewrite the file forever over a difference we put there
+// on purpose. Checking the interval at all is what lets a change to it reach every
+// workspace on the next sweep, the way ensureUsageCmd compares the script.
 func usageStatusLineCurrent(line map[string]any) bool {
 	cmd, _ := line["command"].(string)
-	if cmd != usageStatusLineCmd {
+	if !strings.HasPrefix(strings.TrimSpace(cmd), usageStatusLinePrefix) {
 		return false
 	}
 	// JSON numbers decode as float64; a settings file written by hand may hold an
@@ -1617,8 +1723,8 @@ func writeClaudeConfig(home string) error {
 	}
 	return mergeJSON(filepath.Join(claudeDir, "settings.json"), func(m map[string]any) {
 		childMap(m, "permissions")["defaultMode"] = "bypassPermissions"
-		setActivityHooks(m)   // report Claude's attention state to the UI
-		setUsageStatusLine(m) // report its context, cost and rate limits too
+		setActivityHooks(m)       // report Claude's attention state to the UI
+		setUsageStatusLine(m, "") // report its context, cost and rate limits too
 	})
 }
 
