@@ -106,10 +106,11 @@ func TestLoginPanelDoesNotDrawBarsForWindowsThatDoNotExist(t *testing.T) {
 	if !strings.Contains(body, "lgn-nowin") {
 		t.Error("a group with no windows should say so rather than showing two figures")
 	}
-	// A window that exists for this login but was not in the last sample is a third
-	// state again, and it renders as the same dash an unmeasured disk gets — not 0%.
-	if !strings.Contains(jsFunc(t, js, "windowSpan"), `"—"`) {
-		t.Error("an unreported window must render as a dash, not as 0%")
+	// A window the login HAS but that wasn't in the last sample reads as 0%, the way
+	// Claude's own usage display puts it — the distinction that matters is the one
+	// above: no windows at all is not zero.
+	if body := jsFunc(t, js, "windowSpan"); !strings.Contains(body, "w ? Math.max(") {
+		t.Error("an unreported window should read as 0%, not as a dash")
 	}
 	// Flat by construction: no meters, so three logins cost three lines.
 	if strings.Contains(body, "meterRow(") {

@@ -308,7 +308,6 @@ button:hover { background: var(--bg-3); }
 /* Same thresholds as a disk, so a spent login reads like a full one. */
 .win > b.warn { color: #f5a623; }
 .win > b.crit { color: #e0574c; }
-.win > b.unknown { color: var(--fg-dim); }
 .lgn-nowin { flex: none; font-size: 10px; color: var(--fg-dim); }
 /* A reading nobody has refreshed for a while is history, not news — dimmed rather
    than hidden, and the tooltip says how old it is. Same treatment as a stale

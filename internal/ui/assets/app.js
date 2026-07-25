@@ -1085,17 +1085,14 @@ function windowSpan(label, w) {
   const tag = document.createElement("i");
   tag.textContent = label;
   const val = document.createElement("b");
-  if (!w) {
-    // The window exists for this login but was not in the last sample. A dash,
-    // as the server meters do it — not a confident 0%.
-    val.textContent = "—";
-    val.className = "unknown";
-  } else {
-    const pct = Math.max(0, Math.min(100, w.used_percent));
-    val.textContent = Math.round(pct) + "%";
-    if (pct >= 90) val.className = "crit";
-    else if (pct >= 75) val.className = "warn";
-  }
+  // A window this login has but that wasn't in the last sample reads as 0%, the way
+  // Claude's own usage display puts it. It is the friendlier reading of the same
+  // situation: nothing spent that we know of. (A login with NO windows is a
+  // different thing and never reaches here — see loginGroupRow.)
+  const pct = w ? Math.max(0, Math.min(100, w.used_percent)) : 0;
+  val.textContent = Math.round(pct) + "%";
+  if (pct >= 90) val.className = "crit";
+  else if (pct >= 75) val.className = "warn";
   el.append(tag, val);
   return el;
 }
@@ -1119,7 +1116,12 @@ function loginTitle(g) {
   if (g.auth) lines.push(`Paying by: ${AUTH_LABELS[g.auth] || g.auth}`);
   if (g.names.length) lines.push(`Workspaces: ${g.names.join(", ")}`);
   for (const [label, w] of [["5-hour", g.five], ["Weekly", g.seven]]) {
-    if (!w) continue;
+    if (!w) {
+      // The line reads 0% for this one; the tooltip is where "0% of what we last
+      // heard" can be said in full.
+      if (g.five || g.seven) lines.push(`${label}: not in the last reading`);
+      continue;
+    }
     const resets = w.resets_at ? `, resets ${fmtReset(w.resets_at)}` : "";
     lines.push(`${label}: ${Math.round(w.used_percent)}% used${resets}`);
   }
