@@ -142,7 +142,7 @@ func Run(dir string, cfg *config.Config, observe Observer) error {
 	// Start from the cache immediately: waiting for the first poll would leave a
 	// freshly spawned supervisor with no tunnels for as long as the hosts take to
 	// answer, and those are the tunnels the user already had a moment ago.
-	s.reconcile(ctx, cfg, cachedTunnels(cfg))
+	s.reconcile(ctx, cfg, cachedTunnels(cfg), allHosts(cfg))
 
 	go s.pollLoop(ctx, observe)
 	go s.statusLoop(ctx)
@@ -168,8 +168,10 @@ func (s *Supervisor) pollLoop(ctx context.Context, observe Observer) {
 	for {
 		cfg, err := config.Load()
 		if err == nil {
-			if want, ok := s.observeAll(cfg, observe); ok {
-				s.reconcile(ctx, cfg, want)
+			// Only the hosts that answered are in scope: a silent one's tunnels are
+			// left running rather than read as "publishes nothing".
+			if want, answered := s.observeAll(cfg, observe); len(answered) > 0 {
+				s.reconcile(ctx, cfg, want, answered)
 			}
 		}
 		select {
@@ -181,23 +183,27 @@ func (s *Supervisor) pollLoop(ctx context.Context, observe Observer) {
 }
 
 // observeAll asks each host with workspaces on it what they publish, and returns
-// the tunnels that implies. The bool reports whether ANY host answered: when none
-// did, the caller keeps what it has rather than tearing every tunnel down over a
-// closed laptop lid or a flaky network.
+// the tunnels that implies together with the set of hosts that actually answered.
+//
+// That second return is not bookkeeping — it is the scope of everything the caller
+// may act on. A host that did not answer said nothing, which is not the same as
+// saying it publishes nothing: acting on the difference would stop every tunnel to
+// a server that was briefly unreachable, which is precisely the failure this loop
+// must not have. Its tunnels are therefore left alone, and so is its cache.
 //
 // Only ports inside a workspace's own block are tunnelled. The workspace was told,
 // in writing, that its block is what reaches the developer's machine; forwarding
 // more than that would make the promise false and let two workspaces fight over the
 // same local port again. A port published outside the block is still reported by
 // the agent, so the UI can point at it — it just is not carried.
-func (s *Supervisor) observeAll(cfg *config.Config, observe Observer) (map[key]bool, bool) {
+func (s *Supervisor) observeAll(cfg *config.Config, observe Observer) (want map[key]bool, answered map[string]bool) {
 	hosts := map[string]bool{}
 	for _, alias := range cfg.Workspaces {
 		hosts[alias] = true
 	}
 
-	want := map[key]bool{}
-	answered := false
+	want = map[key]bool{}
+	answered = map[string]bool{}
 	for alias := range hosts {
 		host := cfg.Hosts[alias]
 		if host == nil {
@@ -207,7 +213,7 @@ func (s *Supervisor) observeAll(cfg *config.Config, observe Observer) (map[key]b
 		if err != nil {
 			continue
 		}
-		answered = true
+		answered[alias] = true
 		for ws, wp := range seen {
 			// Workspaces this client did not create are not ours to tunnel, the same
 			// rule every other command follows.
@@ -221,17 +227,22 @@ func (s *Supervisor) observeAll(cfg *config.Config, observe Observer) (map[key]b
 			}
 		}
 	}
-	if !answered {
-		return nil, false
+	if len(answered) == 0 {
+		return nil, nil
 	}
 
-	s.cache(want)
-	return want, true
+	s.cache(want, answered)
+	return want, answered
 }
 
 // cache records the tunnel set in the config so the next start has something to
 // work from before the first poll answers.
-func (s *Supervisor) cache(want map[key]bool) {
+//
+// Only the hosts that answered are rewritten. Replacing the whole map would erase
+// the last known ports of a host that happened to be unreachable this round — and
+// the cache exists for exactly that host, so that a restart while it is still down
+// puts its tunnels up rather than none.
+func (s *Supervisor) cache(want map[key]bool, answered map[string]bool) {
 	byHost := map[string]map[string][]int{}
 	for k := range want {
 		if byHost[k.host] == nil {
@@ -245,9 +256,30 @@ func (s *Supervisor) cache(want map[key]bool) {
 		}
 	}
 	_ = config.Update(func(c *config.Config) error {
-		c.Ports = byHost
+		if c.Ports == nil {
+			c.Ports = map[string]map[string][]int{}
+		}
+		for alias := range answered {
+			// Cleared then rewritten, so a host that answered with nothing loses its
+			// stale entry rather than keeping ports it no longer publishes.
+			delete(c.Ports, alias)
+			if ws := byHost[alias]; len(ws) > 0 {
+				c.Ports[alias] = ws
+			}
+		}
 		return nil
 	})
+}
+
+// allHosts is every registered host, the scope of a reconcile driven by the cache
+// rather than by an observation — nothing is running yet, so nothing can be stopped
+// by mistake, and being explicit beats a nil that quietly means "everything".
+func allHosts(cfg *config.Config) map[string]bool {
+	hosts := map[string]bool{}
+	for alias := range cfg.Hosts {
+		hosts[alias] = true
+	}
+	return hosts
 }
 
 // cachedTunnels is the last observed set, read back from the config.
@@ -272,7 +304,11 @@ func cachedTunnels(cfg *config.Config) map[key]bool {
 // Leaving the rest alone is the whole point. This runs every few seconds, and a
 // pass that tore tunnels down and rebuilt them would drop every connection through
 // them on a timer.
-func (s *Supervisor) reconcile(ctx context.Context, cfg *config.Config, want map[key]bool) {
+//
+// scope limits which hosts want speaks for. A tunnel to a host outside it is never
+// stopped, however absent from want it looks — absence there means the host was not
+// asked or did not answer, not that the port went away.
+func (s *Supervisor) reconcile(ctx context.Context, cfg *config.Config, want map[key]bool, scope map[string]bool) {
 	s.mu.Lock()
 	var start []key
 	var stop []key
@@ -282,7 +318,7 @@ func (s *Supervisor) reconcile(ctx context.Context, cfg *config.Config, want map
 		}
 	}
 	for k := range s.workers {
-		if !want[k] {
+		if scope[k.host] && !want[k] {
 			stop = append(stop, k)
 		}
 	}
@@ -325,6 +361,8 @@ func (s *Supervisor) start(ctx context.Context, host *config.Host, k key) {
 // no longer wanted should vanish from `forwarding status` rather than linger as a
 // row nobody can explain.
 func (s *Supervisor) stop(k key) {
+	// Dropped from workers first, under the lock: from here on set() is a no-op for
+	// this key, so the goroutine cannot put the row back as it unwinds.
 	s.mu.Lock()
 	w := s.workers[k]
 	delete(s.workers, k)
@@ -335,6 +373,8 @@ func (s *Supervisor) stop(k key) {
 		return
 	}
 	w.cancel()
+	// Waited on, not fired and forgotten: the ssh process must be gone before
+	// anything could start a replacement on the same local port.
 	<-w.done
 }
 
@@ -501,13 +541,24 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// set records a tunnel's state, but only while that tunnel is still supervised.
+//
+// The guard is what stops a removed tunnel reappearing in the status file as a row
+// nothing will ever clear. A stopped worker does not fall silent the instant it is
+// cancelled: its goroutine may be unwinding, and the timer that marks a tunnel
+// "up" after two seconds can already be running when it is stopped, so both can
+// write after reconcile has dropped the key. Whether the write lands before or
+// after the delete is a race; whether it takes effect is not.
 func (s *Supervisor) set(k key, state, detail string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.workers[k] == nil {
+		return
+	}
 	s.state[k] = &TunnelStatus{
 		Host: k.host, Workspace: k.workspace, Port: k.port,
 		State: state, Detail: detail,
 	}
-	s.mu.Unlock()
 }
 
 func (s *Supervisor) statusLoop(ctx context.Context) {

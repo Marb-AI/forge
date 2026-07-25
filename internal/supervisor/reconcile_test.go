@@ -56,9 +56,9 @@ func TestObserveAllTunnelsOnlyInsideTheBlock(t *testing.T) {
 		}, nil
 	}
 
-	want, ok := s.observeAll(cfg, observe)
-	if !ok {
-		t.Fatal("a host answered; ok should be true")
+	want, answered := s.observeAll(cfg, observe)
+	if !answered["srv"] {
+		t.Fatal("srv answered; it should be in scope")
 	}
 	if !want[key{"srv", "crm", 16000}] || !want[key{"srv", "crm", 16001}] {
 		t.Errorf("in-block ports missing: %v", want)
@@ -84,9 +84,9 @@ func TestObserveAllSkipsForeignAndBlocklessWorkspaces(t *testing.T) {
 		}, nil
 	}
 
-	want, ok := s.observeAll(cfg, observe)
-	if !ok {
-		t.Fatal("ok should be true")
+	want, answered := s.observeAll(cfg, observe)
+	if len(answered) == 0 {
+		t.Fatal("a host answered")
 	}
 	if len(want) != 0 {
 		t.Errorf("want = %v, expected nothing tunnelled", want)
@@ -103,8 +103,8 @@ func TestObserveAllReportsWhenNobodyAnswered(t *testing.T) {
 	fail := func(*config.Host) (map[string]agentproto.WorkspacePorts, error) {
 		return nil, errUnreachable{}
 	}
-	if _, ok := s.observeAll(cfg, fail); ok {
-		t.Error("no host answered; ok should be false")
+	if _, answered := s.observeAll(cfg, fail); len(answered) != 0 {
+		t.Errorf("no host answered; scope should be empty, got %v", answered)
 	}
 
 	// One host answering is enough to act on: the answer covers its own workspaces
@@ -117,9 +117,12 @@ func TestObserveAllReportsWhenNobodyAnswered(t *testing.T) {
 			"crm": {Block: block(16000, 100), Ports: []agentproto.Port{{Host: 16000}}},
 		}, nil
 	}
-	want, ok := s.observeAll(cfg, partial)
-	if !ok {
-		t.Fatal("one host answered; ok should be true")
+	want, answered := s.observeAll(cfg, partial)
+	if !answered["srv"] {
+		t.Fatal("srv answered; it should be in scope")
+	}
+	if answered["srv2"] {
+		t.Error("srv2 was unreachable; it must not be in scope")
 	}
 	if !want[key{"srv", "crm", 16000}] {
 		t.Errorf("want = %v", want)
@@ -139,7 +142,7 @@ func TestCacheRoundTrip(t *testing.T) {
 		{"srv", "crm", 16001}:   true,
 		{"srv", "crm", 16000}:   true,
 		{"srv2", "shop", 16100}: true,
-	})
+	}, map[string]bool{"srv": true, "srv2": true})
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -230,7 +233,7 @@ func TestReconcileAddsAndRemovesWorkers(t *testing.T) {
 	a := key{"srv", "crm", 16000}
 	b := key{"srv", "crm", 16001}
 
-	s.reconcile(ctx, cfg, map[key]bool{a: true, b: true})
+	s.reconcile(ctx, cfg, map[key]bool{a: true, b: true}, allHosts(cfg))
 	if len(s.workers) != 2 {
 		t.Fatalf("workers = %d, want 2", len(s.workers))
 	}
@@ -239,7 +242,7 @@ func TestReconcileAddsAndRemovesWorkers(t *testing.T) {
 	// runs every few seconds, and rebuilding tunnels on a timer would drop every
 	// connection through them.
 	before := s.workers[a]
-	s.reconcile(ctx, cfg, map[key]bool{a: true, b: true})
+	s.reconcile(ctx, cfg, map[key]bool{a: true, b: true}, allHosts(cfg))
 	if s.workers[a] != before {
 		t.Error("an unchanged tunnel was replaced")
 	}
@@ -247,7 +250,7 @@ func TestReconcileAddsAndRemovesWorkers(t *testing.T) {
 	// Dropping one leaves the other alone, and takes its status row with it — a
 	// tunnel nobody wants should vanish from `forwarding status`, not linger as a
 	// row that cannot be explained.
-	s.reconcile(ctx, cfg, map[key]bool{a: true})
+	s.reconcile(ctx, cfg, map[key]bool{a: true}, allHosts(cfg))
 	if len(s.workers) != 1 || s.workers[a] == nil {
 		t.Fatalf("workers = %v, want only %v", s.workers, a)
 	}
@@ -255,7 +258,7 @@ func TestReconcileAddsAndRemovesWorkers(t *testing.T) {
 		t.Error("removed tunnel left a status row behind")
 	}
 
-	s.reconcile(ctx, cfg, map[key]bool{})
+	s.reconcile(ctx, cfg, map[key]bool{}, allHosts(cfg))
 	if len(s.workers) != 0 || len(s.state) != 0 {
 		t.Errorf("workers = %v, state = %v; want both empty", s.workers, s.state)
 	}
@@ -268,7 +271,7 @@ func TestReconcileSkipsUnknownHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	s.reconcile(ctx, cfg, map[key]bool{{"gone", "ghost", 16000}: true})
+	s.reconcile(ctx, cfg, map[key]bool{{"gone", "ghost", 16000}: true}, allHosts(cfg))
 	if len(s.workers) != 0 {
 		t.Errorf("workers = %v, want none", s.workers)
 	}
@@ -314,5 +317,81 @@ func TestLocalPortHolderOnAFreePort(t *testing.T) {
 
 	if got := localPortHolder(port); got != "" {
 		t.Errorf("holder = %q on a free port", got)
+	}
+}
+
+// A host that did not answer must keep its tunnels. Absence from `want` means it
+// was not asked, not that its ports went away — and tearing them down is the one
+// failure this loop cannot have, because every connection through them dies.
+func TestReconcileLeavesUnansweredHostsAlone(t *testing.T) {
+	s := newTestSupervisor(t)
+	cfg := testConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	onSrv := key{"srv", "crm", 16000}
+	onSrv2 := key{"srv2", "shop", 16100}
+	s.reconcile(ctx, cfg, map[key]bool{onSrv: true, onSrv2: true}, allHosts(cfg))
+	if len(s.workers) != 2 {
+		t.Fatalf("workers = %d, want 2", len(s.workers))
+	}
+
+	// srv answers with nothing; srv2 is silent and out of scope.
+	s.reconcile(ctx, cfg, map[key]bool{}, map[string]bool{"srv": true})
+	if s.workers[onSrv] != nil {
+		t.Error("srv answered with no ports; its tunnel should have stopped")
+	}
+	if s.workers[onSrv2] == nil {
+		t.Error("srv2 was silent; its tunnel must survive")
+	}
+	if _, ok := s.state[onSrv2]; !ok {
+		t.Error("a surviving tunnel lost its status row")
+	}
+}
+
+// The cache is per host for the same reason: overwriting it wholesale would erase
+// the last known ports of the very host the cache exists for — one that is down.
+func TestCacheKeepsUnansweredHostsEntries(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	s := newTestSupervisor(t)
+	s.cache(map[key]bool{
+		{"srv", "crm", 16000}:   true,
+		{"srv2", "shop", 16100}: true,
+	}, map[string]bool{"srv": true, "srv2": true})
+
+	// Now only srv answers, and it publishes nothing.
+	s.cache(map[key]bool{}, map[string]bool{"srv": true})
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Ports["srv"]; ok {
+		t.Errorf("srv answered with nothing; its stale entry should be gone: %v", cfg.Ports)
+	}
+	if got := cfg.Ports["srv2"]["shop"]; len(got) != 1 || got[0] != 16100 {
+		t.Errorf("srv2 was silent; its cached ports must survive, got %v", cfg.Ports)
+	}
+}
+
+// A tunnel that has been stopped must not reappear in the status file. Its
+// goroutine can still be unwinding — and the "up after two seconds" timer can
+// already be running — when reconcile drops it.
+func TestSetIgnoresStoppedTunnels(t *testing.T) {
+	s := newTestSupervisor(t)
+	cfg := testConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	k := key{"srv", "crm", 16000}
+	s.reconcile(ctx, cfg, map[key]bool{k: true}, allHosts(cfg))
+	s.reconcile(ctx, cfg, map[key]bool{}, allHosts(cfg))
+
+	// What a late write from the dying goroutine looks like.
+	s.set(k, StateUp, "")
+	if _, ok := s.state[k]; ok {
+		t.Error("a stopped tunnel wrote itself back into the status file")
 	}
 }
