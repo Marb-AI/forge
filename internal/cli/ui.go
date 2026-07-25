@@ -294,7 +294,7 @@ func workspaceActivityInfo() (map[string]ui.Activity, error) {
 	}
 	out := make(map[string]ui.Activity, len(act))
 	for name, a := range act {
-		out[name] = ui.Activity{State: a.State, TS: a.TS}
+		out[name] = ui.Activity{State: a.State, TS: a.TS, Topic: a.Topic, TopicTS: a.TopicTS}
 	}
 	return out, nil
 }

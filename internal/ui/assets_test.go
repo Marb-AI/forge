@@ -251,6 +251,39 @@ func TestEveryRailActionHasAHandler(t *testing.T) {
 	}
 }
 
+// The topic is the one string in this UI that a language model composes and the
+// browser then displays. It arrives as free text through two hops that do not
+// escape anything (a file in a home directory, then JSON), so the only thing
+// standing between a topic containing markup and that markup running is this: it
+// is written with textContent, never innerHTML.
+func TestTopicIsRenderedAsTextNotMarkup(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	index := embeddedAsset(t, "index.html")
+
+	for _, id := range []string{"ws-topic", "ws-topic-text", "ws-topic-age"} {
+		if !strings.Contains(index, `id="`+id+`"`) {
+			t.Errorf("index.html has no #%s — renderTopic would paint nothing", id)
+		}
+	}
+	if !strings.Contains(js, `getElementById("ws-topic-text").textContent`) {
+		t.Error("the topic is not written with textContent — model-authored markup would be live in the DOM")
+	}
+	if regexp.MustCompile(`ws-topic[^)]*\)\.innerHTML`).MatchString(js) {
+		t.Error("the topic is written with innerHTML somewhere; it must be textContent")
+	}
+
+	// The topic pane sits above the clocks and the tree: it answers the first
+	// question you have on a tab you last touched days ago, so it must not be below
+	// the fold of a long file list.
+	topic := strings.Index(index, `id="ws-topic"`)
+	track := strings.Index(index, `id="track-banner"`)
+	tree := strings.Index(index, `id="filetree"`)
+	if topic < 0 || track < 0 || tree < 0 || topic > track || topic > tree {
+		t.Errorf("the topic pane must come before the tracking banner and the file tree (%d, %d, %d)",
+			topic, track, tree)
+	}
+}
+
 // Prompts describe how their author works, so they belong to the person and not
 // to a browser profile: kept in the daemon's config they are the same list in
 // every tab, on every workspace, and on the phone pointed at the same daemon.

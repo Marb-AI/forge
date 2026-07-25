@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -37,6 +38,32 @@ func TestActivityEndpointReturnsMap(t *testing.T) {
 	// Polled endpoint: must forbid caching so marks can't go stale.
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+}
+
+// The topic rides on the activity poll rather than one of its own: the browser
+// already asks this endpoint every few seconds, and a second poll would be a second
+// SSH round trip per host for a line of text that changes a few times a day.
+func TestActivityEndpointCarriesTheTopic(t *testing.T) {
+	s, h := testServer(t)
+	s.deps.WorkspaceActivity = func() (map[string]Activity, error) {
+		return map[string]Activity{"api": {
+			State: "busy", TS: 1784386328,
+			Topic: "refactoring auth to use JWT", TopicTS: 1784386000,
+		}}, nil
+	}
+	var got map[string]Activity
+	rec := authorized(h, "/api/activity")
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("bad JSON: %v (%s)", err, rec.Body)
+	}
+	if got["api"].Topic != "refactoring auth to use JWT" || got["api"].TopicTS != 1784386000 {
+		t.Errorf("topic not passed through: %+v", got["api"])
+	}
+	// The timestamp is what lets the UI dim a topic older than the session instead
+	// of presenting last Tuesday's work as current.
+	if !strings.Contains(rec.Body.String(), "topic_ts") {
+		t.Errorf("topic_ts missing from the payload: %s", rec.Body)
 	}
 }
 

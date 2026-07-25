@@ -281,6 +281,14 @@ same code, not a reimplementation that quietly drifts.
   same name. A stopped session doesn't quietly come back the moment you click its
   tab — it shows a **Start** button, and starting it is exactly
   `forge workspace <name> claude`.
+- **The topic** at the top of the left pane: one line saying what this workspace
+  is working on, written by Claude itself. You never type one. A hook asks Claude
+  to label the workspace whenever the label is missing or older than the session,
+  so it appears on its own and follows the work; a topic from before the current
+  session is dimmed rather than hidden, because on a stopped workspace "what it
+  was last doing" is the thing you came to find out. Hover a tab to read its topic
+  without switching to it. Inside the workspace it's just a command —
+  `forge-topic <words…>` sets it, `forge-topic` with nothing clears it.
 - **A read-only file tree** on the left, rooted at the workspace and unable to
   leave it. Files carry their language's icon; click one and it opens over the
   terminal with syntax highlighting. Read-only is the point: Claude writes the

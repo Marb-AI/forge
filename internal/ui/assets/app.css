@@ -149,6 +149,34 @@ button:hover { background: var(--bg-3); }
 #track-toggle.active { color: var(--fg); background: var(--bg-3); }
 
 /* ---- session tracking banner (above the file tree) ---- */
+/* The workspace topic. Two lines at most and then an ellipsis: it is a label you
+   glance at, and a sidebar that grows a paragraph pushes the file tree off the
+   screen. The full text is in the title attribute. */
+#ws-topic {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--fg);
+  min-width: 0;
+}
+#ws-topic[hidden] { display: none; }
+#ws-topic-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-width: 0;
+}
+#ws-topic-age { flex: none; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+/* A topic older than its session is history, not news — say so by dimming it,
+   rather than by hiding it and leaving the pane blank. */
+#ws-topic.stale #ws-topic-text { color: var(--fg-dim); }
+
 #track-banner {
   display: flex;
   align-items: center;
