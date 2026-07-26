@@ -202,8 +202,12 @@ button:hover { background: var(--bg-3); }
 .ident-line[hidden] { display: none; }
 .ident-line svg { flex: none; opacity: 0.75; }
 /* The value truncates, never the icon: a clipped alias is still recognisable and
-   the tooltip carries it whole. */
-.ident-line > span { overflow: hidden; text-overflow: ellipsis; }
+   the tooltip carries it whole.
+   min-width: 0 is spelled out rather than left to `overflow: hidden`, which does
+   already zero a flex item's automatic minimum size. That is a corner of the flex
+   spec, not something the next person should have to know to be sure this
+   ellipsises — and it stops working the moment the overflow is changed. */
+.ident-line > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ident-line .sub { flex: none; opacity: 0.8; }
 .ident-line .sub[hidden] { display: none; }
 /* A workspace with no Claude login is a fact about it, not an error — dimmer than
@@ -296,7 +300,8 @@ button:hover { background: var(--bg-3); }
   min-width: 0;
 }
 .lgn-name {
-  flex: 1 1 auto;
+  /* No flex here: .lgn is a grid, and its first column already carries the
+     minmax(0, 1fr) that lets this shrink. */
   min-width: 4em;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -327,7 +332,18 @@ button:hover { background: var(--bg-3); }
 /* Same thresholds as a disk, so a spent login reads like a full one. */
 .win > b.warn { color: #f5a623; }
 .win > b.crit { color: #e0574c; }
-.lgn-nowin { flex: none; font-size: 10px; color: var(--fg-dim); }
+/* A login with no rate-limit windows has one label where two figures would go, and
+   it is prose, not a number: "no limit windows" does not fit a 46px column. So it
+   takes both of them and right-aligns, the same treatment .srv-note gets for the
+   same reason. (flex: none used to be here and did nothing once .lgn became a
+   grid — the row it belonged to has not been flex since.) */
+.lgn-nowin {
+  grid-column: 2 / -1;
+  text-align: right;
+  font-size: 10px;
+  white-space: nowrap;
+  color: var(--fg-dim);
+}
 /* A reading nobody has refreshed for a while is history, not news — dimmed rather
    than hidden, and the tooltip says how old it is. Same treatment as a stale
    topic, for the same reason. */
