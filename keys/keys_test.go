@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -66,6 +67,73 @@ func TestCreateKeepsAnExistingKey(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Error("the key was replaced")
+	}
+}
+
+// Two Creates at once must not each write a key. Looking first and writing second
+// leaves a window where both see nothing — `forge setup` in two terminals, or the
+// UI and a shell — and the loser's servers would stop letting it in.
+func TestConcurrentCreatesMakeOneKey(t *testing.T) {
+	s := NewFileStore(t.TempDir())
+
+	const racers = 8
+	var wg sync.WaitGroup
+	created := make(chan bool, racers)
+	wg.Add(racers)
+	for range racers {
+		go func() {
+			defer wg.Done()
+			made, err := s.Create()
+			if err != nil {
+				t.Errorf("Create: %v", err)
+				return
+			}
+			created <- made
+		}()
+	}
+	wg.Wait()
+	close(created)
+
+	made := 0
+	for c := range created {
+		if c {
+			made++
+		}
+	}
+	if made != 1 {
+		t.Errorf("%d of %d Creates reported making a key; want exactly 1", made, racers)
+	}
+	// One key, and it is readable — not the last writer's half of two.
+	if _, err := s.PublicKey(); err != nil {
+		t.Errorf("the key that survived the race is not usable: %v", err)
+	}
+}
+
+// A key file this store did not write must not be published as if it had. The
+// line would name ssh-ed25519 over a blob that says otherwise — something no sshd
+// accepts, discovered only after it had been installed on a server.
+func TestPublicKeyRefusesAnotherKeyType(t *testing.T) {
+	keygen, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skip("no ssh-keygen to make one with")
+	}
+	dir := t.TempDir()
+	out, err := exec.Command(keygen, "-q", "-t", "ecdsa", "-N", "", "-C", "", "-f", filepath.Join(dir, "id.pem")).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh-keygen -t ecdsa: %v: %s", err, out)
+	}
+
+	s := NewFileStore(dir)
+	pub, err := s.PublicKey()
+	if err == nil {
+		t.Fatalf("PublicKey on an ECDSA key = %q; want it refused", pub)
+	}
+	if !strings.Contains(err.Error(), "ecdsa") {
+		t.Errorf("error = %v; it should name what the file actually holds", err)
+	}
+	// Creating over it must still be refused, key type or not: it is somebody's key.
+	if made, err := s.Create(); err != nil || made {
+		t.Errorf("Create over an existing key = %v, %v; want no key made", made, err)
 	}
 }
 

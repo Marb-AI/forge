@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/Marb-AI/forge/config"
@@ -35,16 +36,37 @@ var (
 // key, and the daemons' files all live in it. This is what a desktop shell calls,
 // and what `forge` itself does by default with ~/.forge.
 func Open(dir string) {
-	Use(config.NewFileStore(dir), keys.NewFileStore(dir))
+	// Cannot fail: both stores below are real ones.
+	_ = Use(config.NewFileStore(dir), keys.NewFileStore(dir))
 }
 
 // Use points the core at stores of the caller's own — a phone's container, a
 // keychain, a test's scratch directory. Both are given at once because a front end
 // that knows where one belongs knows where the other does.
-func Use(cfg config.Store, k keys.Store) {
+//
+// A nil store is refused rather than accepted and worked around. Half a wiring is
+// the one mistake this seam must not swallow: the core would fill the gap with
+// ~/.forge and carry on, so a phone that got its config store wired and its keys
+// wrong would look like it was working, and write a key to a path that means
+// nothing there. The error arrives while there is still a front end to fix.
+func Use(cfg config.Store, k keys.Store) error {
+	if cfg == nil || k == nil {
+		return fmt.Errorf("forge.Use needs both stores (config %v, keys %v)",
+			present(cfg == nil), present(k == nil))
+	}
 	stateMu.Lock()
 	defer stateMu.Unlock()
 	cfgStore, keyStore = cfg, k
+	return nil
+}
+
+// present names which half of the wiring was missing, so the error says what to
+// go and fix.
+func present(missing bool) string {
+	if missing {
+		return "missing"
+	}
+	return "given"
 }
 
 // Store returns the client config's store, defaulting to ~/.forge if no front end
@@ -89,6 +111,9 @@ func StateDir() (string, error) {
 // It is lazy rather than done in an init, because resolving a home directory can
 // fail and an operation that never needed one should not be stopped by that. It is
 // also the ONLY path in the core that reaches for $HOME at all.
+// Both halves are checked, though Use sets both or neither: the pair is the
+// invariant, and a check that only reads one of them stops saying so the day that
+// changes.
 func useDefaults() error {
 	if cfgStore != nil && keyStore != nil {
 		return nil
@@ -97,12 +122,7 @@ func useDefaults() error {
 	if err != nil {
 		return err
 	}
-	if cfgStore == nil {
-		cfgStore = config.NewFileStore(dir)
-	}
-	if keyStore == nil {
-		keyStore = keys.NewFileStore(dir)
-	}
+	cfgStore, keyStore = config.NewFileStore(dir), keys.NewFileStore(dir)
 	return nil
 }
 

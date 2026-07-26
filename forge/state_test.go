@@ -26,7 +26,7 @@ func swapState(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { Use(prevCfg, prevKeys) })
+	t.Cleanup(func() { _ = Use(prevCfg, prevKeys) })
 	Open(dir)
 }
 
@@ -66,14 +66,16 @@ func TestUseAcceptsAStoreOfTheCallersOwn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { Use(prevCfg, prevKeys) })
+	t.Cleanup(func() { _ = Use(prevCfg, prevKeys) })
 
 	mem := &memStore{cfg: &config.Config{
 		Hosts:      map[string]*config.Host{},
 		Ports:      map[string]map[string][]int{},
 		Workspaces: map[string]string{},
 	}}
-	Use(mem, keys.NewFileStore(t.TempDir()))
+	if err := Use(mem, keys.NewFileStore(t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := SetUIPort(4242); err != nil {
 		t.Fatal(err)
@@ -97,6 +99,34 @@ func (m *memStore) Load() (*config.Config, error) { return m.cfg, nil }
 func (m *memStore) Dir() (string, error)          { return "", errNoDir }
 func (m *memStore) Update(change func(*config.Config) error) error {
 	return change(m.cfg)
+}
+
+// Half a wiring is the mistake this seam must not swallow: the core would fill
+// the gap with ~/.forge, and a front end that got one store wrong would look like
+// it was working.
+func TestUseRefusesHalfAWiring(t *testing.T) {
+	dir := t.TempDir()
+	swapState(t, dir)
+
+	for _, c := range []struct {
+		name string
+		cfg  config.Store
+		keys keys.Store
+	}{
+		{"no config store", nil, keys.NewFileStore(t.TempDir())},
+		{"no key store", config.NewFileStore(t.TempDir()), nil},
+		{"neither", nil, nil},
+	} {
+		if err := Use(c.cfg, c.keys); err == nil {
+			t.Errorf("Use with %s was accepted", c.name)
+		}
+	}
+
+	// And a refused Use must leave the stores that were there alone, rather than
+	// half-applying itself on the way to the error.
+	if got, err := StateDir(); err != nil || got != dir {
+		t.Errorf("StateDir() = %q, %v after the refusals; want the store from before, %q", got, err, dir)
+	}
 }
 
 // The device key defaults alongside the config: one directory, one answer to

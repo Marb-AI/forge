@@ -75,11 +75,6 @@ func (s *FileStore) path() string { return filepath.Join(s.dir, "id.pem") }
 // hardware-backed key will be P-256 instead, because Secure Enclave does not do
 // Ed25519 — which is a different store, not a different file format here.
 func (s *FileStore) Create() (bool, error) {
-	if _, err := os.Stat(s.path()); err == nil {
-		return false, nil
-	} else if !os.IsNotExist(err) {
-		return false, err
-	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return false, err
@@ -87,12 +82,30 @@ func (s *FileStore) Create() (bool, error) {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return false, err
 	}
-	// 0600 from the moment the file exists rather than chmod'ed after: the gap
+	// O_EXCL is what makes "keep the existing key" a guarantee rather than a
+	// likelihood: looking first and writing second leaves a window in which the two
+	// halves of `forge setup` in two terminals — or the UI and a shell — each see no
+	// key and each write one, and the loser's servers stop letting it in. The kernel
+	// decides instead, and the one that loses the create reports what is true: it
+	// made no key.
+	//
+	// 0600 from the moment the file exists, rather than chmod'ed after: the gap
 	// between the two is a window where the key is readable.
-	if err := os.WriteFile(s.path(), marshalOpenSSH(pub, priv), 0o600); err != nil {
+	f, err := os.OpenFile(s.path(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		return false, nil
+	}
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	if _, err := f.Write(marshalOpenSSH(pub, priv)); err != nil {
+		f.Close()
+		// A half-written key is worse than none: it is not a key, and it would make
+		// every later Create report that this device already has one.
+		os.Remove(s.path())
+		return false, err
+	}
+	return true, f.Close()
 }
 
 // PrivateKey returns the PEM as written.
@@ -115,13 +128,22 @@ func (s *FileStore) PublicKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	blob, err := publicBlob(pemBytes)
+	algo, blob, err := publicBlob(pemBytes)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", s.path(), err)
 	}
+	// The algorithm is read out of the file rather than assumed. A line that says
+	// ssh-ed25519 over a blob that says anything else is not a key sshd will ever
+	// accept, and it would be installed on a server before anyone found out — so a
+	// file this store did not write is an error here, at the one moment there is
+	// still something to do about it.
+	if algo != keyAlgo {
+		return "", fmt.Errorf("%s: holds a %q key, and this store only writes %s",
+			s.path(), algo, keyAlgo)
+	}
 	// authorized_keys is the algorithm name, the base64 of that same wire blob the
 	// file already carries, and a comment.
-	return fmt.Sprintf("%s %s %s", keyAlgo, base64.StdEncoding.EncodeToString(blob), keyComment), nil
+	return fmt.Sprintf("%s %s %s", algo, base64.StdEncoding.EncodeToString(blob), keyComment), nil
 }
 
 // The OpenSSH private key format, written by hand.
@@ -179,31 +201,38 @@ func marshalOpenSSH(pub ed25519.PublicKey, priv ed25519.PrivateKey) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: pemType, Bytes: out})
 }
 
-// publicBlob reads the public key back out of a key file — the same wire blob
-// authorized_keys carries, base64'd.
-func publicBlob(pemBytes []byte) ([]byte, error) {
+// publicBlob reads the public key back out of a key file: the wire blob
+// authorized_keys carries base64'd, and the algorithm the blob itself declares.
+func publicBlob(pemBytes []byte) (algo string, blob []byte, err error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil || block.Type != pemType {
-		return nil, errors.New("not an OpenSSH private key")
+		return "", nil, errors.New("not an OpenSSH private key")
 	}
 	rest, ok := bytes.CutPrefix(block.Bytes, []byte(magic))
 	if !ok {
-		return nil, errors.New("wrong key file header")
+		return "", nil, errors.New("wrong key file header")
 	}
 	for range 3 { // cipher, kdf, kdf options
 		if _, rest, ok = sshField(rest); !ok {
-			return nil, errors.New("truncated key file")
+			return "", nil, errors.New("truncated key file")
 		}
 	}
 	if len(rest) < 4 {
-		return nil, errors.New("truncated key file")
+		return "", nil, errors.New("truncated key file")
 	}
 	rest = rest[4:] // number of keys, always 1 for a file Forge wrote
-	blob, _, ok := sshField(rest)
+	blob, _, ok = sshField(rest)
 	if !ok {
-		return nil, errors.New("truncated key file")
+		return "", nil, errors.New("truncated key file")
 	}
-	return blob, nil
+	// The blob's own first field is the algorithm name, which is what makes it
+	// self-describing — and what lets the caller check it against the key this
+	// store believes it wrote.
+	name, _, ok := sshField(blob)
+	if !ok {
+		return "", nil, errors.New("public key names no algorithm")
+	}
+	return string(name), blob, nil
 }
 
 // sshString appends one length-prefixed field, RFC 4253's encoding for all of
