@@ -145,7 +145,7 @@ button:hover { background: var(--bg-3); }
 }
 .pane-head button svg { display: block; }
 .pane-head button.active { color: var(--fg); background: var(--bg-3); }
-.pane-actions { display: flex; gap: 2px; }
+.pane-actions { display: flex; align-items: center; gap: 2px; }
 #track-toggle.active { color: var(--fg); background: var(--bg-3); }
 
 /* ---- session tracking banner (above the file tree) ---- */
@@ -178,41 +178,50 @@ button:hover { background: var(--bg-3); }
 #ws-topic.stale #ws-topic-text { color: var(--fg-dim); }
 
 /* Where the workspace runs: its Claude login and its server, under the topic. Two
-   chips rather than a sentence — they are labels you check, and they must not push
-   the file tree down by a line each. */
+   plain lines rather than chips — a chip reads as something you can press, and
+   these are facts you check. The icon carries the category, so the line spends its
+   width on the value instead of on a label. */
 #ws-ident {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  display: block;
   padding: 0 10px 6px;
   background: var(--bg-2);
   border-bottom: 1px solid var(--border);
   min-width: 0;
 }
 #ws-ident[hidden] { display: none; }
-.ident-chip {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ident-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
   white-space: nowrap;
-  padding: 1px 5px;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  background: var(--bg-3);
-  font-size: 10.5px;
+  font-size: 11px;
+  line-height: 1.6;
   color: var(--fg-dim);
 }
-.ident-chip[hidden] { display: none; }
+.ident-line[hidden] { display: none; }
+.ident-line svg { flex: none; opacity: 0.75; }
+/* The value truncates, never the icon: a clipped alias is still recognisable and
+   the tooltip carries it whole.
+   min-width: 0 is spelled out rather than left to `overflow: hidden`, which does
+   already zero a flex item's automatic minimum size. That is a corner of the flex
+   spec, not something the next person should have to know to be sure this
+   ellipsises — and it stops working the moment the overflow is changed. */
+.ident-line > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ident-line .sub { flex: none; opacity: 0.8; }
+.ident-line .sub[hidden] { display: none; }
 /* A workspace with no Claude login is a fact about it, not an error — dimmer than
    a login, still there. */
-.ident-chip.dim { font-style: italic; }
+.ident-line.dim > span { font-style: italic; }
 
 #track-banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 5px 6px 5px 10px;
+  /* Right padding matches the panel headers below, so the two icon rows end on
+     the same vertical. */
+  padding: 5px 10px;
   background: var(--bg-2);
   border-bottom: 1px solid var(--border);
 }
@@ -234,14 +243,18 @@ button:hover { background: var(--bg-3); }
 #track-banner.live #track-active-wrap .track-ico { color: #57b66a; }
 .track-btns { display: flex; gap: 1px; flex: none; }
 .track-btns button {
-  width: 20px;
-  height: 20px;
-  font-size: 11px;
+  width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--fg-dim);
+  /* Lifted most of the way to --fg, but not all of it. The clocks beside these are
+     at full --fg, and at --fg-dim the buttons read as washed out next to them — but
+     at identical weight the eye has nothing left to prioritise, and the banner
+     becomes four equally loud things. Hover takes them the rest of the way. */
+  color: color-mix(in srgb, var(--fg) 72%, var(--fg-dim));
 }
+.track-btns button svg { display: block; }
 .track-btns button:hover { color: var(--fg); background: var(--bg-3); }
 .track-btns button.ok { color: #57b66a; }
 #cf-copy { margin-right: auto; }
@@ -273,16 +286,22 @@ button:hover { background: var(--bg-3); }
 /* One login per line: name on the left, its two windows on the right. Deliberately
    flat — no bars, no nested rows — so three logins cost three lines and the file
    tree keeps its height. */
+/* A grid, not a flex row, so the windows line up across rows and not merely
+   within one — reading down a column is the whole reason to stack numbers.
+   align-items: center, not baseline: a 10px label beside an 11px value puts the
+   two on visibly different heights, and a column of them reads as jitter. */
 .lgn {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px 46px;
+  align-items: center;
+  gap: 6px;
   padding: 2px 0;
   font-size: 11px;
   min-width: 0;
 }
 .lgn-name {
-  flex: 1 1 auto;
+  /* No flex here: .lgn is a grid, and its first column already carries the
+     minmax(0, 1fr) that lets this shrink. */
   min-width: 4em;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -291,24 +310,40 @@ button:hover { background: var(--bg-3); }
 }
 /* The windows never wrap away from each other or from their labels: the pair IS
    the reading, and "5h" on one line with "13%" on the next is noise. */
-.lgn-windows { flex: none; display: flex; gap: 8px; white-space: nowrap; }
-.win { display: inline-flex; align-items: baseline; gap: 3px; }
+/* display: contents so the two windows become cells of the row's grid, keeping
+   the wrapper in the markup while the columns do the aligning. */
+.lgn-windows { display: contents; }
+.win { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 3px; }
 /* The label is furniture, the number is the signal — so the label stays dim and
    small while the value carries the weight and the colour. */
 .win > i {
   font-style: normal;
   font-size: 10px;
+  line-height: 1.2;
   color: var(--fg-dim);
 }
 .win > b {
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  line-height: 1.2;
   color: var(--fg);
 }
 /* Same thresholds as a disk, so a spent login reads like a full one. */
 .win > b.warn { color: #f5a623; }
 .win > b.crit { color: #e0574c; }
-.lgn-nowin { flex: none; font-size: 10px; color: var(--fg-dim); }
+/* A login with no rate-limit windows has one label where two figures would go, and
+   it is prose, not a number: "no limit windows" does not fit a 46px column. So it
+   takes both of them and right-aligns, the same treatment .srv-note gets for the
+   same reason. (flex: none used to be here and did nothing once .lgn became a
+   grid — the row it belonged to has not been flex since.) */
+.lgn-nowin {
+  grid-column: 2 / -1;
+  text-align: right;
+  font-size: 10px;
+  white-space: nowrap;
+  color: var(--fg-dim);
+}
 /* A reading nobody has refreshed for a while is history, not news — dimmed rather
    than hidden, and the tooltip says how old it is. Same treatment as a stale
    topic, for the same reason. */
@@ -333,56 +368,47 @@ button:hover { background: var(--bg-3); }
   scrollbar-gutter: stable;
 }
 #servers.collapsed #serverlist { display: none; }
-.srv { padding: 4px 0 6px; }
-.srv + .srv { border-top: 1px solid var(--border); margin-top: 2px; }
-.srv-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 3px; }
-/* At the pane's narrowest, something has to give, and it is the name: the note
-   is short and load-bearing ("unreachable" truncated to "unreac…" is the one
-   word you needed), while a clipped alias is still recognisable — and the
-   tooltip carries both in full. */
-.srv-name {
-  flex: 1 1 auto;
-  min-width: 4em;
-  font-size: 11.5px;
-  color: var(--fg);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.srv-note {
-  flex: none;
-  margin-left: auto;
-  font-size: 10px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.srv.down .srv-name { color: var(--fg-dim); }
-.srv.down .srv-note { color: var(--err-fg); }
-.meter {
+/* One line per server. Three stacked meters cost three lines each, so a handful
+   of servers ate the pane. A grid with fixed columns, so the figures line up
+   across rows: scanning a column is then actually reading a column. */
+.srv {
   display: grid;
-  grid-template-columns: 26px 1fr 32px;
+  grid-template-columns: minmax(0, 1fr) 42px 60px 72px;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  padding: 3px 0;
+}
+.srv + .srv { border-top: 1px solid var(--border); }
+/* At the pane's narrowest, something has to give, and it is the name: the figures
+   are short and load-bearing, while a clipped alias is still recognisable — and
+   the tooltip carries it in full, with the address and the uptime. */
+.srv-name {
+  min-width: 3em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--fg);
+}
+.srv.down .srv-name { color: var(--fg-dim); }
+.srv-note { grid-column: 2 / -1; text-align: right; font-size: 10.5px; color: var(--fg-dim); }
+/* display: contents so each metric becomes a cell of the row's grid. */
+.srv-metrics { display: contents; }
+.srv-metrics .m { display: grid; grid-template-columns: 11px minmax(0, 1fr); align-items: center; gap: 3px; }
+.srv-metrics .m svg { opacity: 0.7; }
+/* CPU is the one that means something as a percentage; for memory and disk the
+   figure is the question — how much is left — so the unit is dropped from the row
+   and the tooltip carries it, the percentage, and what is free. */
+.srv-metrics b {
+  font-weight: 500;
+  font-size: 10.5px;
+  line-height: 1.2;
+  text-align: right;
   color: var(--fg-dim);
-  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
 }
-.meter-val { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg); }
-.bar { height: 5px; border-radius: 3px; background: var(--bg-3); overflow: hidden; }
-.bar > i {
-  display: block;
-  height: 100%;
-  border-radius: 3px;
-  background: #57b66a;
-  transition: width 0.4s ease;
-}
-/* Amber from three-quarters full, red from ninety percent: the point of the
-   colour is to be noticed before the disk fills, not once it has. */
-.bar > i.warn { background: #f5a623; }
-.bar > i.crit { background: #e0574c; }
-@media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+.srv-metrics b.warn { color: #f5a623; }
+.srv-metrics b.crit { color: #e0574c; }
 
 #main {
   flex: 1;
@@ -558,6 +584,17 @@ button.big { padding: 10px 20px; font-size: 13px; }
 .rail-btn.active { background: var(--bg-3); border-color: var(--border); }
 .rail-btn:disabled { opacity: 0.35; cursor: default; }
 .rail-sep { width: 70%; height: 1px; background: var(--border); margin: 5px 0; }
+/* What is NOT about the open workspace sinks to the bottom. A plain block wrapper
+   would leave the separator hugging the left (no auto margins on a 70% block) and
+   shrink the buttons to fit their content, so it mirrors the rail's own layout. */
+.rail-foot {
+  margin-top: auto;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
 
 /* The ssh shell fills the chat area — the same box the file viewer uses, so it
    reads as "another thing over the terminal" rather than a new layout. The file
@@ -888,22 +925,25 @@ button.big { padding: 10px 20px; font-size: 13px; }
 #ports.collapsed #portlist { display: none; }
 
 .port { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
-/* The dot is the whole status vocabulary in one glyph: reachable, stopped, or
-   something is wrong with the tunnel. Colour alone never carries it — the title
-   on the row says the same thing in words. */
+/* The dot says ONE thing — is the container running — and says it by fill, not by
+   hue: filled is running, a hollow ring is stopped.
+   Not green, because the green "start" button sits two columns to its right and
+   the two would read as the same signal. Not amber either, which would be worse:
+   amber already means "three-quarters full" on the server meters and on a spent
+   Claude window, so it would say "fine" and "watch this" in the same pane. Fill
+   collides with nothing and survives a colour-blind eye.
+   The tunnel's state is a separate question and has its own channel: the row
+   either offers a link or it does not, and the tooltip says why. */
 .port-dot {
   flex: none;
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  background: var(--fg);
+  background: transparent;
+  border: 1.5px solid var(--fg-dim);
 }
-/* The same two colours the meters and the rate-limit windows use, so amber and
-   red mean one thing across the whole UI. "Reachable" is the plain foreground
-   rather than a green: in a monochrome panel, working is the quiet state. */
-.port-dot.stopped { background: var(--fg-dim); }
-.port-dot.warn { background: #f5a623; }
-.port-dot.bad { background: #e0574c; }
+.port-dot.running { background: var(--fg); border-color: var(--fg); }
+.port-dot.stopped { background: transparent; border-color: var(--fg-dim); }
 /* The link is the point of the panel, so it gets the row's width and the name
    is what survives truncation — the port number beside it is five characters
    and load-bearing (you paste it into curl, or an OAuth redirect). */
@@ -932,8 +972,13 @@ button.big { padding: 10px 20px; font-size: 13px; }
   white-space: nowrap;
 }
 .port.down .port-label { color: var(--fg-dim); }
+/* Start and stop read as what they do, at rest and not only on hover — these are
+   the only two actions in the panel, and they are the only two colours in it. */
 .port-act {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: 0;
   padding: 2px;
@@ -942,5 +987,9 @@ button.big { padding: 10px 20px; font-size: 13px; }
   line-height: 0;
   border-radius: 3px;
 }
-.port-act:hover { color: var(--fg); background: var(--bg-3); }
+.port-act.start { color: #3ecf6a; }
+.port-act.stop { color: #e0574c; }
+.port-act:hover { background: var(--bg-3); }
+.port-act.start:hover { color: #5fe08a; }
+.port-act.stop:hover { color: #ff6b5e; }
 .port-act[disabled] { opacity: 0.4; cursor: default; }

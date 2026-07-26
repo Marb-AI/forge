@@ -137,10 +137,33 @@ func TestBrowserUnderstandsEveryTunnelStateGoCanSend(t *testing.T) {
 			t.Errorf("app.js does not handle tunnel state %q by name", state)
 		}
 	}
-	// And each state the panel derives has to paint something.
-	for _, st := range []string{"ok", "stopped", "blocked", "error", "notunnel", "untunnelled", "connecting"} {
-		if !regexp.MustCompile(`\b` + st + `:`).MatchString(js) {
-			t.Errorf("PORT_DOT has no entry for %q", st)
+	// And each state the panel derives has to be EXPLAINED. The dot no longer
+	// encodes them — it says only whether the container runs — so the tooltip is
+	// the only place a blocked port or a stray one can say what it is.
+	for _, st := range []string{"ok", "stopped", "blocked", "error", "notunnel", "untunnelled"} {
+		if !regexp.MustCompile(`case "` + st + `":`).MatchString(js) {
+			t.Errorf("portTitle says nothing for the %q state", st)
+		}
+	}
+}
+
+// The dot answers one question — is the container running — and nothing else.
+// It used to carry the tunnel's state too, in a colour you had to decode, and the
+// pull to put that back will be there every time a new state is added.
+func TestPortDotSaysOnlyWhetherTheContainerRuns(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	if !strings.Contains(js, `dot.className = "port-dot " + (p.running ? "running" : "stopped")`) {
+		t.Error("the dot is not driven solely by p.running")
+	}
+	css := embeddedAsset(t, "app.css")
+	// Fill, not hue: green would collide with the start button beside it, and amber
+	// already means "three-quarters full" two panels down.
+	if !strings.Contains(css, ".port-dot.running { background: var(--fg); border-color: var(--fg); }") {
+		t.Error("the running dot is not the plain foreground fill")
+	}
+	for _, gone := range []string{".port-dot.warn", ".port-dot.bad"} {
+		if strings.Contains(css, gone) {
+			t.Errorf("%s is back: the dot is carrying tunnel state again", gone)
 		}
 	}
 }

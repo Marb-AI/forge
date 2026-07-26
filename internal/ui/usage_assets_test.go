@@ -200,3 +200,26 @@ func TestPaneKeepsIdentityAtTheTopAndMetricsAtTheBottom(t *testing.T) {
 			tree, logins, servers)
 	}
 }
+
+// A login with no rate-limit windows shows one prose label where two figures would
+// go. The row is a grid whose window columns are 46px wide, so that label has to
+// span them — squeezed into one it wraps or overflows, which is how the panel
+// stops being three lines for three logins.
+func TestLoginWithNoWindowsSpansTheWindowColumns(t *testing.T) {
+	css := embeddedAsset(t, "app.css")
+	block := regexp.MustCompile(`(?s)\.lgn-nowin\s*\{[^}]*\}`).FindString(css)
+	if block == "" {
+		t.Fatal("app.css has no .lgn-nowin rule")
+	}
+	if !strings.Contains(block, "grid-column: 2 / -1") {
+		t.Errorf(".lgn-nowin must span the window columns, got:\n%s", block)
+	}
+	// The row is a grid; a flex declaration on its children does nothing but
+	// mislead whoever maintains it next.
+	for _, child := range []string{`.lgn-name`, `.lgn-nowin`} {
+		b := regexp.MustCompile(`(?s)\` + child + `\s*\{[^}]*\}`).FindString(css)
+		if strings.Contains(b, "flex:") {
+			t.Errorf("%s carries a flex declaration, but .lgn is a grid:\n%s", child, b)
+		}
+	}
+}

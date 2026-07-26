@@ -31,9 +31,12 @@
              says what it is doing; these two say whose allowance it spends and
              whose disk it fills — the rest of the identity, in the same corner. -->
         <div id="ws-ident" hidden>
-          <span class="ident-chip" id="ws-login" hidden></span>
-          <span class="ident-chip" id="ws-server" hidden></span>
-          <span class="ident-chip" id="ws-ctx" hidden></span>
+          <div class="ident-line" id="ws-line-server" hidden>
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1.5"></rect><rect x="3" y="13" width="18" height="7" rx="1.5"></rect><circle cx="7" cy="7.5" r=".9" fill="currentColor" stroke="none"></circle><circle cx="7" cy="16.5" r=".9" fill="currentColor" stroke="none"></circle></svg><span id="ws-server"></span><span class="sub" id="ws-ctx" hidden></span>
+          </div>
+          <div class="ident-line" id="ws-line-login" hidden>
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6L5.6 18.4"></path></svg><span id="ws-login"></span>
+          </div>
         </div>
         <div id="track-banner" hidden>
           <div class="track-clocks">
@@ -54,9 +57,9 @@
             </span>
           </div>
           <div class="track-btns">
-            <button id="track-pause" title="Pause activity tracking">⏸</button>
-            <button id="track-copy" title="Copy session &amp; active time">⧉</button>
-            <button id="track-hide" title="Hide the tracking banner">✕</button>
+            <button id="track-pause" title="Pause activity tracking"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="4.5" width="4" height="15" rx="1"></rect><rect x="13.5" y="4.5" width="4" height="15" rx="1"></rect></svg></button>
+            <button id="track-copy" title="Copy session &amp; active time"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"></path></svg></button>
+            <button id="track-hide" title="Hide this — tracking keeps running"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6C6.2 3.6 2 9.1 1.2 12c.8 2.9 5 8.4 10.8 8.4S21.8 14.9 22.8 12C21.8 9.1 17.8 3.6 12 3.6z"></path><circle cx="12" cy="12" r="3.4"></circle></svg></button>
           </div>
         </div>
         <div class="pane-head">
@@ -196,21 +199,28 @@
           <span class="ico">■</span><span class="cap">stop</span>
         </button>
         <div class="rail-sep"></div>
-        <button class="rail-btn" data-action="ssh" title="Open a shell on the server">
-          <span class="ico">&gt;_</span><span class="cap">ssh</span>
-        </button>
-        <button class="rail-btn" data-action="host" title="Open a shell on the server as its login user">
-          <span class="ico">@</span><span class="cap" id="host-cap">host</span>
-        </button>
-        <button class="rail-btn" data-action="local" title="Open a shell on this machine, in your home directory">
-          <span class="ico">⌂</span><span class="cap">local</span>
+        <button class="rail-btn" data-action="ssh" title="Open a shell in this workspace, as the workspace user">
+          <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5"></path></svg></span><span class="cap">ssh</span>
         </button>
         <button class="rail-btn" data-action="prompts" title="Prompts you send Claude often — click one to send it">
           <span class="ico">≡</span><span class="cap">prompts</span>
         </button>
-        <button class="rail-btn" data-action="settings" title="Settings">
-          <span class="ico">⚙</span><span class="cap">settings</span>
-        </button>
+        <!-- Below the fold: the things that are NOT about the workspace you have
+             open. A shell on the server, a shell on this machine, and the
+             settings — all three outlive whichever tab is selected, so they sit
+             apart from the actions that don't. -->
+        <div class="rail-foot">
+          <div class="rail-sep"></div>
+          <button class="rail-btn" data-action="host" title="Open a shell on the server, as its login user">
+            <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5"></path></svg></span><span class="cap" id="host-cap">host</span>
+          </button>
+          <button class="rail-btn" data-action="local" title="Open a shell on this machine, in your home directory">
+            <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5"></path></svg></span><span class="cap">local</span>
+          </button>
+          <button class="rail-btn" data-action="settings" title="Settings">
+            <span class="ico">⚙</span><span class="cap">settings</span>
+          </button>
+        </div>
       </aside>
 
     </div>

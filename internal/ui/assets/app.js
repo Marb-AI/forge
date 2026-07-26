@@ -664,7 +664,9 @@ function renderTrackBanner() {
   document.getElementById("track-session").textContent = fmtDur(n.session);
   document.getElementById("track-active").textContent = fmtDur(n.active);
   const pause = document.getElementById("track-pause");
-  pause.textContent = track.paused ? "▶" : "⏸";
+  // innerHTML, not textContent: the button holds an icon, and assigning text to it
+  // would replace the SVG with a glyph the first time tracking was paused.
+  pause.innerHTML = track.paused ? ICON_PLAY : ICON_PAUSE;
   pause.title = track.paused ? "Resume activity tracking" : "Pause activity tracking";
 }
 
@@ -718,42 +720,47 @@ function renderTopic() {
 // poll lands.
 function renderIdent() {
   const box = document.getElementById("ws-ident");
-  const loginChip = document.getElementById("ws-login");
-  const serverChip = document.getElementById("ws-server");
-  const ctxChip = document.getElementById("ws-ctx");
+  const serverLine = document.getElementById("ws-line-server");
+  const loginLine = document.getElementById("ws-line-login");
+  const serverEl = document.getElementById("ws-server");
+  const loginEl = document.getElementById("ws-login");
+  const ctxEl = document.getElementById("ws-ctx");
   const ws = state.workspaces.find((w) => w.name === state.active);
   const u = state.active ? usage.data[state.active] : null;
 
-  // Percentage only, and no bar: this is the one number, and it sits on a line
-  // with two labels that also have to fit.
+  // Percentage only, and no bar: this is the one number, and it shares a line
+  // with a server name that also has to fit.
   const ctx = contextPercent(u);
-  ctxChip.hidden = ctx == null;
-  if (ctx != null) {
-    ctxChip.textContent = `ctx ${Math.round(ctx)}%`;
-    ctxChip.title = `Context window: ${fmtTokens(u.context_used)} of ${fmtTokens(u.context_size)} tokens` +
-      (u.model ? `\n${u.model}` : "") +
-      "\nResets when the session is compacted or restarted.";
-  }
+  ctxEl.hidden = ctx == null;
+  if (ctx != null) ctxEl.textContent = `(${Math.round(ctx)}% context)`;
 
   const host = ws ? ws.host : "";
-  serverChip.hidden = !host;
+  serverLine.hidden = !host;
   if (host) {
-    serverChip.textContent = host;
-    serverChip.title = `Runs on ${host}` + (ws.host_user ? ` (as ${ws.host_user})` : "");
+    serverEl.textContent = host;
+    // Everything the line had to truncate, plus what it never had room for. The
+    // context lives here too: the line says the number, the tooltip says of what.
+    const lines = [`Runs on ${host}` + (ws.host_user ? ` (as ${ws.host_user})` : "")];
+    if (ctx != null) {
+      lines.push(`Context window: ${fmtTokens(u.context_used)} of ${fmtTokens(u.context_size)} tokens` +
+        (u.model ? ` · ${u.model}` : ""));
+      lines.push("Resets when the session is compacted or restarted.");
+    }
+    serverLine.title = lines.join("\n");
   }
 
-  loginChip.hidden = !u;
+  loginLine.hidden = !u;
   if (u) {
     const account = u.account || {};
-    loginChip.textContent = loginLabel(u);
-    loginChip.classList.toggle("dim", !account.uuid);
+    loginEl.textContent = loginLabel(u);
+    loginLine.classList.toggle("dim", !account.uuid);
     const lines = [account.uuid ? `Claude login: ${loginLabel(u)}` : `No Claude login on this workspace.`];
     if (account.org) lines.push(account.org);
     if (u.auth) lines.push(`Paying by: ${AUTH_LABELS[u.auth] || u.auth}`);
     if (u.note) lines.push(u.note);
-    loginChip.title = lines.join("\n");
+    loginLine.title = lines.join("\n");
   }
-  box.hidden = loginChip.hidden && serverChip.hidden && ctxChip.hidden;
+  box.hidden = serverLine.hidden && loginLine.hidden;
 }
 
 // Token counts are for the tooltip, where "128k of 200k" answers the question the
@@ -1252,53 +1259,81 @@ function renderServers() {
   list.replaceChildren(...stats.map(serverRow));
 }
 
+// One line: the name, then CPU as a percentage and memory and disk as figures.
+// Three stacked meters used three lines each, which a handful of servers turned
+// into the whole pane. Every value here is abbreviated, so every value has its
+// own tooltip saying what it is and what is left.
 function serverRow(s) {
   const row = document.createElement("div");
   row.className = "srv" + (s.reachable ? "" : " down");
-  row.title = serverTitle(s);
 
-  const head = document.createElement("div");
-  head.className = "srv-head";
   const name = document.createElement("span");
   name.className = "srv-name";
   name.textContent = s.host;
-  const note = document.createElement("span");
-  note.className = "srv-note";
-  note.textContent = s.reachable ? uptimeLabel(s.uptime) : (s.note || "unreachable");
-  head.append(name, note);
-  row.appendChild(head);
+  name.title = serverTitle(s);
+  row.appendChild(name);
 
-  if (!s.reachable) return row;
-  // A zero total is the daemon saying "not measured" — no machine has zero cores
-  // or zero bytes of RAM — so those meters read "—" instead of a confident 0%.
-  row.append(
-    meterRow("CPU", s.cpu_cores ? s.cpu_percent : null),
-    meterRow("RAM", pctOf(s.mem_used, s.mem_total)),
-    meterRow("DSK", pctOf(s.disk_used, s.disk_total)),
+  if (!s.reachable) {
+    // The row stays — a server that went down is exactly the one you want to see
+    // listed — but there are no figures to line up, so the reason takes their place.
+    const note = document.createElement("span");
+    note.className = "srv-note";
+    note.textContent = s.note || "unreachable";
+    note.title = s.detail || s.note || "unreachable";
+    row.appendChild(note);
+    return row;
+  }
+
+  const memPct = pctOf(s.mem_used, s.mem_total);
+  const diskPct = pctOf(s.disk_used, s.disk_total);
+  const metrics = document.createElement("span");
+  metrics.className = "srv-metrics";
+  metrics.append(
+    metric(ICON_CPU, s.cpu_cores ? Math.round(s.cpu_percent) + "%" : "—",
+      s.cpu_cores ? s.cpu_percent : null,
+      s.cpu_cores
+        ? `CPU ${Math.round(s.cpu_percent)}% of ${s.cpu_cores} core${s.cpu_cores === 1 ? "" : "s"}`
+        : "CPU not measured"),
+    metric(ICON_MEM, figures(s.mem_used, s.mem_total), memPct,
+      s.mem_total
+        ? `RAM ${fmtBytes(s.mem_used)} of ${fmtBytes(s.mem_total)} · ${Math.round(memPct)}% used · ` +
+          `${fmtBytes(s.mem_total - s.mem_used)} free`
+        : "RAM not measured"),
+    metric(ICON_DISK, figures(s.disk_used, s.disk_total), diskPct,
+      s.disk_total
+        ? `Disk ${fmtBytes(s.disk_used)} of ${fmtBytes(s.disk_total)} · ${Math.round(diskPct)}% used · ` +
+          `${fmtBytes(s.disk_total - s.disk_used)} free` + (s.disk_path ? ` on ${s.disk_path}` : "")
+        : "Disk not measured"),
   );
+  row.appendChild(metrics);
   return row;
 }
 
-// One labelled bar. pct null means unmeasured: an empty track and a dash, which
-// is different from a measured zero.
-function meterRow(label, pct) {
-  const el = document.createElement("div");
-  el.className = "meter";
-  const name = document.createElement("span");
-  name.textContent = label;
-  const bar = document.createElement("div");
-  bar.className = "bar";
-  const fill = document.createElement("i");
-  const p = pct == null ? 0 : Math.max(0, Math.min(100, pct));
-  fill.style.width = p.toFixed(1) + "%";
-  if (pct != null && p >= 90) fill.className = "crit";
-  else if (pct != null && p >= 75) fill.className = "warn";
-  bar.appendChild(fill);
-  const val = document.createElement("span");
-  val.className = "meter-val";
-  val.textContent = pct == null ? "—" : Math.round(p) + "%";
-  el.append(name, bar, val);
+// One icon and one value. pct is what decides the colour — the value itself may be
+// a pair of figures with no threshold of its own — and null means unmeasured, so a
+// dash rather than a confident zero.
+function metric(icon, text, pct, title) {
+  const el = document.createElement("span");
+  el.className = "m";
+  el.title = title;
+  const box = document.createElement("span");
+  box.innerHTML = icon;
+  const val = document.createElement("b");
+  val.textContent = text;
+  if (pct != null && pct >= 90) val.className = "crit";
+  else if (pct != null && pct >= 75) val.className = "warn";
+  el.append(box.firstChild, val);
   return el;
+}
+
+// "41/63" — the unit is the same on both sides of the slash and on every row, so
+// printing it six times per panel says nothing the tooltip does not say better.
+// Whole gibibytes: a sidebar column is no place for a decimal that moves every
+// ten seconds.
+function figures(used, total) {
+  if (!total) return "—";
+  const g = (n) => Math.round(n / (1024 * 1024 * 1024));
+  return `${g(used)}/${g(total)}`;
 }
 
 function pctOf(used, total) {
@@ -1306,25 +1341,15 @@ function pctOf(used, total) {
   return (used / total) * 100;
 }
 
-// The tooltip carries what the bars can't: the address, the cores, and the actual
-// gigabytes — "83% full" and "12 GiB left" are different questions.
+// The name's tooltip: what the name itself had to truncate, plus the two facts
+// that have nowhere else to go. The figures are not repeated here — each carries
+// its own tooltip now, next to the number it explains.
 function serverTitle(s) {
   const lines = [s.host + (s.addr ? " · " + s.addr : "")];
   if (!s.reachable) {
-    // The row shows the short label; the tooltip is where the reason fits.
     lines.push(s.detail || s.note || "unreachable");
     return lines.join("\n");
   }
-  lines.push(s.cpu_cores
-    ? `CPU ${Math.round(s.cpu_percent)}% of ${s.cpu_cores} core${s.cpu_cores === 1 ? "" : "s"}`
-    : "CPU not measured");
-  lines.push(s.mem_total
-    ? `RAM ${fmtBytes(s.mem_used)} / ${fmtBytes(s.mem_total)}`
-    : "RAM not measured");
-  lines.push(s.disk_total
-    ? `Disk ${fmtBytes(s.disk_used)} / ${fmtBytes(s.disk_total)}` +
-      (s.disk_path ? ` on ${s.disk_path}` : "")
-    : "Disk not measured");
   if (s.uptime) lines.push("up " + uptimeLabel(s.uptime).replace(/^up /, ""));
   return lines.join("\n");
 }
@@ -3054,6 +3079,14 @@ const SVG_ATTRS = 'viewBox="0 0 24 24" width="13" height="13" fill="none" stroke
   'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
 const ICON_FOLDER = `<svg ${SVG_ATTRS}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
 const ICON_FILE = `<svg ${SVG_ATTRS}><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>`;
+// The server metrics' icons. Small, because each sits in an 11px column and
+// stands in for a word ("CPU", "RAM") rather than illustrating one.
+const ICON_CPU = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="8" height="8" rx="1"/><rect x="4.5" y="4.5" width="15" height="15" rx="2"/><path d="M9 2v2.5M15 2v2.5M9 19.5V22M15 19.5V22M2 9h2.5M2 15h2.5M19.5 9H22M19.5 15H22"/></svg>`;
+const ICON_MEM = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="7" width="19" height="10" rx="1.5"/><path d="M6.5 17v2.5M12 17v2.5M17.5 17v2.5M7 11v2M12 11v2M17 11v2"/></svg>`;
+const ICON_DISK = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="6.5" rx="8" ry="3"/><path d="M4 6.5v11c0 1.7 3.6 3 8 3s8-1.3 8-3v-11"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>`;
+// The tracking banner's pause/resume pair, swapped by renderTrackBanner.
+const ICON_PAUSE = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="4.5" width="4" height="15" rx="1"/><rect x="13.5" y="4.5" width="4" height="15" rx="1"/></svg>`;
+const ICON_PLAY = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><polygon points="7,4.5 19.5,12 7,19.5"/></svg>`;
 // A real chevron, rotated on expand — a 9px "▸" just read as a dot.
 const ICON_CHEVRON = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>`;
 
@@ -3370,26 +3403,16 @@ function portState(p) {
   }
 }
 
-// How each state paints. A table rather than a chain of ternaries, so adding a
-// state is one line and forgetting one is visible.
-const PORT_DOT = {
-  ok: "",
-  stopped: " stopped",
-  blocked: " bad",
-  error: " bad",
-  notunnel: " warn",
-  untunnelled: " warn",
-  connecting: " warn",
-};
-
 function portRow(p) {
   const st = portState(p);
   const row = document.createElement("div");
   row.className = "port" + (st === "ok" ? "" : " down");
   row.title = portTitle(p, st);
 
+  // The dot answers one question — is the container running — and the tunnel's
+  // state is carried by whether the row offers a link at all.
   const dot = document.createElement("span");
-  dot.className = "port-dot" + PORT_DOT[st];
+  dot.className = "port-dot " + (p.running ? "running" : "stopped");
 
   const label = document.createElement("span");
   label.className = "port-label";
@@ -3426,8 +3449,8 @@ function portTarget(p, st) {
 
 function portButton(p) {
   const b = document.createElement("button");
-  b.className = "port-act";
   const stop = p.running;
+  b.className = "port-act " + (stop ? "stop" : "start");
   b.title = stop ? `Stop ${p.name}` : `Start ${p.name}`;
   b.innerHTML = stop
     ? '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden="true">' +
