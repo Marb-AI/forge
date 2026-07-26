@@ -31,8 +31,8 @@ import (
 // second dialect between the two implementations.
 type Backend interface {
 	// Run executes cmd on the target. A remote command that exits non-zero is
-	// reported as *ExitError; anything else (unreachable host, refused key) is
-	// returned as the error it was.
+	// reported as *ExitError, and so is a failure the exec'd client can only
+	// express as an exit status — see ExitError for which those are.
 	Run(t Target, cmd Command) error
 	// Name identifies the backend in errors and diagnostics.
 	Name() string

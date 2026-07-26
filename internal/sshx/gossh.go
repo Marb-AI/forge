@@ -3,6 +3,7 @@ package sshx
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -80,10 +81,15 @@ func (b goBackend) Run(t Target, c Command) error {
 // none of that can be reviewed against "the behaviour is unchanged". It comes
 // with the step that measures it.
 func dial(t Target) (*ssh.Client, error) {
-	auth, err := authMethods()
+	auth, closeAuth, err := authMethods()
 	if err != nil {
 		return nil, err
 	}
+	// The agent is only consulted while the handshake runs, and ssh.Dial does not
+	// return until that is over — so this is the moment its socket stops being
+	// needed. Leaving it open would cost one file descriptor per command, which a
+	// daemon polling every workspace notices within the day.
+	defer closeAuth()
 	hostKeys, err := hostKeyCallback()
 	if err != nil {
 		return nil, err
@@ -171,33 +177,55 @@ func keepalive(client *ssh.Client) {
 	}
 }
 
-// authMethods offers the same identities the ssh binary would find: the agent
-// first, then the default key files.
+// authMethods offers the same identities the ssh binary would find: the agent's
+// keys first, then the default key files. The returned func releases what they
+// hold — today the agent's socket — and is safe to call more than once.
+//
+// They are offered as ONE publickey method, which is not a detail: x/crypto
+// tries each authentication method by *name* and never returns to a name it has
+// already tried, so an agent offered as its own method would mean a running
+// agent with no useful key in it silently prevents ~/.ssh from ever being tried
+// — a Forge that stops connecting because a colleague's agent is up. OpenSSH
+// walks its identities inside the single publickey method; so does this.
 //
 // Password and keyboard-interactive are absent rather than disabled, which is
 // what the exec'd backend spends two options saying (PasswordAuthentication=no,
 // KbdInteractiveAuthentication=no): a bad key must fail immediately and
 // honestly instead of dropping into a prompt, which in the UI daemon is a
 // prompt nobody is there to answer.
-func authMethods() ([]ssh.AuthMethod, error) {
-	var methods []ssh.AuthMethod
+func authMethods() ([]ssh.AuthMethod, func(), error) {
+	var (
+		signers []ssh.Signer
+		open    []io.Closer
+	)
+	release := func() {
+		for _, c := range open {
+			c.Close()
+		}
+		open = nil
+	}
 
-	// The agent, if one is running. It is first because it is where a key with a
-	// passphrase — already unlocked, once, by whoever started the agent — lives.
+	// The agent, if one is running. Its keys come first because that is where a
+	// passphrase-protected key — already unlocked, once, by whoever started the
+	// agent — lives. They stay usable only while the socket is open, since the
+	// signing happens on the far side of it; that is why release runs after the
+	// handshake rather than here.
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if conn, err := net.Dial("unix", sock); err == nil {
-			methods = append(methods, ssh.PublicKeysCallback(agent.NewClient(conn).Signers))
+			open = append(open, conn)
+			if fromAgent, err := agent.NewClient(conn).Signers(); err == nil {
+				signers = append(signers, fromAgent...)
+			}
 		}
 	}
 
-	if signers := defaultIdentities(); len(signers) > 0 {
-		methods = append(methods, ssh.PublicKeys(signers...))
-	}
-	if len(methods) == 0 {
-		return nil, fmt.Errorf("no usable SSH key: no agent (SSH_AUTH_SOCK) and nothing readable in ~/.ssh (%s)",
+	signers = append(signers, defaultIdentities()...)
+	if len(signers) == 0 {
+		release()
+		return nil, func() {}, fmt.Errorf("no usable SSH key: no agent (SSH_AUTH_SOCK) and nothing readable in ~/.ssh (%s)",
 			"id_ed25519, id_ecdsa, id_rsa")
 	}
-	return methods, nil
+	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, release, nil
 }
 
 // identityFiles are the key names OpenSSH tries by default, in its order.

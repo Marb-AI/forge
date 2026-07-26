@@ -317,6 +317,101 @@ func TestTheGoClientOffersOnlyKeys(t *testing.T) {
 	}
 }
 
+// The agent is consulted on every connection, and there is a connection per
+// command — so a socket left open is a file descriptor per command, and a daemon
+// that polls every workspace runs out of them. It has to be released when the
+// handshake that needed it is over.
+func TestTheAgentSocketIsReleasedAfterEveryCommand(t *testing.T) {
+	pub := writeClientKey(t)
+	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
+		return "ok", "", 0
+	})
+	trust(t, srv)
+	useGo(t)
+	agentConns := startStubAgent(t)
+
+	if _, err := srv.target("crm").Output("id"); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := <-agentConns
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Errorf("the agent socket is still open after the command: read gave %v, want EOF", err)
+	}
+}
+
+// An agent that is running but holds nothing useful must not stop the key files
+// from being tried — x/crypto walks authentication methods by name and never
+// goes back to one it has tried, so offering the agent separately would let a
+// colleague's empty agent lock Forge out of every server it can reach today.
+func TestAnAgentWithNoKeysDoesNotShadowTheKeyFiles(t *testing.T) {
+	pub := writeClientKey(t)
+	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
+		return "reached", "", 0
+	})
+	trust(t, srv)
+	useGo(t)
+	startStubAgent(t)
+
+	out, err := srv.target("crm").Output("id")
+	if err != nil {
+		t.Fatalf("an empty agent shadowed ~/.ssh: %v", err)
+	}
+	if string(out) != "reached" {
+		t.Errorf("Output = %q, want the server's stdout", out)
+	}
+}
+
+// startStubAgent listens on a unix socket, points SSH_AUTH_SOCK at it, and hands
+// back every connection it accepts.
+//
+// It answers "I have no keys", which is a real answer rather than a hang: the
+// client asks for identities before it gives up on the agent and moves on to the
+// key files, and a stub that never replies would leave the handshake waiting.
+func startStubAgent(t *testing.T) <-chan net.Conn {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "sshx-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	sock := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	t.Setenv("SSH_AUTH_SOCK", sock)
+
+	conns := make(chan net.Conn, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				// One request in (SSH2_AGENTC_REQUEST_IDENTITIES), one answer out:
+				// message 12, zero keys. Then the connection is the client's to close,
+				// which is the whole point of the test.
+				var head [4]byte
+				if _, err := io.ReadFull(conn, head[:]); err != nil {
+					return
+				}
+				n := int(head[0])<<24 | int(head[1])<<16 | int(head[2])<<8 | int(head[3])
+				if _, err := io.ReadFull(conn, make([]byte, n)); err != nil {
+					return
+				}
+				conn.Write([]byte{0, 0, 0, 5, 12, 0, 0, 0, 0})
+			}()
+			conns <- conn
+		}
+	}()
+	return conns
+}
+
 // useGo selects the pure-Go backend for one test.
 func useGo(t *testing.T) {
 	t.Helper()
