@@ -7,43 +7,34 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-
-	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/sshx"
 )
 
-// Claude session actions exposed to the UI. stop and restart are simple tmux
-// operations over ssh (implemented here); checkpoint is the involved
-// save-handoff-then-restart flow, injected from the cli package via Deps so the
-// UI and CLI share identical behaviour.
+// The Claude session actions exposed to the UI: stop, restart, and the involved
+// save-handoff-then-restart flow that is checkpoint. All three are the core's
+// operations; this package implements none of them itself.
+//
+// Restart and checkpoint are the very same calls the CLI makes. Stop is not, yet:
+// forge.StopSession also clears the session's clocks, where `forge workspace
+// <name> claude stop` kills the tmux session and nothing else — and reports when
+// there was no session to kill, which the core's stop deliberately tolerates.
+// That drift predates the core and wants a PR that can decide what a stop should
+// say, rather than one that moved code on the promise of changing no behaviour.
+//
+// What is left here is the HTTP shape: an unknown workspace is a 404, because the
+// browser asked for something that does not exist, while a failure past that
+// point is a 502 — the server we were told to reach did not answer.
 
-func (s *server) wsTarget(ws string) (sshx.Target, error) {
-	h := s.deps.HostFor(ws)
-	if h == nil {
-		return sshx.Target{}, fmt.Errorf("unknown workspace %q", ws)
-	}
-	return sshx.WorkspaceTarget(h, ws), nil
-}
-
-// handleStop kills the workspace's Claude tmux session. The attached browser
-// terminal sees the stream end; the session is gone from the server (like
-// `forge workspace <name> claude stop`).
+// handleStop kills the workspace's Claude tmux session and ends its clocks with
+// it: a stop is the end of a session, so the next one starts them over. The
+// attached browser terminal sees the stream end; the session is gone from the
+// server.
 func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
-	target, err := s.wsTarget(r.PathValue("ws"))
-	if err != nil {
-		writeJSONError(w, http.StatusNotFound, err)
+	ws := r.PathValue("ws")
+	if s.deps.HostFor(ws) == nil {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
-	// `|| true` makes "no such session" a success (stopping an already-stopped
-	// session is a no-op) while leaving a genuine failure — an unreachable host —
-	// as an error. Swallowing every error would report "stopped" for a server we
-	// never even reached.
-	//
-	// Clearing the tracking file in the same round trip ends the session's clocks: a
-	// stop is the end of the session, so its start and time-present are gone (a fresh
-	// session starts them over). A checkpoint, by contrast, keeps them.
-	remote := agentproto.KillClaude + "; " + agentproto.ClearSession
-	if _, err := sshx.Capture(target.Args(remote)...); err != nil {
+	if err := s.deps.StopSession(ws); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("stop: %w", err))
 		return
 	}
@@ -53,16 +44,12 @@ func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 // handleRestart hard-restarts the session: kill it, then start a fresh detached
 // Claude. The browser terminal reconnects and attaches to the new session.
 func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
-	target, err := s.wsTarget(r.PathValue("ws"))
-	if err != nil {
-		writeJSONError(w, http.StatusNotFound, err)
+	ws := r.PathValue("ws")
+	if s.deps.HostFor(ws) == nil {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
-	// Kill then relaunch in one round trip; the kill tolerates "no session", so a
-	// restart also works as a start. Clear the tracking file too: a hard restart is a
-	// new session with a new task, so its clocks start over (unlike a checkpoint).
-	remote := agentproto.KillClaude + "; " + agentproto.ClearSession + "; " + agentproto.StartClaude
-	if _, err := sshx.Capture(target.Args(remote)...); err != nil {
+	if err := s.deps.RestartSession(ws); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Errorf("restart: %w", err))
 		return
 	}

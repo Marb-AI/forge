@@ -9,15 +9,14 @@ import (
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
-// CallAgent invokes forge-agent on the host over SSH (as the admin user, via
+// callAgent invokes forge-agent on the host over SSH (as the admin user, via
 // sudo) and decodes its JSON stdout into out. If the agent reports an error
 // (JSON {"error": ...}) that becomes a Go error, regardless of exit status.
 //
-// Exported for the operations still living in the cli package — the writes, which
-// move here next. It is not meant to be part of this package's lasting surface:
-// what a caller outside should be reaching for is the operation, not the transport
-// under it.
-func CallAgent(h *config.Host, out any, op string, opArgs ...string) error {
+// Unexported, now that every operation that needs it lives here: the transport is
+// this package's own business, and what a front end reaches for is the operation
+// — CreateWorkspace, Ports — never the pipe underneath it.
+func callAgent(h *config.Host, out any, op string, opArgs ...string) error {
 	target := sshx.AdminTarget(h)
 	// Root needs no sudo (and the box may not even have sudo); a non-root admin
 	// uses the passwordless sudoers rule installed by `forge host prepare`.

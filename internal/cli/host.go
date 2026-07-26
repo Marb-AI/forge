@@ -7,6 +7,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/forge"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
@@ -28,6 +29,32 @@ func hostCmd(args []string) int {
 	default:
 		return fail("unknown host command %q", args[0])
 	}
+}
+
+// hostPrepare reads the flags of `forge host prepare` and hands the provisioning
+// itself to the core, which streams its progress to stdout.
+func hostPrepare(args []string) int {
+	alias, rest := extractFlag(args, "alias")
+	noFirewall := hasBoolFlag(rest, "--no-firewall")
+	noHarden := hasBoolFlag(rest, "--no-ssh-harden")
+	noPrune := hasBoolFlag(rest, "--no-docker-prune")
+	pruneImages := hasBoolFlag(rest, "--docker-prune-images")
+	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune", "--docker-prune-images")
+
+	// The image sweep is a tier of the nightly clean-up, not a standalone job — it's
+	// injected into that script. Asking for it while declining the clean-up would
+	// silently install nothing, so reject the contradiction rather than no-op.
+	if noPrune && pruneImages {
+		return fail("--docker-prune-images is part of the nightly clean-up; drop --no-docker-prune to use it")
+	}
+
+	if len(rest) < 1 || alias == "" {
+		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images]")
+	}
+	if err := forge.PrepareHost(rest[0], alias, !noFirewall, !noHarden, !noPrune, pruneImages, os.Stdout); err != nil {
+		return fail("%v", err)
+	}
+	return 0
 }
 
 // hostGhLogin authenticates gh once per host, into the host's own gh config
@@ -53,9 +80,9 @@ func hostGhLogin(args []string) int {
 	// GH_CONFIG_DIR puts hosts.yml under /etc/forge/gh instead of ~/.config/gh.
 	// The file holds a token, so it stays root-only; the agent copies it in as
 	// root at create time.
-	remote := "install -d -m 0755 " + hostGhDir +
-		" && GH_CONFIG_DIR=" + hostGhDir + " gh auth login" +
-		" && chmod 0600 " + hostGhDir + "/hosts.yml"
+	remote := "install -d -m 0755 " + forge.HostGhDir +
+		" && GH_CONFIG_DIR=" + forge.HostGhDir + " gh auth login" +
+		" && chmod 0600 " + forge.HostGhDir + "/hosts.yml"
 	if host.User != "root" {
 		remote = "sudo sh -c '" + remote + "'"
 	}
@@ -127,30 +154,11 @@ func hostRemove(args []string) int {
 	if len(args) == 0 {
 		return fail("usage: forge host remove <alias>")
 	}
-	if err := removeHost(args[0]); err != nil {
+	if err := forge.RemoveHost(args[0]); err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("removed host %q\n", args[0])
 	return 0
-}
-
-// removeHost forgets a server locally. It does NOT touch the machine: the server
-// keeps running, and so do its workspaces — Forge just stops knowing about them.
-// Shared by `forge host remove` and the UI's settings panel.
-func removeHost(alias string) error {
-	return config.Update(func(c *config.Config) error {
-		if _, ok := c.Hosts[alias]; !ok {
-			return fmt.Errorf("no such host %q", alias)
-		}
-		delete(c.Hosts, alias)
-		delete(c.Ports, alias)
-		for ws, host := range c.Workspaces {
-			if host == alias {
-				delete(c.Workspaces, ws)
-			}
-		}
-		return nil
-	})
 }
 
 func flush(w *tabwriter.Writer) int {

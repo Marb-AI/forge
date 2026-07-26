@@ -1,7 +1,12 @@
 package forge
 
 import (
+	"encoding/base64"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 
 	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
@@ -124,7 +129,7 @@ func ListWorkspaces() ([]WorkspaceInfo, error) {
 			continue // config names a host it no longer has; treated as unreachable
 		}
 		var res agentproto.ListResult
-		if err := CallAgent(host, &res, "workspace-list"); err != nil {
+		if err := callAgent(host, &res, "workspace-list"); err != nil {
 			continue // unreachable; its workspaces are reported as such below
 		}
 		byName := map[string]string{}
@@ -166,7 +171,7 @@ func WorkspaceActivity() (map[string]Activity, error) {
 			continue
 		}
 		var res agentproto.ActivityResult
-		if err := CallAgent(host, &res, "workspace-activity"); err != nil {
+		if err := callAgent(host, &res, "workspace-activity"); err != nil {
 			continue // unreachable: its tabs just stay dim
 		}
 		for name, a := range res.Activity {
@@ -198,7 +203,7 @@ func WorkspaceTrack() (map[string]Track, error) {
 			continue
 		}
 		var res agentproto.TrackResult
-		if err := CallAgent(host, &res, "workspace-track"); err != nil {
+		if err := callAgent(host, &res, "workspace-track"); err != nil {
 			continue // unreachable: its clocks just don't update this round
 		}
 		for name, t := range res.Sessions {
@@ -240,7 +245,7 @@ func WorkspaceUsage() (map[string]Usage, error) {
 			continue
 		}
 		var res agentproto.UsageResult
-		if err := CallAgent(host, &res, "workspace-usage"); err != nil {
+		if err := callAgent(host, &res, "workspace-usage"); err != nil {
 			continue // unreachable, or an agent too old to know the op
 		}
 		for name, u := range res.Usage {
@@ -306,4 +311,122 @@ func mergeWorkspaceStatus(mine map[string]string, sessions map[string]map[string
 		out = append(out, WorkspaceInfo{Name: name, Host: alias, Status: status})
 	}
 	return out
+}
+
+// CreateWorkspace provisions a workspace on a registered host and records it
+// locally.
+//
+// It returns the port block the workspace was given, which is the one thing about
+// a new workspace the caller has to be told: it is what the ports in its repo will
+// have to be.
+func CreateWorkspace(name, alias string) (*PortBlock, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	host := cfg.Hosts[alias]
+	if host == nil {
+		return nil, fmt.Errorf("no such host %q (see: forge host list)", alias)
+	}
+
+	pubkey, err := findPublicKey()
+	if err != nil {
+		return nil, err
+	}
+	enc := base64.StdEncoding.EncodeToString(pubkey)
+
+	// Before creating anything: allocation reads every host, and a failure here
+	// should leave nothing behind. A workspace created and then found to have no
+	// block would need cleaning up by hand.
+	//
+	// The block is reserved for the duration, because what follows is slow —
+	// creating a workspace installs Claude Code from the network — and until it
+	// lands, nothing else asking for a block would see this one taken.
+	block, err := allocateBlock(cfg, name, alias)
+	if err != nil {
+		return nil, err
+	}
+
+	var res agentproto.CreateResult
+	if err := callAgent(host, &res, "workspace-create",
+		"--name", name,
+		"--pubkey", enc,
+		"--port-start", strconv.Itoa(block.Start),
+		"--port-size", strconv.Itoa(block.Size),
+	); err != nil {
+		releaseBlock(name)
+		return nil, err
+	}
+
+	// Record it in its own step, and only it. The load above is minutes old by now
+	// (creating the user on the server is an SSH round trip), so saving that whole
+	// copy back would undo anything else written meanwhile — the UI port, a server
+	// just registered, another workspace created from a second tab.
+	if err := config.Update(func(c *config.Config) error {
+		c.AddWorkspace(name, alias)
+		// The workspace now holds the block on its host, which is the real record;
+		// the reservation has done its job. Dropped in the same update that records
+		// the workspace, so there is no moment where neither speaks for the block.
+		c.ReleasePortBlock(name)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return block, nil
+}
+
+// DeleteWorkspace destroys a workspace on its host and forgets it locally.
+// This is irreversible: the agent runs `userdel -r`, so the workspace's Linux
+// user and its entire home — every file in it — are gone.
+func DeleteWorkspace(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	host := cfg.HostFor(name)
+	if host == nil {
+		return fmt.Errorf("unknown workspace %q — not created by this client", name)
+	}
+	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
+		return err
+	}
+	return config.Update(func(c *config.Config) error {
+		c.RemoveWorkspace(name)
+		return nil
+	})
+}
+
+// TrackInc adds seconds of user-present time to a workspace's session tracking, via
+// the agent on its host. The browser flushes accumulated activity here; a flush that
+// can't reach the host simply doesn't land and the next one carries the arrears.
+func TrackInc(name string, seconds int) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	host := cfg.HostFor(name)
+	if host == nil {
+		return fmt.Errorf("unknown workspace %q", name)
+	}
+	return callAgent(host, nil, "workspace-track-inc",
+		"-name", name, "-seconds", strconv.Itoa(seconds))
+}
+
+// findPublicKey returns the client's SSH public key to install into the
+// workspace user's authorized_keys. FORGE_PUBKEY overrides the search.
+func findPublicKey() ([]byte, error) {
+	if p := os.Getenv("FORGE_PUBKEY"); p != "" {
+		return os.ReadFile(p)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range []string{"id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"} {
+		p := filepath.Join(home, ".ssh", name)
+		if data, err := os.ReadFile(p); err == nil {
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("no SSH public key found in ~/.ssh (set FORGE_PUBKEY to override)")
 }

@@ -83,7 +83,7 @@ func HostStats() ([]HostStat, error) {
 func hostStat(alias string, h *config.Host) HostStat {
 	stat := HostStat{Host: alias, Addr: h.Addr}
 	var res agentproto.HostStats
-	if err := CallAgent(h, &res, "host-stats"); err != nil {
+	if err := callAgent(h, &res, "host-stats"); err != nil {
 		stat.Note, stat.Detail = statsNote(err)
 		return stat
 	}

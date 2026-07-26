@@ -1,4 +1,4 @@
-package cli
+package forge
 
 import (
 	"testing"
@@ -6,35 +6,39 @@ import (
 	"github.com/Marb-AI/forge/config"
 )
 
-// setUIPort is what both `forge ui port` and the UI's settings panel go through,
+// SetUIPort is what both `forge ui port` and the UI's settings panel go through,
 // so its range check is the only thing standing between a typo and a daemon that
 // won't start.
+//
+// It writes a real config file, under the throwaway HOME this package's TestMain
+// installs — never the developer's.
 func TestSetUIPortRejectsOutOfRange(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	before, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, p := range []int{0, -1, 65536, 1 << 20} {
-		if err := setUIPort(p); err == nil {
-			t.Errorf("setUIPort(%d) should be refused", p)
+		if err := SetUIPort(p); err == nil {
+			t.Errorf("SetUIPort(%d) should be refused", p)
 		}
 	}
 
 	// A refused port must not have been written, or the next start would try to
 	// bind it anyway.
-	cfg, err := config.Load()
+	after, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.UIPort != 0 {
-		t.Errorf("a rejected port was persisted anyway: %d", cfg.UIPort)
+	if after.UIPort != before.UIPort {
+		t.Errorf("a rejected port was persisted anyway: %d (was %d)", after.UIPort, before.UIPort)
 	}
 }
 
 func TestSetUIPortPersists(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
 	for _, p := range []int{1, 8099, 65535} {
-		if err := setUIPort(p); err != nil {
-			t.Fatalf("setUIPort(%d): %v", p, err)
+		if err := SetUIPort(p); err != nil {
+			t.Fatalf("SetUIPort(%d): %v", p, err)
 		}
 		cfg, err := config.Load()
 		if err != nil {

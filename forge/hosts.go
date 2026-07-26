@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/Marb-AI/forge/config"
@@ -33,4 +34,23 @@ func ListHosts() ([]string, error) {
 	}
 	sort.Strings(aliases)
 	return aliases, nil
+}
+
+// RemoveHost forgets a server locally. It does NOT touch the machine: the server
+// keeps running, and so do its workspaces — Forge just stops knowing about them,
+// which is why this one is reversible, with `forge host add`.
+func RemoveHost(alias string) error {
+	return config.Update(func(c *config.Config) error {
+		if _, ok := c.Hosts[alias]; !ok {
+			return fmt.Errorf("no such host %q", alias)
+		}
+		delete(c.Hosts, alias)
+		delete(c.Ports, alias)
+		for ws, host := range c.Workspaces {
+			if host == alias {
+				delete(c.Workspaces, ws)
+			}
+		}
+		return nil
+	})
 }

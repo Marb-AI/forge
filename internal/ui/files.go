@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"os/exec"
 	"path"
@@ -12,6 +13,17 @@ import (
 
 	"github.com/Marb-AI/forge/internal/sshx"
 )
+
+// wsTarget resolves a workspace to the SSH target that logs into it. The file
+// browser is the last thing here that needs one: every other operation is the
+// core's, and reaching a workspace is its business, not this package's.
+func (s *server) wsTarget(ws string) (sshx.Target, error) {
+	h := s.deps.HostFor(ws)
+	if h == nil {
+		return sshx.Target{}, fmt.Errorf("unknown workspace %q", ws)
+	}
+	return sshx.WorkspaceTarget(h, ws), nil
+}
 
 var (
 	errBadPath  = errors.New("path escapes the workspace")

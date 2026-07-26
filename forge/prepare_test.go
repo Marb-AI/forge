@@ -1,4 +1,4 @@
-package cli
+package forge
 
 import (
 	"os"
@@ -96,5 +96,29 @@ func TestPrepareKeyGenIsGuarded(t *testing.T) {
 	first := runSection()
 	if second := runSection(); first != second {
 		t.Error("re-running prepare regenerated the host key; it must be kept")
+	}
+}
+
+func TestUnameToGoArch(t *testing.T) {
+	for in, want := range map[string]string{"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"} {
+		got, err := unameToGoArch(in)
+		if err != nil || got != want {
+			t.Errorf("unameToGoArch(%q) = (%q,%v), want %q", in, got, err, want)
+		}
+	}
+	if _, err := unameToGoArch("mips"); err == nil {
+		t.Error("expected error for unsupported arch")
+	}
+}
+
+func TestIproutePackage(t *testing.T) {
+	if p, ok := iproutePackage("apt-get"); !ok || p != "iproute2" {
+		t.Errorf("apt-get -> %q,%v", p, ok)
+	}
+	if p, ok := iproutePackage("dnf"); !ok || p != "iproute" {
+		t.Errorf("dnf -> %q,%v", p, ok)
+	}
+	if _, ok := iproutePackage("apk"); ok {
+		t.Error("expected apk unsupported")
 	}
 }
