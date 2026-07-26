@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -20,13 +21,35 @@ type fakeBackend struct {
 	target Target
 	cmd    Command
 	shell  Shell
-	stdin  string
-	stdout string
-	stderr string
-	err    error
+	// local and remote are the ports of the last forward asked for.
+	local, remote int
+	stdin         string
+	stdout        string
+	stderr        string
+	err           error
 }
 
 func (f *fakeBackend) Name() string { return "fake" }
+
+func (f *fakeBackend) Forward(t Target, local, remote int) (Tunnel, error) {
+	f.target, f.local, f.remote = t, local, remote
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &fakeTunnel{done: make(chan struct{})}, nil
+}
+
+// fakeTunnel is a tunnel that carries nothing and stops only when it is closed.
+type fakeTunnel struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func (f *fakeTunnel) Wait() error { <-f.done; return nil }
+func (f *fakeTunnel) Close() error {
+	f.once.Do(func() { close(f.done) })
+	return nil
+}
 
 func (f *fakeBackend) Open(t Target, s Shell) (Terminal, error) {
 	f.target, f.shell = t, s
@@ -177,9 +200,6 @@ func TestTheDefaultBackendIsStillTheSshBinary(t *testing.T) {
 // there is no argv, because there is no process — is exactly where that
 // decision cannot be made. Args therefore has one caller, the backend that
 // execs ssh, and this is what keeps it that way.
-//
-// LocalForwardArgs is deliberately not covered: the supervisor's tunnels still
-// exec ssh directly, and they move behind this seam in their own step.
 func TestNothingBuildsAnSshArgvExceptTheBackendThatExecsIt(t *testing.T) {
 	for _, f := range filesUsing(t, ".Args(") {
 		if f == "internal/sshx/execssh.go" {
@@ -208,6 +228,25 @@ func TestOnlyTheCLIsOwnSessionsStillBuildAnInteractiveArgv(t *testing.T) {
 		}
 		t.Errorf("%s builds an interactive ssh argv; a terminal for a front end comes "+
 			"from Open(Shell{...}), so a client with no argv can give it one too", f)
+	}
+}
+
+// And the same rule for a tunnel's argv, which the supervisor no longer builds:
+// it asks the target to Forward a port and holds what comes back, so the daemon
+// that keeps a workspace's ports reachable works on a machine with no ssh binary
+// to supervise. What is left is `forge expose`, which — like the sessions above —
+// is a tunnel held in the CLI's own foreground and exists only where a shell does.
+func TestOnlyTheCLIsOwnTunnelStillBuildsAForwardingArgv(t *testing.T) {
+	allowed := map[string]bool{
+		"internal/sshx/execssh.go": true, // where a Forward becomes one
+		"forge/shell.go":           true, // forge expose
+	}
+	for _, f := range filesUsing(t, ".LocalForwardArgs(") {
+		if allowed[f] {
+			continue
+		}
+		t.Errorf("%s builds an ssh forwarding argv; ask the target to Forward the port "+
+			"instead, so a client with no argv can carry it too", f)
 	}
 }
 

@@ -186,33 +186,6 @@ func TestCachedTunnelsSkipsUnknownHosts(t *testing.T) {
 	}
 }
 
-func TestIsPortBusy(t *testing.T) {
-	busy := []string{
-		"bind [127.0.0.1]:16104: Address already in use",
-		"channel_setup_fwd_listener_tcpip: cannot listen to port: 16104",
-	}
-	for _, s := range busy {
-		if !isPortBusy(s) {
-			t.Errorf("isPortBusy(%q) = false", s)
-		}
-	}
-	// A local collision must not be confused with the two failures that already
-	// have their own handling: one is terminal, the other retries quietly.
-	notBusy := []string{
-		"Permission denied (publickey).",
-		"ssh: connect to host 1.2.3.4 port 22: Connection refused",
-		"",
-	}
-	for _, s := range notBusy {
-		if isPortBusy(s) {
-			t.Errorf("isPortBusy(%q) = true", s)
-		}
-	}
-	if isAuthFailure(busy[0]) {
-		t.Error("a busy local port must not read as an auth failure")
-	}
-}
-
 func TestBusyDetailAlwaysSaysSomethingUseful(t *testing.T) {
 	// Port 0 is never listening, so the lsof lookup finds nothing — the message
 	// must still state the fact rather than come out half-written.

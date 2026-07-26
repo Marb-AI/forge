@@ -133,16 +133,52 @@ func (s *testServer) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 	go ssh.DiscardRequests(reqs)
 
 	for newCh := range chans {
-		if newCh.ChannelType() != "session" {
-			newCh.Reject(ssh.UnknownChannelType, "only sessions here")
-			continue
+		switch newCh.ChannelType() {
+		case "session":
+			ch, chReqs, err := newCh.Accept()
+			if err != nil {
+				return
+			}
+			go s.session(ch, chReqs)
+		case "direct-tcpip":
+			go s.direct(newCh)
+		default:
+			newCh.Reject(ssh.UnknownChannelType, "not something this server does")
 		}
-		ch, chReqs, err := newCh.Accept()
-		if err != nil {
-			return
-		}
-		go s.session(ch, chReqs)
 	}
+}
+
+// direct answers the channel a local forward opens: it connects to the address
+// the client named — resolving it here, on the server's side, which is the whole
+// meaning of `-L port:localhost:port` — and joins the two ends.
+func (s *testServer) direct(newCh ssh.NewChannel) {
+	var payload struct {
+		Host     string
+		Port     uint32
+		OrigHost string
+		OrigPort uint32
+	}
+	if err := ssh.Unmarshal(newCh.ExtraData(), &payload); err != nil {
+		newCh.Reject(ssh.ConnectionFailed, "unreadable direct-tcpip request")
+		return
+	}
+	s.record("direct-tcpip %s:%d", payload.Host, payload.Port)
+
+	conn, err := net.Dial("tcp", net.JoinHostPort(payload.Host, strconv.Itoa(int(payload.Port))))
+	if err != nil {
+		// What a real server says when nothing is listening there, and what makes a
+		// forward lazy: this connection fails, the tunnel does not.
+		newCh.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	ch, reqs, err := newCh.Accept()
+	if err != nil {
+		conn.Close()
+		return
+	}
+	go ssh.DiscardRequests(reqs)
+	go func() { io.Copy(ch, conn); ch.Close() }()
+	go func() { io.Copy(conn, ch); conn.Close() }()
 }
 
 // record notes an event, dropping it rather than blocking if a test is not

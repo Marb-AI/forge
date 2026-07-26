@@ -121,7 +121,12 @@ func (t Target) ttyArgs(s Shell) []string {
 }
 
 // LocalForwardArgs returns the ssh argv for a single local port forward with no
-// remote command (-N). This is what the supervisor runs per port.
+// remote command (-N).
+//
+// The supervisor's tunnels no longer come through here — they ask the target to
+// Forward a port, and only the exec'd backend turns that into an argv. What is
+// left is `forge expose`, the one tunnel held in the CLI's own foreground, for
+// the same reason its interactive sessions are (see RunInteractiveTo).
 func (t Target) LocalForwardArgs(localPort, remotePort int) []string {
 	args := commonOpts(t.Port)
 	args = append(args,

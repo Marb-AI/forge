@@ -2,6 +2,7 @@ package forge
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"slices"
@@ -149,6 +150,12 @@ type fakeTransport struct {
 
 func (*fakeTransport) Name() string                        { return "fake" }
 func (*fakeTransport) Run(sshx.Target, sshx.Command) error { return nil }
+
+// Nothing in this package forwards a port — that is the supervisor's, and it is
+// the one shape of the transport these tests never ask for.
+func (*fakeTransport) Forward(sshx.Target, int, int) (sshx.Tunnel, error) {
+	return nil, errors.New("this backend carries no ports")
+}
 
 func (f *fakeTransport) Open(t sshx.Target, s sshx.Shell) (sshx.Terminal, error) {
 	f.target, f.shell = t, s

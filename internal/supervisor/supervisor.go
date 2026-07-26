@@ -1,14 +1,17 @@
-// Package supervisor keeps a set of `ssh -L` tunnels alive. It is the one
-// genuinely non-trivial piece of Forge: a bare `ssh -L` is a single foreground
-// process that neither waits for a down server nor reconnects, so the client
-// must supervise it.
+// Package supervisor keeps a set of local port forwards alive. It is the one
+// genuinely non-trivial piece of Forge: a forward is a single thing that neither
+// waits for a down server nor reconnects, so the client must supervise it.
 //
-// Design:
-//   - one supervised ssh process PER PORT, so a single failure can't cascade;
+// What a forward is made of is not this package's business — it asks the
+// transport for one and holds it, so a tunnel is an ssh process on a laptop and a
+// listener over a connection where there is no process to be had. What is here is
+// the policy around it:
+//
+//   - one supervised tunnel PER PORT, so a single failure can't cascade;
 //   - 1-second fixed retry with no backoff, for sub-second recovery;
 //   - an authentication failure is terminal (retrying can't fix it), so that
 //     tunnel stops and is reported instead of spamming forever;
-//   - `-L` is lazy, so a workspace service being *down* does not break the
+//   - a forward is lazy, so a workspace service being *down* does not break the
 //     tunnel — a tunnel to something not currently listening costs nothing;
 //   - the set is not fixed at startup: it is reconciled every few seconds against
 //     what the hosts actually publish, so tunnels appear and disappear with the
@@ -16,9 +19,9 @@
 package supervisor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -32,7 +35,6 @@ import (
 
 	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/proc"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
@@ -410,11 +412,17 @@ func (s *Supervisor) stopAll() {
 	}
 }
 
-// supervise runs one port's ssh tunnel, restarting it on exit until the context
-// is cancelled or the failure is terminal (auth).
+// supervise holds one port's tunnel up, restarting it whenever it stops, until
+// the context is cancelled or the failure is one that retrying cannot fix.
+//
+// What a tunnel *is* is the transport's business and no longer this loop's: it
+// used to be an ssh process here, with this function reading the process's stderr
+// to find out what had gone wrong. It asks the target for one now, so the client
+// that carries it is the same decision as for every other thing Forge does to a
+// server — and on a phone, where there is no process to start, there is still a
+// tunnel.
 func (s *Supervisor) supervise(ctx context.Context, h *config.Host, k key) {
 	target := sshx.WorkspaceTarget(h, k.workspace)
-	args := target.LocalForwardArgs(k.port, k.port)
 
 	// Whether the last failure was the local port being taken, so the lookup of
 	// what holds it happens once per streak rather than once a second.
@@ -425,40 +433,18 @@ func (s *Supervisor) supervise(ctx context.Context, h *config.Host, k key) {
 			return
 		}
 
-		cmd := exec.CommandContext(ctx, "ssh", args...)
-		cmd.SysProcAttr = proc.ChildAttr()
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-
-		startErr := cmd.Start()
-		if startErr != nil {
-			s.set(k, StateRetrying, startErr.Error())
-			if !sleep(ctx, retryInterval) {
-				return
-			}
-			continue
-		}
-
-		// If it stays up briefly, consider it established.
-		established := time.AfterFunc(2*time.Second, func() {
-			s.set(k, StateUp, "")
-		})
-
-		waitErr := cmd.Wait()
-		established.Stop()
-
+		err := s.hold(ctx, target, k)
 		if ctx.Err() != nil {
 			return // shutting down, not a failure
 		}
 
-		msg := strings.TrimSpace(stderr.String())
-		if isAuthFailure(msg) {
+		switch {
+		case errors.Is(err, sshx.ErrAuth):
 			// Terminal: retrying a bad key never succeeds.
 			s.set(k, StateError, "authentication failed — check the SSH key")
 			return
-		}
 
-		if isPortBusy(msg) {
+		case errors.Is(err, sshx.ErrPortBusy):
 			// Not terminal — killing whatever holds the port makes the next retry
 			// succeed, with nothing else to do. But it will not clear by itself, so
 			// it says which process to kill rather than making the user find out.
@@ -470,18 +456,11 @@ func (s *Supervisor) supervise(ctx context.Context, h *config.Host, k key) {
 				blocked = true
 				s.set(k, StateBlocked, busyDetail(k.port))
 			}
-			if !sleep(ctx, retryInterval) {
-				return
-			}
-			continue
-		}
-		blocked = false
 
-		detail := firstLine(msg)
-		if detail == "" && waitErr != nil {
-			detail = waitErr.Error()
+		default:
+			blocked = false
+			s.set(k, StateRetrying, detail(err))
 		}
-		s.set(k, StateRetrying, detail)
 
 		if !sleep(ctx, retryInterval) {
 			return
@@ -489,12 +468,46 @@ func (s *Supervisor) supervise(ctx context.Context, h *config.Host, k key) {
 	}
 }
 
-// isPortBusy reports whether ssh failed because the LOCAL port is taken. With
-// ExitOnForwardFailure=yes it gives up immediately and says so.
-func isPortBusy(stderr string) bool {
-	s := strings.ToLower(stderr)
-	return strings.Contains(s, "address already in use") ||
-		strings.Contains(s, "cannot listen to port")
+// hold puts one tunnel up and stays with it until it stops or the context is
+// cancelled, reporting why it stopped.
+//
+// The cancellation half is what exec.CommandContext used to do for the ssh
+// process, and it has to be done by hand now that a tunnel is not always one. So
+// does closing a tunnel that stopped on its own: the local port is not free until
+// it is closed, and this loop is about to try to bind it again a second later.
+func (s *Supervisor) hold(ctx context.Context, target sshx.Target, k key) error {
+	tun, err := target.Forward(k.port, k.port)
+	if err != nil {
+		return err
+	}
+	defer tun.Close()
+
+	stopped := make(chan struct{})
+	defer close(stopped)
+	go func() {
+		select {
+		case <-ctx.Done():
+			tun.Close()
+		case <-stopped:
+		}
+	}()
+
+	// If it stays up briefly, consider it established. Still a guess rather than a
+	// fact: the exec'd client's tunnel is a process that has started, which is not
+	// the same as a port it has managed to bind.
+	established := time.AfterFunc(2*time.Second, func() { s.set(k, StateUp, "") })
+	defer established.Stop()
+
+	return tun.Wait()
+}
+
+// detail is what to show for a tunnel that stopped for none of the named reasons
+// — whatever the transport said, or nothing when it stopped without complaint.
+func detail(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // busyDetail says what is holding a local port, so the message is something to act
@@ -527,13 +540,6 @@ func localPortHolder(port int) string {
 		return "pid " + pid
 	}
 	return filepath.Base(n) + " (pid " + pid + ")"
-}
-
-func isAuthFailure(stderr string) bool {
-	s := strings.ToLower(stderr)
-	return strings.Contains(s, "permission denied") ||
-		strings.Contains(s, "publickey") ||
-		strings.Contains(s, "too many authentication failures")
 }
 
 func firstLine(s string) string {
