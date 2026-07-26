@@ -6,147 +6,37 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
-
-	"github.com/Marb-AI/forge/config"
-	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/sshx"
+	"github.com/Marb-AI/forge/forge"
 )
 
-// term is one live browser terminal: a process behind a local pty — ssh for the
-// three remote kinds below, your own shell for the local one. The pty is what
-// makes browser resizes real: resizing it raises SIGWINCH on the child, which ssh
-// forwards to the remote end.
-//
-// When the browser disconnects we kill that process. For the Claude kind that is
-// a tmux *detach*, so the session and Claude keep running server-side; for the
-// ssh, host and local kinds there is no tmux, so the shell goes with it.
-type term struct {
-	ptmx *os.File
-	cmd  *exec.Cmd
-}
+// The browser's end of a terminal: the SSE stream that carries its output, the
+// endpoints that carry keystrokes and resizes back, and the registry that keeps
+// one terminal per panel. Opening one is the core's business (forge.OpenTerminal)
+// — this package holds the object it returns and moves bytes.
 
-func (t *term) close() {
-	if t.ptmx != nil {
-		_ = t.ptmx.Close()
-	}
-	if t.cmd != nil && t.cmd.Process != nil {
-		_ = t.cmd.Process.Kill()
-		_ = t.cmd.Wait()
-	}
-}
-
-// The kinds of terminal the UI opens into a workspace. (The local shell is not
-// one of them — it belongs to no workspace; see startLocalTerm.)
+// The kinds of terminal the UI opens into a workspace, named as the core names
+// them: they arrive in the URL and go straight back out to it. (The local shell
+// is not one of them — it belongs to no workspace; see handleLocalTermStream.)
 const (
 	// termClaude attaches the persistent Claude session (tmux): closing the
 	// browser detaches, the session lives on.
-	termClaude = "claude"
+	termClaude = forge.TermClaude
 	// termSSH is a plain login shell as the workspace user — the panel you pop
 	// open to run one command. It is NOT tmux-backed, so it lives exactly as long
 	// as its stream: hiding the panel keeps the stream (and the shell) alive,
 	// which is the whole point of hide-vs-close.
-	termSSH = "ssh"
-	// termHost is a login shell as the host's own login account — the user
-	// `host prepare` connected as (root, or a passwordless-sudo user; it differs
-	// per server). Unlike termSSH it is NOT scoped to a workspace user: it is the
-	// shell for server-wide work like installing a package. Like termSSH it is not
+	termSSH = forge.TermSSH
+	// termHost is a login shell as the host's own login account — the shell for
+	// server-wide work like installing a package. Like termSSH it is not
 	// tmux-backed and lives with its stream.
-	termHost = "host"
+	termHost = forge.TermHost
 )
 
 func validKind(k string) bool { return k == termClaude || k == termSSH || k == termHost }
-
-// startTerm opens a terminal of the given kind into the workspace through a
-// fresh local pty, sized to cols×rows so the very first draw matches the browser
-// (a 0×0 or default pty makes tmux/Claude render into the wrong rectangle —
-// cursor adrift, mouse tracking off).
-func startTerm(h *config.Host, workspace, kind string, cols, rows uint16) (*term, error) {
-	var args []string
-	switch kind {
-	case termClaude:
-		args = sshx.WorkspaceTarget(h, workspace).TTYArgs(agentproto.AttachClaude)
-	case termSSH:
-		// Login shell with the local SSH agent forwarded — identical to
-		// `forge workspace <name> ssh`, so git in the shell uses your keys.
-		args = append([]string{"-A"}, sshx.WorkspaceTarget(h, workspace).TTYArgs()...)
-	case termHost:
-		// Login shell as the host's own login account — the user `host prepare`
-		// connected as (root, or a passwordless-sudo user). Not scoped to the
-		// workspace user: this is the shell for server-wide work like installing a
-		// package. No agent forwarding — host admin doesn't use your git keys.
-		args = sshx.AdminTarget(h).TTYArgs()
-	default:
-		return nil, fmt.Errorf("unknown terminal kind %q", kind)
-	}
-
-	cmd := exec.Command("ssh", args...)
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		return nil, err
-	}
-	if cols > 0 && rows > 0 {
-		_ = pty.Setsize(ptmx, &pty.Winsize{Rows: rows, Cols: cols})
-	}
-	return &term{ptmx: ptmx, cmd: cmd}, nil
-}
-
-// startLocalTerm opens a login shell on THIS machine — the one running the UI
-// daemon and the browser — starting in your home directory. It is the one
-// terminal in the UI that never touches ssh: the rail's other shells are there to
-// save you a terminal window for the servers, and this one is there so the local
-// commands that go with them (a git push from a clone here, a scp, a curl at the
-// tunnel) don't send you out of the tool either.
-//
-// It is deliberately not workspace-scoped: there is one local machine, so there
-// is one local shell, shared by every tab (see localTermKey).
-func startLocalTerm(cols, rows uint16) (*term, error) {
-	sh := os.Getenv("SHELL")
-	if sh == "" {
-		sh = "/bin/sh"
-	}
-	cmd := exec.Command(sh)
-	// argv[0] with a leading dash is how a unix shell is told it is a login shell
-	// — the same thing your terminal app does when it opens a window — so it reads
-	// your profile and you get the PATH, aliases and prompt you actually have. The
-	// `-l` flag would do it for bash/zsh but not for a plain sh, and $SHELL is
-	// whatever the user chose; the dash convention holds for all of them.
-	cmd.Args = []string{"-" + filepath.Base(sh)}
-	// Home, not the daemon's cwd: `forge ui` is started from wherever you happened
-	// to be standing and then detaches, so its directory is an accident. Falling
-	// back to inheriting it is still better than failing to open a shell.
-	if home, err := os.UserHomeDir(); err == nil {
-		cmd.Dir = home
-	}
-	// The daemon has no terminal of its own, so TERM is whatever `forge ui`
-	// inherited — often unset, sometimes the terminal you started it from. The far
-	// end is xterm.js: say so, or full-screen programs (vim, htop, less) draw as
-	// if into a teletype. Replaced rather than appended, so the shell is handed
-	// exactly one TERM: os/exec would keep the last of two, but which of a
-	// duplicate pair wins is not a rule this should ask anyone to remember.
-	env := slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		return strings.HasPrefix(kv, "TERM=")
-	})
-	cmd.Env = append(env, "TERM=xterm-256color")
-
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		return nil, err
-	}
-	if cols > 0 && rows > 0 {
-		_ = pty.Setsize(ptmx, &pty.Winsize{Rows: rows, Cols: cols})
-	}
-	return &term{ptmx: ptmx, cmd: cmd}, nil
-}
 
 // termKey namespaces the registry by kind, so a workspace's Claude terminal and
 // its ssh shell coexist instead of replacing each other.
@@ -162,26 +52,26 @@ const localTermKey = "local"
 // previous one, because a reconnect should supersede the attach it is replacing.
 type termRegistry struct {
 	mu sync.Mutex
-	m  map[string]*term
+	m  map[string]Terminal
 }
 
-func newTermRegistry() *termRegistry { return &termRegistry{m: map[string]*term{}} }
+func newTermRegistry() *termRegistry { return &termRegistry{m: map[string]Terminal{}} }
 
 // replace installs t as the live terminal for key, closing whatever was there.
-func (r *termRegistry) replace(key string, t *term) {
+func (r *termRegistry) replace(key string, t Terminal) {
 	r.mu.Lock()
 	old := r.m[key]
 	r.m[key] = t
 	r.mu.Unlock()
 	if old != nil {
-		old.close()
+		_ = old.Close()
 	}
 }
 
 // remove drops t if it is still the live terminal for key (a later stream may
 // already have replaced it). It reports whether it removed exactly t — so a
 // superseded handler can't close the terminal that replaced it.
-func (r *termRegistry) remove(key string, t *term) bool {
+func (r *termRegistry) remove(key string, t Terminal) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.m[key] == t {
@@ -191,7 +81,7 @@ func (r *termRegistry) remove(key string, t *term) bool {
 	return false
 }
 
-func (r *termRegistry) get(key string) *term {
+func (r *termRegistry) get(key string) Terminal {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.m[key]
@@ -201,7 +91,7 @@ func (r *termRegistry) get(key string) *term {
 // workspace is about to be destroyed under them.
 func (r *termRegistry) closeKeys(keys ...string) {
 	r.mu.Lock()
-	var doomed []*term
+	var doomed []Terminal
 	for _, k := range keys {
 		if t := r.m[k]; t != nil {
 			doomed = append(doomed, t)
@@ -210,20 +100,20 @@ func (r *termRegistry) closeKeys(keys ...string) {
 	}
 	r.mu.Unlock()
 	for _, t := range doomed {
-		t.close()
+		_ = t.Close()
 	}
 }
 
 func (r *termRegistry) closeAll() {
 	r.mu.Lock()
-	terms := make([]*term, 0, len(r.m))
+	terms := make([]Terminal, 0, len(r.m))
 	for _, t := range r.m {
 		terms = append(terms, t)
 	}
-	r.m = map[string]*term{}
+	r.m = map[string]Terminal{}
 	r.mu.Unlock()
 	for _, t := range terms {
-		t.close()
+		_ = t.Close()
 	}
 }
 
@@ -235,35 +125,36 @@ func (s *server) handleTermStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown terminal kind", http.StatusNotFound)
 		return
 	}
-	h := s.deps.HostFor(ws)
-	if h == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		http.Error(w, "unknown workspace", http.StatusNotFound)
 		return
 	}
-	s.streamTerm(w, r, termKey(ws, kind), func(cols, rows uint16) (*term, error) {
-		return startTerm(h, ws, kind, cols, rows)
+	s.streamTerm(w, r, termKey(ws, kind), func(cols, rows uint16) (Terminal, error) {
+		return s.deps.OpenTerminal(kind, ws, cols, rows)
 	})
 }
 
 // handleLocalTermStream streams the local shell — the one terminal that belongs
-// to no workspace, so it needs no host lookup and has a path of its own.
+// to no workspace, so it is asked for by kind alone and has a path of its own.
 func (s *server) handleLocalTermStream(w http.ResponseWriter, r *http.Request) {
-	s.streamTerm(w, r, localTermKey, startLocalTerm)
+	s.streamTerm(w, r, localTermKey, func(cols, rows uint16) (Terminal, error) {
+		return s.deps.OpenTerminal(forge.TermLocal, "", cols, rows)
+	})
 }
 
 // streamTerm starts a terminal with start, registers it under key, and streams
 // its output to the browser as Server-Sent Events. Each event's data is one
-// base64-encoded chunk of raw pty output, so terminal escape codes and newlines
+// base64-encoded chunk of raw terminal output, so escape codes and newlines
 // survive SSE's line framing untouched.
-func (s *server) streamTerm(w http.ResponseWriter, r *http.Request, key string, start func(cols, rows uint16) (*term, error)) {
+func (s *server) streamTerm(w http.ResponseWriter, r *http.Request, key string, start func(cols, rows uint16) (Terminal, error)) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
 
-	// The browser passes its measured terminal size so the pty is correct from
-	// the first byte. Fall back to a sane default if absent/garbage.
+	// The browser passes its measured terminal size so the terminal is the right
+	// shape from the first byte. Fall back to a sane default if absent/garbage.
 	cols := parseDim(r.URL.Query().Get("cols"), 80)
 	rows := parseDim(r.URL.Query().Get("rows"), 24)
 
@@ -284,14 +175,14 @@ func (s *server) streamTerm(w http.ResponseWriter, r *http.Request, key string, 
 	ctx := r.Context()
 	defer func() {
 		if s.terms.remove(key, t) {
-			t.close()
+			_ = t.Close()
 		}
 	}()
 
-	// Read the pty in a goroutine so we can also watch for client disconnect.
+	// Read the terminal in a goroutine so we can also watch for client disconnect.
 	// Every send is guarded by ctx: once the browser is gone nobody drains this
 	// channel, and a bare send would block the goroutine forever, leaking it (and
-	// the pty it holds) for the life of the daemon.
+	// the terminal it holds) for the life of the daemon.
 	type chunk struct {
 		data []byte
 		err  error
@@ -300,7 +191,7 @@ func (s *server) streamTerm(w http.ResponseWriter, r *http.Request, key string, 
 	go func() {
 		buf := make([]byte, 8192)
 		for {
-			n, err := t.ptmx.Read(buf)
+			n, err := t.Read(buf)
 			if n > 0 {
 				b := make([]byte, n)
 				copy(b, buf[:n])
@@ -319,9 +210,9 @@ func (s *server) streamTerm(w http.ResponseWriter, r *http.Request, key string, 
 			}
 		}
 	}()
-	// Coalesce the pty's output into at most one SSE event per tick. A generating
-	// Claude repaints its TUI many times a second, so the pty hands us a burst of
-	// small reads; sending each as its own base64 event means the browser parses
+	// Coalesce the terminal's output into at most one SSE event per tick. A
+	// generating Claude repaints its TUI many times a second, so it arrives as a
+	// burst of small reads; sending each as its own base64 event means the browser parses
 	// and the network frames hundreds of tiny messages a second — which is exactly
 	// what stutters on a slow link. Gathering a tick's worth into one event
 	// collapses that without dropping or reordering a byte (we only ever join
@@ -410,15 +301,15 @@ func (s *server) termInput(w http.ResponseWriter, r *http.Request, key string) {
 		http.Error(w, "bad encoding", http.StatusBadRequest)
 		return
 	}
-	if _, err := t.ptmx.Write(data); err != nil {
+	if _, err := t.Write(data); err != nil {
 		http.Error(w, "write", http.StatusBadGateway)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleTermResize applies a browser resize to the pty, which propagates the new
-// window size through ssh to the remote tmux client.
+// handleTermResize applies a browser resize to the terminal, which propagates the
+// new window size through ssh to the remote tmux client.
 func (s *server) handleTermResize(w http.ResponseWriter, r *http.Request) {
 	s.termResize(w, r, termKey(r.PathValue("ws"), r.PathValue("kind")))
 }
@@ -427,7 +318,7 @@ func (s *server) handleLocalTermResize(w http.ResponseWriter, r *http.Request) {
 	s.termResize(w, r, localTermKey)
 }
 
-// termResize applies a browser resize to the pty held under key.
+// termResize applies a browser resize to the terminal held under key.
 func (s *server) termResize(w http.ResponseWriter, r *http.Request, key string) {
 	t := s.terms.get(key)
 	if t == nil {
@@ -446,12 +337,13 @@ func (s *server) termResize(w http.ResponseWriter, r *http.Request, key string) 
 		http.Error(w, "zero size", http.StatusBadRequest)
 		return
 	}
-	_ = pty.Setsize(t.ptmx, &pty.Winsize{Rows: size.Rows, Cols: size.Cols})
+	_ = t.Resize(size.Cols, size.Rows)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // parseDim parses a terminal dimension query param, clamping to a sane range so
-// a bogus value can't create an absurd pty. Falls back to def when empty/invalid.
+// a bogus value can't create an absurd terminal. Falls back to def when
+// empty/invalid.
 func parseDim(s string, def uint16) uint16 {
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 1 || n > 1000 {

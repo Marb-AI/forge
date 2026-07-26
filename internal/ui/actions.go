@@ -30,7 +30,7 @@ import (
 // server.
 func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 	ws := r.PathValue("ws")
-	if s.deps.HostFor(ws) == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
@@ -45,7 +45,7 @@ func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 // Claude. The browser terminal reconnects and attaches to the new session.
 func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	ws := r.PathValue("ws")
-	if s.deps.HostFor(ws) == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
@@ -62,7 +62,7 @@ func (s *server) handleRestart(w http.ResponseWriter, r *http.Request) {
 // effort: it never blocks the UI, and a workspace with no host just 404s.
 func (s *server) handleTrackInc(w http.ResponseWriter, r *http.Request) {
 	ws := r.PathValue("ws")
-	if s.deps.HostFor(ws) == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
@@ -95,7 +95,7 @@ func (s *server) handleTrackInc(w http.ResponseWriter, r *http.Request) {
 // A second checkpoint for the same workspace while one is in flight is rejected.
 func (s *server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	ws := r.PathValue("ws")
-	if s.deps.HostFor(ws) == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
@@ -166,7 +166,7 @@ func (s *server) handleCreateWorkspace(w http.ResponseWriter, r *http.Request) {
 // makes you type the name first; nothing can undo it.
 func (s *server) handleDeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 	ws := r.PathValue("ws")
-	if s.deps.HostFor(ws) == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}

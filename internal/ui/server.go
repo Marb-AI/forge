@@ -65,6 +65,9 @@ type (
 	RateWindow = forge.RateWindow
 	// HostStat is one registered server's resource usage, for the servers panel.
 	HostStat = forge.HostStat
+	// Terminal is one live terminal — the Claude session, a shell, the local shell
+	// — handed over by the core with the process behind it already running.
+	Terminal = forge.Terminal
 )
 
 // Deps are the Forge operations the UI needs, injected rather than called
@@ -103,8 +106,25 @@ type Deps struct {
 	// WorkspaceActivity: handleHostStats nil-checks it and reports an empty list
 	// rather than failing to start.
 	HostStats func() ([]HostStat, error)
-	// HostFor resolves a workspace name to the host it lives on, or nil.
-	HostFor func(name string) *config.Host
+	// KnowsWorkspace reports whether this client has a workspace by that name —
+	// what every per-workspace endpoint asks before doing anything, so an unknown
+	// name is a 404 rather than an attempt that fails.
+	//
+	// It used to hand back the host itself, because the terminals and the file
+	// browser built their own ssh commands from it. They ask the core now, so what
+	// is left of that question is the answer yes or no: which machine a workspace
+	// is on, and what it takes to log in, is not this package's business.
+	KnowsWorkspace func(name string) bool
+	// OpenTerminal opens a terminal — the Claude session, a shell on the workspace
+	// or its host, or the local shell — sized to cols×rows. The kinds are the
+	// core's (termClaude, termSSH, termHost, forge.TermLocal); the local one takes
+	// no workspace.
+	OpenTerminal func(kind, workspace string, cols, rows uint16) (Terminal, error)
+	// ListDir lists a directory in the workspace, relative to its home. Empty is
+	// the home itself.
+	ListDir func(workspace, dir string) (DirListing, error)
+	// ReadFile returns as much of a file's text as the viewer gets.
+	ReadFile func(workspace, file string) (FileText, error)
 	// Checkpoint saves a handoff to memory and restarts the session from it. It
 	// blocks for minutes and can fail (Claude busy), so it runs as a job and
 	// reports progress to out.
@@ -145,7 +165,10 @@ type Deps struct {
 func (d Deps) validate() error {
 	for name, fn := range map[string]any{
 		"ListWorkspaces":  d.ListWorkspaces,
-		"HostFor":         d.HostFor,
+		"KnowsWorkspace":  d.KnowsWorkspace,
+		"OpenTerminal":    d.OpenTerminal,
+		"ListDir":         d.ListDir,
+		"ReadFile":        d.ReadFile,
 		"Checkpoint":      d.Checkpoint,
 		"StopSession":     d.StopSession,
 		"RestartSession":  d.RestartSession,
@@ -239,7 +262,10 @@ func CoreDeps() Deps {
 		WorkspaceUsage:    forge.WorkspaceUsage,
 		TrackInc:          forge.TrackInc,
 		HostStats:         forge.HostStats,
-		HostFor:           forge.HostFor,
+		KnowsWorkspace:    forge.KnowsWorkspace,
+		OpenTerminal:      forge.OpenTerminal,
+		ListDir:           forge.ListDir,
+		ReadFile:          forge.ReadFile,
 		Checkpoint:        forge.Checkpoint,
 		StopSession:       forge.StopSession,
 		RestartSession:    forge.RestartSession,

@@ -7,8 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/Marb-AI/forge/config"
 )
 
 // testServer builds a server with the guard in place and a trivial handler
@@ -22,7 +20,10 @@ func testServer(t *testing.T) (*server, http.Handler) {
 		jobs:      map[string]*job{},
 		deps: Deps{
 			ListWorkspaces:  func() ([]WorkspaceInfo, error) { return []WorkspaceInfo{}, nil },
-			HostFor:         func(string) *config.Host { return nil },
+			KnowsWorkspace:  func(string) bool { return false },
+			OpenTerminal:    func(string, string, uint16, uint16) (Terminal, error) { return newFakeTerm(), nil },
+			ListDir:         func(string, string) (DirListing, error) { return DirListing{}, nil },
+			ReadFile:        func(string, string) (FileText, error) { return FileText{}, nil },
 			Checkpoint:      func(string, io.Writer) error { return nil },
 			ListHosts:       func() ([]string, error) { return []string{}, nil },
 			CreateWorkspace: func(string, string) error { return nil },
@@ -128,7 +129,7 @@ func TestGuardRejectsCrossOriginWrite(t *testing.T) {
 
 func TestGuardAllowsSameOriginWrite(t *testing.T) {
 	_, h := testServer(t)
-	// HostFor returns nil in the test deps, so the handler answers 404 — which is
+	// KnowsWorkspace is false in the test deps, so the handler answers 404 — which is
 	// past the guard, and that's what we're asserting.
 	req := httptest.NewRequest("POST", "http://127.0.0.1:47615/api/ws/x/stop", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:47615")

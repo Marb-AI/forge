@@ -9,55 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/Marb-AI/forge/config"
 )
-
-func TestCleanRel(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-		ok   bool
-	}{
-		{"", "", true},
-		{"/", "", true},
-		{".", "", true},
-		{"src", "src", true},
-		{"/src/main.go", "src/main.go", true},
-		{"src//main.go", "src/main.go", true},
-		{"src/./main.go", "src/main.go", true},
-		{"src/sub/../main.go", "src/main.go", true}, // stays inside: fine
-		// Escapes: every one of these must be refused.
-		{"..", "", false},
-		{"../etc/passwd", "", false},
-		{"src/../../etc", "", false},
-		{"a/../../..", "", false},
-	}
-	for _, c := range cases {
-		got, ok := cleanRel(c.in)
-		if ok != c.ok || got != c.want {
-			t.Errorf("cleanRel(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
-		}
-	}
-}
-
-func TestShQuote(t *testing.T) {
-	// The point is that nothing can break out of the single quotes.
-	cases := map[string]string{
-		"main.go":       `'main.go'`,
-		"my file.txt":   `'my file.txt'`,
-		"a;rm -rf /":    `'a;rm -rf /'`,
-		"it's":          `'it'\''s'`,
-		"$(whoami)":     `'$(whoami)'`,
-		"`id`":          "'`id`'",
-		"a'; touch x;'": `'a'\''; touch x;'\'''`,
-	}
-	for in, want := range cases {
-		if got := shQuote(in); got != want {
-			t.Errorf("shQuote(%q) = %s, want %s", in, got, want)
-		}
-	}
-}
 
 func TestValidName(t *testing.T) {
 	valid := []string{"a", "app", "marbai-01", "my_ws", "A1", strings.Repeat("x", 32)}
@@ -175,7 +127,7 @@ func TestValidKindAndTermKey(t *testing.T) {
 
 func TestTermRegistryReplaceAndRemove(t *testing.T) {
 	r := newTermRegistry()
-	a, b := &term{}, &term{}
+	a, b := newFakeTerm(), newFakeTerm()
 
 	r.replace("k", a)
 	if r.get("k") != a {
@@ -259,7 +211,10 @@ func TestJobReportsFailure(t *testing.T) {
 func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 	full := Deps{
 		ListWorkspaces:  func() ([]WorkspaceInfo, error) { return nil, nil },
-		HostFor:         func(string) *config.Host { return nil },
+		KnowsWorkspace:  func(string) bool { return false },
+		OpenTerminal:    func(string, string, uint16, uint16) (Terminal, error) { return nil, nil },
+		ListDir:         func(string, string) (DirListing, error) { return DirListing{}, nil },
+		ReadFile:        func(string, string) (FileText, error) { return FileText{}, nil },
 		Checkpoint:      func(string, io.Writer) error { return nil },
 		StopSession:     func(string) error { return nil },
 		RestartSession:  func(string) error { return nil },
@@ -282,7 +237,10 @@ func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 		"Ports":           func(d *Deps) { d.Ports = nil },
 		"ContainerAction": func(d *Deps) { d.ContainerAction = nil },
 		"ListWorkspaces":  func(d *Deps) { d.ListWorkspaces = nil },
-		"HostFor":         func(d *Deps) { d.HostFor = nil },
+		"KnowsWorkspace":  func(d *Deps) { d.KnowsWorkspace = nil },
+		"OpenTerminal":    func(d *Deps) { d.OpenTerminal = nil },
+		"ListDir":         func(d *Deps) { d.ListDir = nil },
+		"ReadFile":        func(d *Deps) { d.ReadFile = nil },
 		"Checkpoint":      func(d *Deps) { d.Checkpoint = nil },
 		"StopSession":     func(d *Deps) { d.StopSession = nil },
 		"RestartSession":  func(d *Deps) { d.RestartSession = nil },

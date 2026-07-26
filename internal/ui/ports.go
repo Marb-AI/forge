@@ -33,7 +33,7 @@ func (s *server) handlePorts(w http.ResponseWriter, r *http.Request) {
 	// A workspace this client does not have is a 404, like every other per-workspace
 	// endpoint. It is not a transient failure and no amount of polling will fix it,
 	// so it must not be dressed up as one.
-	if s.deps.HostFor(ws) == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
@@ -82,7 +82,7 @@ func firstLine(s string) string {
 // not, so it does not offer it.
 func (s *server) handleContainerAction(w http.ResponseWriter, r *http.Request) {
 	ws := r.PathValue("ws")
-	if s.deps.HostFor(ws) == nil {
+	if !s.deps.KnowsWorkspace(ws) {
 		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
 		return
 	}
