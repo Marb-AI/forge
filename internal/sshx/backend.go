@@ -8,34 +8,78 @@ import (
 	"sync"
 )
 
-// The transport seam: what it means to run one command on a server, with two
-// implementations behind it.
+// The transport seam: what it means to reach a server, with two implementations
+// behind it.
 //
 // Forge has always reached its hosts by running the system's `ssh` binary, and
 // that is still what happens unless you say otherwise. It cannot stay the only
 // answer: a phone has no `ssh` to exec and no process to exec it with, so the
 // client has to become library code eventually. This is where that swap is made
-// — one interface, chosen per process, with every non-interactive operation in
-// the core going through it.
+// — one interface, chosen per process, with the core's operations and the front
+// ends' terminals going through it.
 //
-// Only non-interactive commands are here. Terminals (a remote PTY) and the
-// forwarding supervisor's tunnels still exec ssh directly and are unchanged;
-// they move behind this same seam in their own steps, and doing them together
-// would mean a rewrite nobody could review against the behaviour it replaces.
+// The forwarding supervisor's tunnels are the last thing still exec'ing ssh
+// directly, and they move behind this same seam in their own step: doing them
+// together would mean a rewrite nobody could review against the behaviour it
+// replaces. So is the CLI's own interactive session, for a different reason —
+// see RunInteractiveTo.
 
-// Backend runs a non-interactive remote command and waits for it to finish.
+// Backend reaches a server, in the two shapes anything Forge does to one takes.
 //
-// It is deliberately one method. Everything the operations do to a host — the
-// agent, tmux, the file browser, provisioning — is "run this, feed it that,
-// give me what it printed", and a seam that admits nothing else cannot grow a
-// second dialect between the two implementations.
+// Two methods, and there is no third. Everything the operations do to a host —
+// the agent, tmux, the file browser, provisioning — is "run this, feed it that,
+// give me what it printed", and finishes. Everything a front end opens is a
+// terminal: no output to collect, a window size, and it is held until somebody
+// closes it. A seam that admits nothing else cannot grow a dialect between the
+// two implementations.
 type Backend interface {
-	// Run executes cmd on the target. A remote command that exits non-zero is
-	// reported as *ExitError, and so is a failure the exec'd client can only
-	// express as an exit status — see ExitError for which those are.
+	// Run executes cmd on the target and waits for it to finish. A remote command
+	// that exits non-zero is reported as *ExitError, and so is a failure the
+	// exec'd client can only express as an exit status — see ExitError for which
+	// those are.
 	Run(t Target, cmd Command) error
+	// Open starts an interactive session on a terminal and hands it back live.
+	Open(t Target, s Shell) (Terminal, error)
 	// Name identifies the backend in errors and diagnostics.
 	Name() string
+}
+
+// Shell is one interactive session: a terminal on the far end, and what to run
+// on it.
+//
+// Remote is joined and handed to the login shell exactly as for a Command, so a
+// terminal's command line does not change under a different backend either. An
+// empty Remote is the login shell itself — what `ssh host` with no command does.
+type Shell struct {
+	Remote []string
+	// Cols and Rows size the terminal before the first byte is drawn. A zero
+	// dimension leaves it at the far end's default.
+	Cols, Rows uint16
+	// ForwardAgent lends this machine's SSH agent to the session, which is what
+	// makes git inside a workspace shell use your keys with nothing stored on the
+	// server. It is `ssh -A`, and like `ssh -A` it is a request: a session whose
+	// agent could not be forwarded still opens.
+	ForwardAgent bool
+}
+
+func (s Shell) line() string { return joinRemote(s.Remote) }
+
+// Terminal is one live terminal: something running on the far end of a pty, with
+// no output to collect and no exit status to read. Read and Write carry raw
+// bytes both ways, escape codes and all, so whatever holds it can hand them
+// straight to a terminal emulator.
+//
+// Where the pty is is the difference between the backends and the whole point of
+// this step: the exec'd client puts one on *this* machine in front of ssh, while
+// Forge's own client asks the server for one over the connection — which is the
+// only version of it a phone can have.
+type Terminal interface {
+	io.Reader
+	io.Writer
+	// Resize tells the far end the window changed, so a resize in a browser is a
+	// SIGWINCH on the program drawing into it.
+	Resize(cols, rows uint16) error
+	io.Closer
 }
 
 // Command is one non-interactive remote command.
@@ -55,7 +99,13 @@ type Command struct {
 
 // line is the command string sent to the remote shell — the one thing both
 // backends must agree on to the byte.
-func (c Command) line() string { return strings.Join(c.Remote, " ") }
+func (c Command) line() string { return joinRemote(c.Remote) }
+
+// joinRemote is that agreement, shared by commands and terminals alike: single
+// spaces, and the host's login shell parses the result. It is what `ssh host a b
+// c` does with its trailing arguments, so quoting stays the caller's business
+// and means the same thing whichever client runs it.
+func joinRemote(remote []string) string { return strings.Join(remote, " ") }
 
 // ExitError reports that the remote command ran and exited non-zero. Code is
 // its exit status.
@@ -155,4 +205,10 @@ func (t Target) Pipe(r io.Reader, stdout, stderr io.Writer, remote ...string) er
 		Stdout: stdout,
 		Stderr: stderr,
 	})
+}
+
+// Open starts an interactive session on the target and returns the terminal it
+// is attached to. The caller owns it and must Close it.
+func (t Target) Open(s Shell) (Terminal, error) {
+	return backend().Open(t, s)
 }

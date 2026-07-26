@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -24,9 +25,10 @@ import (
 // and because two things it needs are not built yet — see below.
 //
 // Where it matches the exec'd backend it does so on purpose: the same connect
-// timeout, the same keepalives, the same key-only stance, and the same command
-// string on the wire. Two gaps are known and deliberate, both closing with the
-// device key in v2:
+// timeout, the same keepalives, the same key-only stance, the same command string
+// on the wire, and — for a terminal — the same terminal type and window size,
+// asked of the server instead of taken from a pty on this machine. Two gaps are
+// known and deliberate, both closing with the device key in v2:
 //
 //   - Credentials come from the agent and ~/.ssh, the same identities the ssh
 //     binary would have found. Forge does not yet have a key of its own to
@@ -71,6 +73,162 @@ func (b goBackend) Run(t Target, c Command) error {
 		return &ExitError{Code: exit.ExitStatus(), Err: err}
 	}
 	return err
+}
+
+// Open asks the server for a pty and starts a session on it.
+//
+// This is the terminal the exec'd backend gets by putting a pty in front of ssh
+// on this machine, obtained the way the protocol has always offered it instead:
+// a pty-req on the channel, a window-change when the browser is resized, and the
+// channel itself carrying the bytes. There is no process, no local pty and no
+// argv in it, which is the only shape a terminal can have on a phone.
+//
+// The connection belongs to the terminal and closes with it: one terminal is one
+// connection, as one terminal was one ssh process before.
+func (b goBackend) Open(t Target, s Shell) (Terminal, error) {
+	client, err := dial(t)
+	if err != nil {
+		return nil, err
+	}
+	term, err := openTerm(client, t, s)
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+	return term, nil
+}
+
+// openTerm sets up the session on an already-dialled client. Everything it can
+// fail at happens before the terminal exists, so a failed open leaves nothing
+// running and nothing to close but the connection.
+func openTerm(client *ssh.Client, t Target, s Shell) (*remoteTerm, error) {
+	sess, err := client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
+	}
+
+	// Before the pty request, and before the session starts: both of the agent's
+	// halves are set up while the channel is still being configured. A failure is
+	// not fatal, exactly as `ssh -A` without a running agent is not — the shell
+	// opens, and git inside it asks for credentials it does not have.
+	if s.ForwardAgent {
+		forwardAgent(client, sess)
+	}
+
+	cols, rows := s.Cols, s.Rows
+	if cols == 0 || rows == 0 {
+		cols, rows = defaultCols, defaultRows
+	}
+	if err := sess.RequestPty(termType(), int(rows), int(cols), ptyModes); err != nil {
+		sess.Close()
+		return nil, fmt.Errorf("ssh %s: the server would not give this session a terminal: %w", t.dest(), err)
+	}
+
+	in, err := sess.StdinPipe()
+	if err != nil {
+		sess.Close()
+		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
+	}
+	// The channel itself is the terminal's output, and with a pty that is all of
+	// it: the far end's stderr goes to the terminal like everything else, which is
+	// what makes a terminal one stream rather than two. (The library drains the
+	// stderr stream anyway, in case a server sends something there regardless.)
+	out, err := sess.StdoutPipe()
+	if err != nil {
+		sess.Close()
+		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
+	}
+
+	if line := s.line(); line == "" {
+		err = sess.Shell() // no command: the login shell, as `ssh host` alone gives
+	} else {
+		err = sess.Start(line)
+	}
+	if err != nil {
+		sess.Close()
+		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
+	}
+	return &remoteTerm{client: client, sess: sess, in: in, out: out}, nil
+}
+
+// The size a terminal opens at when the caller does not know one yet. It is the
+// classic default rather than a guess: 80×24 is what a pty gives you when nobody
+// says otherwise, so this matches what the exec'd backend's pty would have done.
+const (
+	defaultCols = 80
+	defaultRows = 24
+)
+
+// ptyModes are the terminal modes sent with the request.
+//
+// Echo on, and the line speeds every client sends because the request has fields
+// for them. The rest is deliberately left to the server's own pty defaults: the
+// exec'd client copies the modes off the local pty, and a pty Forge created a
+// moment earlier has nothing configured on it that the remote one does not.
+var ptyModes = ssh.TerminalModes{
+	ssh.ECHO:          1,
+	ssh.TTY_OP_ISPEED: 38400,
+	ssh.TTY_OP_OSPEED: 38400,
+}
+
+// termType is the terminal type the far end is told about: this process's own,
+// which is precisely what the exec'd ssh sends it.
+//
+// That includes sending nothing when there is nothing — a daemon started with no
+// TERM has none to pass on, and ssh sends the empty string in the same
+// situation. Giving every Forge terminal a TERM of its own is worth doing (the
+// local shell already has one) but it is a change in what the server is told,
+// and it belongs where all the terminals get it at once, not to one backend.
+func termType() string { return os.Getenv("TERM") }
+
+// forwardAgent lends the local agent to the session: a handler on this end for
+// the channels the far end opens back, and the request that tells it forwarding
+// is available.
+//
+// Both halves are best-effort for the same reason `ssh -A` is: the agent is a
+// convenience for what runs *inside* the session, and a terminal that opens
+// without it is far better than no terminal at all.
+func forwardAgent(client *ssh.Client, sess *ssh.Session) {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return
+	}
+	if err := agent.ForwardToRemote(client, sock); err != nil {
+		return
+	}
+	_ = agent.RequestAgentForwarding(sess)
+}
+
+// remoteTerm is a Terminal whose pty is on the server. It owns the connection it
+// was opened on, so closing it is what a terminal closing has always been: the
+// connection goes, and with it the remote shell — or, for tmux, the client
+// attached to a session that stays.
+type remoteTerm struct {
+	client *ssh.Client
+	sess   *ssh.Session
+	in     io.WriteCloser
+	out    io.Reader
+	once   sync.Once
+}
+
+func (r *remoteTerm) Read(p []byte) (int, error)  { return r.out.Read(p) }
+func (r *remoteTerm) Write(p []byte) (int, error) { return r.in.Write(p) }
+
+// Resize is the window-change request: the server resizes its pty and the
+// program drawing into it gets a SIGWINCH.
+func (r *remoteTerm) Resize(cols, rows uint16) error {
+	return r.sess.WindowChange(int(rows), int(cols))
+}
+
+// Close ends the session and the connection under it. Idempotent, because the
+// front end holding a terminal may well close it twice — a stream that ended and
+// a panel that was replaced are two owners of the same object.
+func (r *remoteTerm) Close() error {
+	r.once.Do(func() {
+		_ = r.sess.Close()
+		_ = r.client.Close()
+	})
+	return nil
 }
 
 // dial opens a connection to the target and starts its keepalives.

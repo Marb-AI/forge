@@ -2,11 +2,11 @@
 // what "connect to a host" means — every other package names a Target and a
 // command, and never a key, a port or an ssh option.
 //
-// There are two ways to run one, behind the Backend seam in backend.go: the
+// There are two ways to reach one, behind the Backend seam in backend.go: the
 // system's ssh binary, which is the default and what Forge has always done, and
 // a client of our own built on golang.org/x/crypto/ssh. This file is the part
 // both share (what a target is) plus the exec'd side of it: the argv, and the
-// sessions that are still attached to a terminal.
+// one session that is still attached to the caller's own terminal.
 package sshx
 
 import (
@@ -93,11 +93,31 @@ func (t Target) Args(remote ...string) []string {
 
 // TTYArgs returns the ssh argv for an interactive command (-t forces a TTY),
 // used for shells and tmux attach.
+//
+// Still exported for the sessions that hand over *this* process's terminal — the
+// CLI's `workspace ssh`, `claude attach`, `host shell`, which go through
+// RunInteractiveTo rather than the Backend seam. A terminal opened for a front
+// end does not come through here any more: it asks the target to Open a Shell,
+// and only the exec'd backend turns that into an argv.
 func (t Target) TTYArgs(remote ...string) []string {
 	args := append([]string{"-t"}, commonOpts(t.Port)...)
 	args = append(args, t.dest())
 	args = append(args, remote...)
 	return args
+}
+
+// ttyArgs is the argv for a Shell — the same interactive argv, plus the one
+// option a front end's terminal can ask for by itself.
+//
+// -A goes first, before the options and the destination, because that is where
+// the workspace shell has always put it: the argv this produces is byte-for-byte
+// the one Forge ran when the UI built its own.
+func (t Target) ttyArgs(s Shell) []string {
+	var args []string
+	if s.ForwardAgent {
+		args = append(args, "-A")
+	}
+	return append(args, t.TTYArgs(s.Remote...)...)
 }
 
 // LocalForwardArgs returns the ssh argv for a single local port forward with no
@@ -116,9 +136,16 @@ func (t Target) LocalForwardArgs(localPort, remotePort int) []string {
 // RunInteractiveTo execs ssh wired to the current terminal and blocks until it
 // exits — a shell, a Claude attach, a one-off `expose`.
 //
-// It is not behind the Backend seam: a session attached to a terminal is a
-// different thing from a command that returns output, and it needs a remote PTY
-// to move. That is its own step; until then this is the exec'd client, always.
+// It is not behind the Backend seam, and unlike the terminals it does not move
+// there. Those lend a terminal to a front end; this one hands over the terminal
+// the caller is *sitting at*, and moving that to a client of our own means
+// putting this process's stdin into raw mode, catching SIGWINCH, and restoring
+// both on the way out — none of which the browser's end needs, because there is
+// no terminal of ours in the middle of it.
+//
+// Nothing is lost by leaving it: only the CLI calls these, and the CLI exists
+// only where there is a shell to type into and therefore an ssh binary to run.
+// The platforms that need the library client drive the core through the UI.
 //
 // The session's output goes through out, so Forge can watch it for the OSC 52
 // clipboard escape (see internal/clip) rather than leaving the copy to whichever

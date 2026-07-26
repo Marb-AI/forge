@@ -445,9 +445,12 @@ own project name automatically, so the same repo cloned into several workspaces
 knows about none of it. A second client, built on Go's SSH library instead of a
 subprocess, now sits behind the same seam and can be switched on with
 `FORGE_SSH_BACKEND=go`; it is what will let Forge run where there is no `ssh`
-binary to call. It is neither the default nor finished — it borrows identities
-and `known_hosts` from `~/.ssh`, and refuses a host it has never seen instead of
-recording it — so turn it on only to try it.
+binary to call. It covers the commands Forge runs on a host and the terminals in
+the UI, which ask the server for a terminal instead of putting one in front of an
+`ssh` process. It is neither the default nor finished — it borrows identities and
+`known_hosts` from `~/.ssh`, refuses a host it has never seen instead of
+recording it, and the always-on port tunnels still run `ssh` either way — so turn
+it on only to try it.
 
 ---
 

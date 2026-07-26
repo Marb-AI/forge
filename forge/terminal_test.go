@@ -2,6 +2,7 @@ package forge
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"slices"
 	"strings"
@@ -10,72 +11,74 @@ import (
 
 	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
+	"github.com/Marb-AI/forge/internal/sshx"
 )
 
 // What each kind connects as, and with what, is the whole difference between
 // them: the same host, the same workspace, three terminals that are not
 // interchangeable. A front end names the kind and gets what the name promises.
+//
+// It is now said in the transport's own terms — who to log in as, what to run,
+// whether the agent goes along — rather than as an ssh argv, because a terminal
+// on a phone has no argv to be described by. What the exec'd client makes of it
+// is its business, and its own test.
 func TestEachTerminalKindConnectsAsWhatItIsFor(t *testing.T) {
 	h := &config.Host{Alias: "srv", User: "admin", Addr: "203.0.113.7", Port: 2222}
+	workspace := sshx.Target{User: "crm", Addr: "203.0.113.7", Port: 2222}
+	admin := sshx.Target{User: "admin", Addr: "203.0.113.7", Port: 2222}
 
-	claude, err := termArgs(h, "crm", TermClaude)
+	claudeTarget, claude, err := termShell(h, "crm", TermClaude)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sshShell, err := termArgs(h, "crm", TermSSH)
+	sshTarget, sshShell, err := termShell(h, "crm", TermSSH)
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, err := termArgs(h, "crm", TermHost)
+	hostTarget, host, err := termShell(h, "crm", TermHost)
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	// Every one of them is a terminal, so every one asks ssh for a TTY: without it
-	// tmux refuses to attach and a shell has no line editing.
-	for name, args := range map[string][]string{"claude": claude, "ssh": sshShell, "host": host} {
-		if !slices.Contains(args, "-t") {
-			t.Errorf("the %s terminal does not ask for a TTY: %v", name, args)
-		}
 	}
 
 	// The Claude terminal is the session, so it runs the attach — not a shell you
-	// could have typed it into.
-	if !slices.Contains(claude, agentproto.AttachClaude) {
-		t.Errorf("the claude terminal does not attach the session: %v", claude)
+	// could have typed it into — as the workspace's own user.
+	if claudeTarget != workspace {
+		t.Errorf("the claude terminal logs in as %+v, want the workspace %+v", claudeTarget, workspace)
 	}
-	if !slices.Contains(claude, "crm@203.0.113.7") {
-		t.Errorf("the claude terminal does not log in as the workspace: %v", claude)
+	if !slices.Contains(claude.Remote, agentproto.AttachClaude) {
+		t.Errorf("the claude terminal does not attach the session: %v", claude.Remote)
+	}
+	if claude.ForwardAgent {
+		t.Error("the claude terminal forwards your SSH agent; tmux has no use for your git keys")
 	}
 
 	// The workspace shell forwards your agent — that is what makes git in it use
-	// your keys with nothing stored on the server — and runs no remote command.
-	if len(sshShell) == 0 || sshShell[0] != "-A" {
-		t.Errorf("the workspace shell does not forward the SSH agent: %v", sshShell)
+	// your keys with nothing stored on the server — and runs no command at all.
+	if sshTarget != workspace {
+		t.Errorf("the workspace shell logs in as %+v, want the workspace %+v", sshTarget, workspace)
 	}
-	if last := sshShell[len(sshShell)-1]; last != "crm@203.0.113.7" {
-		t.Errorf("the workspace shell runs %q instead of just logging in", last)
+	if !sshShell.ForwardAgent {
+		t.Error("the workspace shell does not forward the SSH agent")
+	}
+	if len(sshShell.Remote) != 0 {
+		t.Errorf("the workspace shell runs %v instead of just logging in", sshShell.Remote)
 	}
 
 	// The host shell is the other account: server-wide work, and deliberately
 	// without your keys along for it.
-	if last := host[len(host)-1]; last != "admin@203.0.113.7" {
-		t.Errorf("the host terminal ends at %q, want a login as the host's own account", last)
+	if hostTarget != admin {
+		t.Errorf("the host terminal logs in as %+v, want the host's own account %+v", hostTarget, admin)
 	}
-	if slices.Contains(host, "-A") {
+	if host.ForwardAgent {
 		t.Error("the host terminal forwards your SSH agent — host admin has no business with your git keys")
 	}
-
-	// And the port the host was registered on, or ssh would go to 22.
-	for name, args := range map[string][]string{"claude": claude, "ssh": sshShell, "host": host} {
-		if i := slices.Index(args, "-p"); i < 0 || i+1 >= len(args) || args[i+1] != "2222" {
-			t.Errorf("the %s terminal ignores the host's port: %v", name, args)
-		}
+	if len(host.Remote) != 0 {
+		t.Errorf("the host terminal runs %v instead of just logging in", host.Remote)
 	}
 }
 
 func TestAnUnknownKindIsRefused(t *testing.T) {
-	if _, err := termArgs(&config.Host{}, "crm", "sftp"); err == nil {
+	if _, _, err := termShell(&config.Host{}, "crm", "sftp"); err == nil {
 		t.Error("an unknown terminal kind should be refused, not opened as something")
 	}
 }
@@ -85,19 +88,89 @@ func TestAnUnknownKindIsRefused(t *testing.T) {
 // is a caller bug, and it must be reported as one rather than opening a terminal
 // onto something else.
 func TestATerminalKindAndAWorkspaceMustAgree(t *testing.T) {
-	if _, err := termCmd(TermLocal, "crm"); err == nil {
+	if _, err := OpenTerminal(TermLocal, "crm", 80, 24); err == nil {
 		t.Error("the local shell accepted a workspace; there is one local machine, not one per workspace")
 	}
 	for _, kind := range []string{TermClaude, TermSSH, TermHost} {
-		if _, err := termCmd(kind, ""); err == nil {
+		if _, err := OpenTerminal(kind, "", 80, 24); err == nil {
 			t.Errorf("the %s terminal opened without a workspace", kind)
 		}
 	}
 	// A workspace this client does not have is not a terminal either — this
 	// package's config is a throwaway one (see TestMain), so nothing is known.
-	if _, err := termCmd(TermClaude, "nope"); err == nil {
+	if _, err := OpenTerminal(TermClaude, "nope", 80, 24); err == nil {
 		t.Error("a terminal opened onto a workspace this client has never heard of")
 	}
+}
+
+// The size comes from the window rather than from the kind, and it has to reach
+// the transport: that is the only thing that can size a terminal before its first
+// draw, and a Claude session that opens at the wrong size stays wrong until
+// something redraws it.
+func TestOpeningARemoteTerminalHandsItToTheTransportWithTheWindowSize(t *testing.T) {
+	swapState(t, t.TempDir())
+	store, err := Store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(func(c *config.Config) error {
+		c.Hosts["srv"] = &config.Host{Alias: "srv", User: "admin", Addr: "203.0.113.7", Port: 2222}
+		c.Workspaces["crm"] = "srv"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	transport := useFakeTransport(t)
+
+	term, err := OpenTerminal(TermSSH, "crm", 100, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer term.Close()
+
+	if transport.target.User != "crm" || transport.target.Port != 2222 {
+		t.Errorf("the terminal was opened on %+v, want the workspace on its host's port", transport.target)
+	}
+	if transport.shell.Cols != 100 || transport.shell.Rows != 30 {
+		t.Errorf("the transport was given %dx%d, want the 100x30 the window asked for",
+			transport.shell.Cols, transport.shell.Rows)
+	}
+	if !transport.shell.ForwardAgent {
+		t.Error("the kind's agent forwarding did not reach the transport")
+	}
+}
+
+// fakeTransport is a backend that opens nothing: it records what it was asked
+// for, so the wiring from a kind to a session can be read without a server.
+type fakeTransport struct {
+	target sshx.Target
+	shell  sshx.Shell
+}
+
+func (*fakeTransport) Name() string                        { return "fake" }
+func (*fakeTransport) Run(sshx.Target, sshx.Command) error { return nil }
+
+func (f *fakeTransport) Open(t sshx.Target, s sshx.Shell) (sshx.Terminal, error) {
+	f.target, f.shell = t, s
+	return deadTerm{}, nil
+}
+
+type deadTerm struct{}
+
+func (deadTerm) Read([]byte) (int, error)    { return 0, io.EOF }
+func (deadTerm) Write(p []byte) (int, error) { return len(p), nil }
+func (deadTerm) Resize(uint16, uint16) error { return nil }
+func (deadTerm) Close() error                { return nil }
+
+// useFakeTransport points the transport at a backend that reaches no server, and
+// puts the process back to the default afterwards — which, in this package's
+// tests, is the only thing it has ever been.
+func useFakeTransport(t *testing.T) *fakeTransport {
+	t.Helper()
+	f := &fakeTransport{}
+	sshx.Use(f)
+	t.Cleanup(func() { sshx.Use(nil) })
+	return f
 }
 
 // The local shell is the one terminal Forge opens without ssh, so the things that

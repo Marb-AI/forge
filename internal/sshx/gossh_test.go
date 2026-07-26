@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,17 +34,45 @@ import (
 // command line as the client sent it, and answers with output and an exit code.
 type remoteRun func(cmd string, stdin io.Reader) (stdout, stderr string, exit int)
 
+// remoteTTY is the same stand-in for a session that got a terminal: it is handed
+// the channel itself and stays on it, because a terminal has no output to collect
+// and no end the client is waiting for.
+type remoteTTY func(cmd string, tty io.ReadWriter)
+
 // testServer is a one-connection-at-a-time SSH server on localhost.
 type testServer struct {
 	addr    net.Addr
 	hostKey ssh.PublicKey
-	// commands records every command line the server was asked to run.
-	commands chan string
+	// events records what the server was asked for, in the order it was asked:
+	// "pty <term> <cols>x<rows>", "window-change <cols>x<rows>", "agent-forward",
+	// "shell", "exec <command line>". Order is half of what the terminal tests
+	// check — a tmux attach that arrives before its pty is an attach that fails.
+	events chan string
+	// run answers exec requests, tty answers a session that asked for a terminal.
+	run remoteRun
+	tty remoteTTY
+	// gone closes when a client's connection ends, however it ends. (Once: a test
+	// may open a second connection to the same server, and the first one to end is
+	// the one being waited for.)
+	gone     chan struct{}
+	goneOnce sync.Once
 }
 
 // startServer brings up a server that accepts clientKey and answers every exec
 // request with run. It returns once it is listening.
 func startServer(t *testing.T, clientKey ssh.PublicKey, run remoteRun) *testServer {
+	t.Helper()
+	return start(t, clientKey, run, nil)
+}
+
+// startTTYServer brings up one that hands every session a terminal and leaves tty
+// on the far end of it.
+func startTTYServer(t *testing.T, clientKey ssh.PublicKey, tty remoteTTY) *testServer {
+	t.Helper()
+	return start(t, clientKey, nil, tty)
+}
+
+func start(t *testing.T, clientKey ssh.PublicKey, run remoteRun, tty remoteTTY) *testServer {
 	t.Helper()
 
 	_, hostPriv, err := ed25519.GenerateKey(rand.Reader)
@@ -70,25 +100,33 @@ func startServer(t *testing.T, clientKey ssh.PublicKey, run remoteRun) *testServ
 	}
 	t.Cleanup(func() { ln.Close() })
 
-	srv := &testServer{addr: ln.Addr(), hostKey: signer.PublicKey(), commands: make(chan string, 8)}
+	srv := &testServer{
+		addr:    ln.Addr(),
+		hostKey: signer.PublicKey(),
+		events:  make(chan string, 16),
+		run:     run,
+		tty:     tty,
+		gone:    make(chan struct{}),
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return // listener closed: the test is over
 			}
-			go srv.serve(conn, cfg, run)
+			go srv.serve(conn, cfg)
 		}
 	}()
 	return srv
 }
 
-func (s *testServer) serve(conn net.Conn, cfg *ssh.ServerConfig, run remoteRun) {
+func (s *testServer) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, cfg)
 	if err != nil {
 		conn.Close()
 		return
 	}
+	defer s.goneOnce.Do(func() { close(s.gone) })
 	defer sshConn.Close()
 	// Keepalives arrive here; the library answers what it can and the rest are
 	// declined, which is the reply a keepalive is looking for either way.
@@ -103,33 +141,80 @@ func (s *testServer) serve(conn net.Conn, cfg *ssh.ServerConfig, run remoteRun) 
 		if err != nil {
 			return
 		}
-		go s.session(ch, chReqs, run)
+		go s.session(ch, chReqs)
 	}
 }
 
-func (s *testServer) session(ch ssh.Channel, reqs <-chan *ssh.Request, run remoteRun) {
+// record notes an event, dropping it rather than blocking if a test is not
+// reading — a server that stalls because nobody drained it is a hang, not a
+// failure anybody can read.
+func (s *testServer) record(format string, args ...any) {
+	select {
+	case s.events <- fmt.Sprintf(format, args...):
+	default:
+	}
+}
+
+func (s *testServer) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
 	for req := range reqs {
-		if req.Type != "exec" {
-			req.Reply(false, nil)
-			continue
-		}
-		var payload struct{ Command string }
-		if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
-			req.Reply(false, nil)
-			return
-		}
-		req.Reply(true, nil)
-		select {
-		case s.commands <- payload.Command:
-		default:
-		}
+		switch req.Type {
+		case "pty-req":
+			// term, then the size in characters, then in pixels, then the modes.
+			var payload struct {
+				Term                          string
+				Cols, Rows, WidthPx, HeightPx uint32
+				Modes                         string
+			}
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				req.Reply(false, nil)
+				return
+			}
+			s.record("pty %s %dx%d", payload.Term, payload.Cols, payload.Rows)
+			req.Reply(true, nil)
 
-		stdout, stderr, exit := run(payload.Command, ch)
-		io.WriteString(ch, stdout)
-		io.WriteString(ch.Stderr(), stderr)
-		ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(exit)}))
-		return
+		case "window-change":
+			var payload struct{ Cols, Rows, WidthPx, HeightPx uint32 }
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				return
+			}
+			s.record("window-change %dx%d", payload.Cols, payload.Rows)
+			// No reply: a window change is told, not asked.
+
+		case "auth-agent-req@openssh.com":
+			s.record("agent-forward")
+			req.Reply(true, nil)
+
+		case "shell":
+			s.record("shell")
+			req.Reply(true, nil)
+			// On its own goroutine, and the request loop keeps running: a terminal
+			// stays open, and the requests that matter most arrive *while* it is
+			// open — a window change during a session nobody is answering is a
+			// resize that never happens.
+			go s.tty("", ch)
+
+		case "exec":
+			var payload struct{ Command string }
+			if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+				req.Reply(false, nil)
+				return
+			}
+			s.record("exec %s", payload.Command)
+			req.Reply(true, nil)
+			if s.tty != nil {
+				go s.tty(payload.Command, ch)
+				continue
+			}
+			stdout, stderr, exit := s.run(payload.Command, ch)
+			io.WriteString(ch, stdout)
+			io.WriteString(ch.Stderr(), stderr)
+			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(exit)}))
+			return
+
+		default:
+			req.Reply(false, nil)
+		}
 	}
 }
 
@@ -210,8 +295,8 @@ func TestTheGoClientRunsACommandAndBringsBackWhatItPrinted(t *testing.T) {
 	}
 	// One string for the login shell to parse, exactly as `ssh host tmux ls`
 	// would have sent it.
-	if got := <-srv.commands; got != "tmux ls" {
-		t.Errorf("the server was asked to run %q, want %q", got, "tmux ls")
+	if got := <-srv.events; got != "exec tmux ls" {
+		t.Errorf("the server was asked for %q, want %q", got, "exec tmux ls")
 	}
 }
 
@@ -314,6 +399,191 @@ func TestTheGoClientOffersOnlyKeys(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the client is waiting on something — a prompt, most likely")
+	}
+}
+
+// A terminal from this backend has its pty on the *server*. The request that
+// asks for one, the window change that resizes it and the channel that carries
+// the bytes are the whole of it — no process on this machine, no pty on this
+// machine, and so nothing a phone has to be missing.
+func TestTheGoClientOpensATerminalOnTheServer(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	pub := writeClientKey(t)
+	srv := startTTYServer(t, pub, echoTTY)
+	trust(t, srv)
+	useGo(t)
+
+	term, err := srv.target("crm").Open(Shell{Cols: 100, Rows: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer term.Close()
+
+	// The pty comes first, at the size the caller asked for and with this
+	// process's own terminal type — the same two things the exec'd ssh sends from
+	// the pty it was given.
+	if got := <-srv.events; got != "pty xterm-256color 100x30" {
+		t.Errorf("first request = %q, want the pty at the size asked for", got)
+	}
+	// And then a login shell, because no command was named: what `ssh host` alone
+	// gives you.
+	if got := <-srv.events; got != "shell" {
+		t.Errorf("second request = %q, want a login shell", got)
+	}
+
+	if _, err := term.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("write to the terminal: %v", err)
+	}
+	if seen, ok := readUntil(term, "hello", 10*time.Second); !ok {
+		t.Errorf("nothing came back from the terminal; read so far: %q", seen)
+	}
+}
+
+// The Claude terminal is a command on a terminal, not a shell: the attach has to
+// arrive *after* the pty, or tmux refuses it ("open terminal failed: not a
+// terminal") and the panel opens onto an error.
+func TestATerminalRunsItsCommandOnThePtyItAskedFor(t *testing.T) {
+	t.Setenv("TERM", "xterm-256color")
+	pub := writeClientKey(t)
+	srv := startTTYServer(t, pub, echoTTY)
+	trust(t, srv)
+	useGo(t)
+
+	// No size given, so it opens at the classic default — the size a pty has when
+	// nobody says otherwise, which is what the exec'd backend's pty would be.
+	term, err := srv.target("crm").Open(Shell{Remote: []string{"tmux", "attach"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer term.Close()
+
+	if got := <-srv.events; got != "pty xterm-256color 80x24" {
+		t.Errorf("first request = %q, want a pty at 80x24", got)
+	}
+	if got := <-srv.events; got != "exec tmux attach" {
+		t.Errorf("second request = %q, want the attach as one command line", got)
+	}
+}
+
+// Resizing is the reason a Terminal has a third method: the browser's window is
+// the real one, and the program drawing into it only finds out if the server is
+// told.
+func TestResizingATerminalTellsTheServerTheWindowChanged(t *testing.T) {
+	pub := writeClientKey(t)
+	srv := startTTYServer(t, pub, echoTTY)
+	trust(t, srv)
+	useGo(t)
+
+	term, err := srv.target("crm").Open(Shell{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer term.Close()
+	<-srv.events // the pty
+	<-srv.events // the shell
+
+	if err := term.Resize(120, 40); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-srv.events; got != "window-change 120x40" {
+		t.Errorf("after Resize the server saw %q, want the new size", got)
+	}
+}
+
+// Agent forwarding is what makes git inside a workspace shell use your keys with
+// nothing stored on the server, and it is the one thing a terminal kind asks for
+// beyond its command — so it has to be requested when asked for, and not
+// otherwise: the host shell deliberately does without your git keys.
+func TestATerminalForwardsTheAgentOnlyWhenAskedTo(t *testing.T) {
+	pub := writeClientKey(t)
+	srv := startTTYServer(t, pub, echoTTY)
+	trust(t, srv)
+	useGo(t)
+	startStubAgent(t)
+
+	asked, err := srv.target("crm").Open(Shell{ForwardAgent: true, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer asked.Close()
+	if got := <-srv.events; got != "agent-forward" {
+		t.Errorf("first request = %q, want the agent offered before the session starts", got)
+	}
+	<-srv.events // the pty
+	<-srv.events // the shell
+
+	plain, err := srv.target("admin").Open(Shell{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if got := <-srv.events; strings.HasPrefix(got, "agent-forward") {
+		t.Error("a terminal that did not ask for the agent forwarded it anyway")
+	}
+}
+
+// Closing a terminal is closing the connection under it, which is exactly what
+// killing the ssh process was: the remote shell goes with it, and a tmux client
+// goes while the session it was attached to stays. The front end holding it may
+// close it twice — a stream that ended and a panel that was replaced are two
+// owners of one object — so twice must be safe.
+func TestClosingATerminalTakesTheConnectionWithIt(t *testing.T) {
+	pub := writeClientKey(t)
+	srv := startTTYServer(t, pub, echoTTY)
+	trust(t, srv)
+	useGo(t)
+
+	term, err := srv.target("crm").Open(Shell{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := term.Close(); err != nil {
+		t.Fatalf("close the terminal: %v", err)
+	}
+
+	select {
+	case <-srv.gone:
+	case <-time.After(10 * time.Second):
+		t.Error("the connection outlived the terminal — the remote shell is still running")
+	}
+	if seen, ok := readUntil(term, "anything", time.Second); ok {
+		t.Errorf("a closed terminal is still producing output: %q", seen)
+	}
+	if err := term.Close(); err != nil {
+		t.Errorf("closing twice: %v", err)
+	}
+}
+
+// echoTTY is a terminal with echo on and nothing else behind it: whatever is
+// typed comes straight back, which is all it takes to show that bytes travel
+// both ways over the channel the pty is attached to.
+func echoTTY(_ string, tty io.ReadWriter) { io.Copy(tty, tty) }
+
+// readUntil reads until marker shows up or the deadline passes, returning
+// everything it read (for the failure message) and whether it found it.
+func readUntil(r io.Reader, marker string, within time.Duration) (string, bool) {
+	found := make(chan string, 1)
+	go func() {
+		var seen strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			seen.Write(buf[:n])
+			if strings.Contains(seen.String(), marker) {
+				found <- seen.String()
+				return
+			}
+			if err != nil {
+				close(found)
+				return
+			}
+		}
+	}()
+	select {
+	case seen, ok := <-found:
+		return seen, ok
+	case <-time.After(within):
+		return "", false
 	}
 }
 
