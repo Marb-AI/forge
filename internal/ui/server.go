@@ -1,10 +1,14 @@
 // Package ui serves Forge's local browser UI: tabs per workspace, a live
 // terminal into each workspace's Claude session, checkpoint/restart/stop, a
 // read-only file browser, and shells that overlay the terminal — on the
-// workspace, on the host, and on this machine. It runs as a detached daemon
-// started by `forge ui`, binds to 127.0.0.1 only, and runs every operation
-// through package forge, the same core the CLI runs — so the UI is a second front
-// end over the exact same actions, not a reimplementation of them.
+// workspace, on the host, and on this machine. It binds to 127.0.0.1 only, and
+// runs every operation through package forge, the same core the CLI runs — so the
+// UI is a second front end over the exact same actions, not a reimplementation of
+// them.
+//
+// It comes up two ways over the same server: as the detached daemon `forge ui`
+// spawns (Serve), and in the caller's own process (Start, inprocess.go) for a
+// desktop shell that has a window instead of a pidfile.
 //
 // Security model (localhost, no login): the server binds to the loopback
 // interface, validates the Host header (so a rebound DNS name can't reach it),
@@ -285,6 +289,21 @@ func CoreDeps() Deps {
 	}
 }
 
+// URL is the address the UI on that port is reached at, carrying the token that
+// gets past the guard on first request. An empty token yields the bare address,
+// which is what to print when nothing is known to be serving — it will ask for
+// one.
+//
+// It lives here, in the package that mints the token and checks it, because both
+// front ends need to say the same thing: the CLI prints it for the daemon it
+// spawned, and a desktop shell points its webview at the instance it started.
+func URL(port int, token string) string {
+	if token == "" {
+		return fmt.Sprintf("http://127.0.0.1:%d/", port)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d/?t=%s", port, token)
+}
+
 // newToken mints a session token.
 func newToken() (string, error) {
 	b := make([]byte, 16)
@@ -294,75 +313,99 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// Serve runs the UI daemon: it binds to 127.0.0.1:port, claims the pidfile once
-// the bind succeeded, and blocks serving requests until the process is signalled
-// (SIGINT/SIGTERM). This is the body of the detached `forge ui` daemon.
+// bind is everything Serve and Start do identically: check the wiring, take the
+// port, and mint the token this run will be reached with. It stops exactly where
+// the two part company — at what owns the process.
 //
-// The order matters: `forge ui` waits for the pidfile to decide the daemon is
-// up, so the pidfile must mean "bound and serving", never "started and about to
-// fail on a port that's already taken".
-func Serve(dir string, port int, deps Deps) error {
+// Binding comes BEFORE anything else, loopback only, so nothing off this machine
+// can reach the UI. A port that is already taken fails here, which is what lets
+// `forge ui` report it instead of cheerfully opening a browser at a dead address.
+//
+// The token is minted HERE, by whoever won the port — not by the command that
+// spawned it. Two `forge ui` racing each other would otherwise each write a token,
+// and the URL one of them printed would open a session the surviving daemon has
+// never heard of. Port 0 asks the OS for a free one; the caller reads back which,
+// off the listener.
+func bind(port int, deps Deps) (net.Listener, *server, error) {
 	// Fail fast on an incomplete wiring rather than nil-checking in a dozen
 	// handlers (and panicking in the ones that forget).
 	if err := deps.validate(); err != nil {
-		return err
+		return nil, nil, err
 	}
-
-	// Bind BEFORE anything else: loopback only, so nothing off this machine can
-	// reach the UI. If the port is taken we fail here, and `forge ui` — which
-	// waits for the pidfile — reports that instead of cheerfully opening a
-	// browser at a dead address.
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		return fmt.Errorf("cannot listen on 127.0.0.1:%d: %w", port, err)
+		return nil, nil, fmt.Errorf("cannot listen on 127.0.0.1:%d: %w", port, err)
 	}
-
-	// The token is minted HERE, by the daemon that won the port — not by the
-	// command that spawned it. Two `forge ui` racing each other would otherwise
-	// each write a token, and the URL one of them printed would open a session
-	// the surviving daemon has never heard of. The winner writes the token, then
-	// the pidfile; `forge ui` waits for the pidfile, so by the time it reads the
-	// token, the token it reads is the one being served.
 	token, err := newToken()
 	if err != nil {
 		_ = ln.Close()
-		return err
+		return nil, nil, err
 	}
-	if err := os.WriteFile(forge.UITokenPath(dir), []byte(token), 0o600); err != nil {
-		_ = ln.Close()
-		return err
-	}
-
-	s := &server{
+	return ln, &server{
 		token: token, deps: deps,
 		terms:     newTermRegistry(),
 		ckRunning: map[string]bool{},
 		jobs:      map[string]*job{},
 		now:       time.Now,
-	}
+	}, nil
+}
 
-	if err := os.WriteFile(forge.UIPIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-		_ = ln.Close()
-		return err
-	}
-	defer os.Remove(forge.UIPIDPath(dir))
-
-	srv := &http.Server{
+// httpServer is the http.Server both entry points serve with, so a timeout set
+// for the daemon is the same timeout in a desktop shell.
+func httpServer(s *server) *http.Server {
+	return &http.Server{
 		Handler: s.handler(),
 		// Bound the header read so a stuck connection can't hold a slot forever.
 		// Deliberately no WriteTimeout: the terminal and job streams are SSE and
 		// stay open for as long as you're watching them.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+}
 
+// shutdown closes the live terminals and stops serving. The terminals go first
+// and by hand: they are the processes this UI opened, and an http.Server's own
+// shutdown would wait on their streams rather than end them.
+func shutdown(srv *http.Server, s *server) error {
+	s.terms.closeAll()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return srv.Shutdown(ctx)
+}
+
+// Serve runs the UI daemon: it binds to 127.0.0.1:port, claims the pidfile once
+// the bind succeeded, and blocks serving requests until the process is signalled
+// (SIGINT/SIGTERM). This is the body of the detached `forge ui` daemon.
+//
+// The order matters: `forge ui` waits for the pidfile to decide the daemon is
+// up, so the pidfile must mean "bound and serving", never "started and about to
+// fail on a port that's already taken". The winner writes the token, then the
+// pidfile; `forge ui` waits for the pidfile, so by the time it reads the token,
+// the token it reads is the one being served.
+//
+// The pidfile, the token file and the signal handler are this function's whole
+// subject: they are what makes the UI a daemon on a laptop, and they are what
+// Start does without. See inprocess.go.
+func Serve(dir string, port int, deps Deps) error {
+	ln, s, err := bind(port, deps)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(forge.UITokenPath(dir), []byte(s.token), 0o600); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	if err := os.WriteFile(forge.UIPIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	defer os.Remove(forge.UIPIDPath(dir))
+
+	srv := httpServer(s)
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigc
-		s.terms.closeAll()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		_ = shutdown(srv, s)
 	}()
 
 	if err := srv.Serve(ln); err != http.ErrServerClosed {
