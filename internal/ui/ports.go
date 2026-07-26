@@ -5,61 +5,23 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/Marb-AI/forge/forge"
 )
 
-// PortRow is one published port as the ports panel shows it: what is behind it,
-// where to reach it, and whether that is true right now.
-//
-// The cli package fills these in — it is the one that can reach both halves of the
-// answer, the host (what is published) and the local tunnel supervisor (whether it
-// arrives). The ui package must not import either.
-type PortRow struct {
-	// Name is the compose service, or the process name for a plain listener.
-	Name string `json:"name"`
-	// Port is the host port, which is also the local port: a workspace's block is
-	// unique across every server, so there is no mapping to show.
-	Port int `json:"port"`
-	// Target is the port inside the container. Shown nowhere, but it is what says
-	// whether a browser link makes sense — a service on 5432 is Postgres however
-	// it was published, and http://127.0.0.1:16003 would be a dead click.
-	Target int `json:"target,omitempty"`
-	// Running is the container's state. A stopped container keeps its row, because
-	// its port is still spoken for and because starting it again is the thing you
-	// came to the panel to do.
-	Running bool `json:"running"`
-	// Kind is "container" or "process". A plain process has no start/stop: there is
-	// nothing to start it back up with that Forge could know.
-	Kind string `json:"kind"`
-	// Tunnel is the local tunnel's state — the supervisor's own vocabulary, plus
-	// "none" for a port nothing is forwarding. It decides whether the link is live,
-	// because a link to a port with no tunnel behind it is a lie.
-	Tunnel string `json:"tunnel"`
-	// TunnelDetail is why, when that is worth saying: which process is holding the
-	// port locally, or what the connection failed with.
-	TunnelDetail string `json:"tunnel_detail,omitempty"`
-	// InBlock is false for a port published outside the workspace's own block.
-	// Shown anyway — it is real and someone meant it — but it is never tunnelled,
-	// so it needs to say why rather than look broken.
-	InBlock bool `json:"in_block"`
-}
+// The ports panel's types, like the rest, are the core's own — see the type block
+// in server.go for why.
+type (
+	// PortRow is one published port as the panel shows it: what is behind it,
+	// where to reach it, and whether that is true right now.
+	PortRow = forge.PortRow
+	// WorkspacePortsInfo is one workspace's block and rows.
+	WorkspacePortsInfo = forge.WorkspacePortsInfo
+)
 
 // TunnelNone is the state of a port no tunnel is carrying: the supervisor has no
 // row for it at all, which is different from having one that is failing.
-const TunnelNone = "none"
-
-// WorkspacePortsInfo is one workspace's block and rows.
-type WorkspacePortsInfo struct {
-	// Block is the range this workspace may publish in, "16000-16099", or empty if
-	// it has none. Shown as the panel's subtitle, because "nothing here yet" and
-	// "nothing here yet, and here is where it would go" are different messages.
-	Block string    `json:"block,omitempty"`
-	Rows  []PortRow `json:"rows"`
-	// Note is why there are no rows, when the reason is not "nothing is running" —
-	// today, a host that could not be reached. The same idea as HostStat's note: a
-	// panel saying why it is empty beats one that just is, and beats a panel stuck
-	// on "Loading…" for a server that is never going to answer.
-	Note string `json:"note,omitempty"`
-}
+const TunnelNone = forge.TunnelNone
 
 // handlePorts reports one workspace's published ports. Per workspace, not per
 // host: the panel sits under the file tree, in the pane that is already about the

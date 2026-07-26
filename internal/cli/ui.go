@@ -7,13 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/forge"
 	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/config"
 	"github.com/Marb-AI/forge/internal/proc"
 	"github.com/Marb-AI/forge/internal/sshx"
 	"github.com/Marb-AI/forge/internal/ui"
@@ -193,20 +193,13 @@ func runUI(_ []string) int {
 		return fail("%v", err)
 	}
 	deps := ui.Deps{
-		ListWorkspaces:    listWorkspacesInfo,
-		WorkspaceActivity: workspaceActivityInfo,
-		WorkspaceTrack:    workspaceTrackInfo,
-		WorkspaceUsage:    workspaceUsageInfo,
+		ListWorkspaces:    forge.ListWorkspaces,
+		WorkspaceActivity: forge.WorkspaceActivity,
+		WorkspaceTrack:    forge.WorkspaceTrack,
+		WorkspaceUsage:    forge.WorkspaceUsage,
 		TrackInc:          trackInc,
-		HostStats:         hostsStats,
-		HostFor: func(name string) *config.Host {
-			// Reload each time so workspaces added while the daemon runs resolve.
-			c, err := config.Load()
-			if err != nil {
-				return nil
-			}
-			return c.HostFor(name)
-		},
+		HostStats:         forge.HostStats,
+		HostFor:           forge.HostFor,
 		Checkpoint: func(name string, out io.Writer) error {
 			c, err := config.Load()
 			if err != nil {
@@ -219,18 +212,7 @@ func runUI(_ []string) int {
 			return runCheckpoint(sshx.WorkspaceTarget(host, name), agentproto.TmuxSession,
 				func(m string) { fmt.Fprintln(out, m) })
 		},
-		ListHosts: func() ([]string, error) {
-			c, err := config.Load()
-			if err != nil {
-				return nil, err
-			}
-			aliases := make([]string, 0, len(c.Hosts))
-			for a := range c.Hosts {
-				aliases = append(aliases, a)
-			}
-			sort.Strings(aliases)
-			return aliases, nil
-		},
+		ListHosts: forge.ListHosts,
 		// The block the workspace was given is dropped here: the browser wizard has
 		// nowhere to say it yet. Nothing is lost — it is on the workspace, and
 		// `forge ports` reports it.
@@ -242,96 +224,13 @@ func runUI(_ []string) int {
 		DeleteWorkspace: deleteWorkspace,
 		RemoveHost:      removeHost,
 		SetUIPort:       setUIPort,
-		Ports:           workspacePorts,
+		Ports:           forge.Ports,
 		ContainerAction: containerAction,
 	}
 	if err := ui.Serve(dir, cfg.UIPortOr(), deps); err != nil {
 		return fail("%v", err)
 	}
 	return 0
-}
-
-// listWorkspacesInfo adapts the shared listing for the browser UI. Same source of
-// truth as `forge workspace list`: our config says which workspaces are ours, the
-// host says whether Claude is running in them.
-func listWorkspacesInfo() ([]ui.WorkspaceInfo, error) {
-	list, err := listWorkspaces()
-	if err != nil {
-		return nil, err
-	}
-	// listWorkspaces already resolved each workspace's host login user from the
-	// config it loaded, so the UI can name the host shell after the real account
-	// (root, or a sudo user) without a second config read on this hot path.
-	out := make([]ui.WorkspaceInfo, 0, len(list))
-	for _, ws := range list {
-		out = append(out, ui.WorkspaceInfo{Name: ws.Name, Host: ws.Host, HostUser: ws.HostUser, Status: ws.Status})
-	}
-	return out, nil
-}
-
-// workspaceActivityInfo adapts the agent's activity map into the ui package's own
-// type, so ui need not import agentproto (same split as listWorkspacesInfo).
-func workspaceActivityInfo() (map[string]ui.Activity, error) {
-	act, err := workspacesActivity()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]ui.Activity, len(act))
-	for name, a := range act {
-		out[name] = ui.Activity{State: a.State, TS: a.TS, Topic: a.Topic, TopicTS: a.TopicTS}
-	}
-	return out, nil
-}
-
-// workspaceTrackInfo adapts the agent's session-tracking map into the ui package's
-// own type, so ui need not import agentproto (same split as workspaceActivityInfo).
-func workspaceTrackInfo() (map[string]ui.Track, error) {
-	tr, err := workspacesTrack()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]ui.Track, len(tr))
-	for name, t := range tr {
-		out[name] = ui.Track{SessionStart: t.SessionStart, ActiveSeconds: t.ActiveSeconds}
-	}
-	return out, nil
-}
-
-// workspaceUsageInfo adapts the agent's usage map into the ui package's own type, so
-// ui need not import agentproto (same split as workspaceActivityInfo). The rate-limit
-// windows stay pointers through the conversion: a nil window is a login that has not
-// reported one, and flattening that to a zeroed struct would show a full allowance
-// where we have no reading at all.
-func workspaceUsageInfo() (map[string]ui.Usage, error) {
-	use, err := workspacesUsage()
-	if err != nil {
-		return nil, err
-	}
-	window := func(w *agentproto.RateWindow) *ui.RateWindow {
-		if w == nil {
-			return nil
-		}
-		return &ui.RateWindow{UsedPercent: w.UsedPercent, ResetsAt: w.ResetsAt}
-	}
-	out := make(map[string]ui.Usage, len(use))
-	for name, u := range use {
-		out[name] = ui.Usage{
-			Account: ui.Account{
-				UUID: u.Account.UUID, Email: u.Account.Email,
-				Name: u.Account.Name, Org: u.Account.Org,
-			},
-			Auth:        u.Auth,
-			TS:          u.TS,
-			Model:       u.Model,
-			ContextUsed: u.ContextUsed,
-			ContextSize: u.ContextSize,
-			CostUSD:     u.CostUSD,
-			FiveHour:    window(u.FiveHour),
-			SevenDay:    window(u.SevenDay),
-			Note:        u.Note,
-		}
-	}
-	return out, nil
 }
 
 func uiURL(port int, token string) string {

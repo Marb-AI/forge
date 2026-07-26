@@ -37,129 +37,42 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/forge"
 )
 
-// WorkspaceInfo is one tab in the UI: a workspace, the host it lives on, and its
-// Claude session status. It mirrors the CLI's workspace list; the cli package
-// fills it in (the ui package must not import cli).
-type WorkspaceInfo struct {
-	Name string `json:"name"`
-	Host string `json:"host"`
-	// HostUser is the host's own login account — the user `host prepare` connected
-	// as (root, or a passwordless-sudo user). It names the identity of the host
-	// shell (the rail's non-workspace shell), which differs per server, so the UI
-	// can label it truthfully instead of assuming "root".
-	HostUser string `json:"host_user"`
-	Status   string `json:"status"`
-}
+// The types the UI serves are the core's own: this package is a front end over
+// forge, not a translation of it, so a field the browser reads is the field the
+// operation returned — no copying, and no wire format that can drift from what the
+// core says. Each alias is named here rather than referred to as forge.X so the
+// handlers below (and their tests) read as they always did.
+type (
+	// WorkspaceInfo is one tab in the UI: a workspace, the host it lives on, and
+	// its Claude session status.
+	WorkspaceInfo = forge.WorkspaceInfo
+	// Activity is what a workspace's Claude is up to — its attention state and the
+	// topic it last wrote — polled to light up tabs where Claude is waiting.
+	Activity = forge.Activity
+	// Track is a workspace's session tracking, the two clocks in the banner.
+	Track = forge.Track
+	// Usage is one workspace's Claude usage: login, context, cost, rate limits.
+	Usage = forge.Usage
+	// Account identifies the Claude login a workspace runs as; the usage panel
+	// groups by it.
+	Account = forge.Account
+	// RateWindow is one of a subscription's rate-limit windows. Nil means absent,
+	// which is not 0%.
+	RateWindow = forge.RateWindow
+	// HostStat is one registered server's resource usage, for the servers panel.
+	HostStat = forge.HostStat
+)
 
-// Activity is what a workspace's Claude is up to: its attention state (state is
-// "busy"/"idle"/"waiting") with the unix second it was set, and the topic Claude
-// last wrote for the workspace with the unix second it wrote it. The cli package
-// fills it in from the agent (the ui package must not import agentproto).
-type Activity struct {
-	State   string `json:"state"`
-	TS      int64  `json:"ts"`
-	Topic   string `json:"topic,omitempty"`
-	TopicTS int64  `json:"topic_ts,omitempty"`
-}
-
-// Track is a workspace's session tracking for the browser: SessionStart is the unix
-// second the current Claude session began (held across a checkpoint, reset on stop/
-// restart) and ActiveSeconds how long the user has been present at it. The cli
-// package fills it in from the agent (the ui package must not import agentproto).
-type Track struct {
-	SessionStart  int64 `json:"session_start"`
-	ActiveSeconds int64 `json:"active_seconds"`
-}
-
-// RateWindow is one of a Claude subscription's rate-limit windows: how much of it
-// is spent and when it starts over. A nil window in Usage means absent, which is not
-// the same as 0% — see Usage.Auth for the case where it is absent by nature.
-type RateWindow struct {
-	UsedPercent float64 `json:"used_percent"`
-	ResetsAt    int64   `json:"resets_at,omitempty"`
-}
-
-// Account identifies the Claude login a workspace is signed in as. UUID is the key
-// the UI groups by — one group per login, since that is the unit a rate limit is
-// measured against — and the rest are labels for the group's header. An empty UUID
-// means no Claude.ai login: an API-credit workspace has none.
-type Account struct {
-	UUID  string `json:"uuid"`
-	Email string `json:"email,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Org   string `json:"org,omitempty"`
-}
-
-// Usage is one workspace's Claude usage for the browser: the login it runs as, how
-// full its context window is, what its session has cost, and that login's rate-limit
-// windows. The cli package fills it in from the agent (the ui package must not
-// import agentproto).
+// Deps are the Forge operations the UI needs, injected rather than called
+// directly so this package stays free of the agent/command machinery (and of the
+// SSH round trips, which is what lets the handlers be tested at all).
 //
-// The rate-limit windows belong to the login, not the workspace — several workspaces
-// on one login report the same figures, because they spend the same allowance — so
-// the panel groups by Account.UUID and takes the freshest sample in each group rather
-// than adding anything up. What IS per workspace, and therefore per row: the context
-// window, the cost, the model.
-//
-// TS says when the sample was taken. Nothing here refreshes while a workspace's
-// Claude is not running, so a group's figures are as old as its liveliest member and
-// the panel says so rather than presenting them as current.
-type Usage struct {
-	Account Account `json:"account"`
-	// Auth is how the workspace pays: "subscription", "api", "bedrock", "vertex", or
-	// empty when nothing on the host says. It decides what the row can claim — only a
-	// Claude.ai subscription HAS a 5-hour or weekly window, so for anything else their
-	// absence is the nature of the thing and not a gap in our reading.
-	Auth        string      `json:"auth,omitempty"`
-	TS          int64       `json:"ts,omitempty"`
-	Model       string      `json:"model,omitempty"`
-	ContextUsed int64       `json:"context_used,omitempty"`
-	ContextSize int64       `json:"context_size,omitempty"`
-	CostUSD     float64     `json:"cost_usd,omitempty"`
-	FiveHour    *RateWindow `json:"five_hour,omitempty"`
-	SevenDay    *RateWindow `json:"seven_day,omitempty"`
-	// Note is the few words saying why a workspace's figures are missing or frozen
-	// when the reason is knowable — a higher-precedence Claude Code setting owning
-	// the status line Forge collects through. Empty when there is nothing to explain.
-	Note string `json:"note,omitempty"`
-}
-
-// HostStat is one registered server's resource usage, for the panel under the
-// file tree. The cli package fills it in from the agent (the ui package must not
-// import agentproto).
-//
-// A host that could not be measured still gets a row — Reachable false, Note
-// saying why. Dropping it would make a server that went down look like one you
-// never registered, and the moment a server stops answering is exactly when you
-// want to see it in the list.
-type HostStat struct {
-	Host      string `json:"host"` // the alias, as registered
-	Addr      string `json:"addr"`
-	Reachable bool   `json:"reachable"`
-	// Note is the few words the row itself shows when a host could not be measured
-	// ("unreachable"); Detail is the longer version for the tooltip, including what
-	// to do about it. Two fields because the row is a sidebar wide — a note long
-	// enough to explain the problem squeezes out the name of the server having it.
-	Note   string `json:"note,omitempty"`
-	Detail string `json:"detail,omitempty"`
-
-	// Zero means "not measured" for each of these — no real host has zero cores or
-	// zero bytes of RAM — so the browser can show "—" instead of a confident 0%.
-	CPUPercent float64 `json:"cpu_percent"`
-	CPUCores   int     `json:"cpu_cores"`
-	MemTotal   uint64  `json:"mem_total"`
-	MemUsed    uint64  `json:"mem_used"`
-	DiskPath   string  `json:"disk_path"`
-	DiskTotal  uint64  `json:"disk_total"`
-	DiskUsed   uint64  `json:"disk_used"`
-	Uptime     int64   `json:"uptime"`
-}
-
-// Deps are the Forge operations the UI needs, injected by the cli package so the
-// ui package stays free of the agent/command machinery (and of import cycles).
+// The reads are now the core's own functions, wired in one line each; what is left
+// injected from the cli package are the writes, until they move too.
 type Deps struct {
 	// ListWorkspaces returns the current workspaces across all hosts.
 	ListWorkspaces func() ([]WorkspaceInfo, error)
@@ -193,7 +106,8 @@ type Deps struct {
 	HostFor func(name string) *config.Host
 	// Checkpoint saves a handoff to memory and restarts the session from it. It
 	// blocks for minutes and can fail (Claude busy), so it runs as a job and
-	// reports progress to out. Injected by the cli package (the exact CLI logic).
+	// reports progress to out. Still injected from the cli package (the exact CLI
+	// logic), like the rest of the writes.
 	Checkpoint func(name string, out io.Writer) error
 	// ListHosts returns the registered host aliases (for the new-workspace wizard).
 	ListHosts func() ([]string, error)

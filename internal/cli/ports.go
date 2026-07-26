@@ -10,10 +10,9 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/forge"
 	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/config"
-	"github.com/Marb-AI/forge/internal/supervisor"
-	"github.com/Marb-AI/forge/internal/ui"
 )
 
 func portsCmd(args []string) int {
@@ -226,7 +225,7 @@ func portsAssign(args []string) int {
 			return fail("no free block left in %d-%d — widen it with: forge ports range", r.Start, r.End)
 		}
 		host := cfg.Hosts[h.alias]
-		if err := callAgent(host, nil, "workspace-port-block",
+		if err := forge.CallAgent(host, nil, "workspace-port-block",
 			"--name", h.workspace,
 			"--port-start", strconv.Itoa(start),
 			"--port-size", strconv.Itoa(r.Block),
@@ -287,7 +286,7 @@ func heldBlocks(cfg *config.Config) (held []holder, unreachable []string) {
 			continue
 		}
 		var res agentproto.ListResult
-		if err := callAgent(host, &res, "workspace-list"); err != nil {
+		if err := forge.CallAgent(host, &res, "workspace-list"); err != nil {
 			unreachable = append(unreachable, alias)
 			continue
 		}
@@ -437,75 +436,6 @@ func parseLsofPorts(out string, lo, hi int) []int {
 	return ports
 }
 
-// workspacePorts answers the browser's ports panel: what a workspace publishes,
-// and whether each of those ports actually arrives on this machine.
-//
-// Two halves from two places, which is why it lives here rather than in either.
-// The host knows what is published; only the local supervisor knows whether the
-// tunnel carrying it is up, blocked by something on this laptop, or absent. A
-// panel that showed one without the other would offer links that quietly fail.
-func workspacePorts(workspace string) (ui.WorkspacePortsInfo, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return ui.WorkspacePortsInfo{}, err
-	}
-	host := cfg.HostFor(workspace)
-	if host == nil {
-		return ui.WorkspacePortsInfo{}, fmt.Errorf("unknown workspace %q", workspace)
-	}
-	var res agentproto.PortsResult
-	if err := callAgent(host, &res, "workspace-ports"); err != nil {
-		return ui.WorkspacePortsInfo{}, err
-	}
-	return portsInfo(res.Workspaces[workspace], tunnelStates(workspace)), nil
-}
-
-// portsInfo turns one workspace's observation into rows, marking each with the
-// state of the tunnel for its port.
-func portsInfo(wp agentproto.WorkspacePorts, tunnels map[int]supervisor.TunnelStatus) ui.WorkspacePortsInfo {
-	info := ui.WorkspacePortsInfo{Rows: []ui.PortRow{}}
-	if wp.Block != nil {
-		info.Block = fmt.Sprintf("%d-%d", wp.Block.Start, wp.Block.End())
-	}
-	for _, p := range wp.Ports {
-		row := ui.PortRow{
-			Name:    p.Name,
-			Port:    p.Host,
-			Target:  p.Target,
-			Running: p.Running,
-			Kind:    p.Kind,
-			InBlock: wp.Block != nil && wp.Block.Contains(p.Host),
-			Tunnel:  ui.TunnelNone,
-		}
-		if t, ok := tunnels[p.Host]; ok {
-			row.Tunnel, row.TunnelDetail = t.State, t.Detail
-		}
-		info.Rows = append(info.Rows, row)
-	}
-	return info
-}
-
-// tunnelStates reads the supervisor's status file for one workspace's tunnels. A
-// supervisor that is not running, or has not written yet, yields nothing — which
-// the panel shows as "no tunnel", because that is exactly what it means.
-func tunnelStates(workspace string) map[int]supervisor.TunnelStatus {
-	states := map[int]supervisor.TunnelStatus{}
-	dir, err := config.Dir()
-	if err != nil {
-		return states
-	}
-	st, err := supervisor.ReadStatus(dir)
-	if err != nil {
-		return states
-	}
-	for _, t := range st.Tunnels {
-		if t.Workspace == workspace {
-			states[t.Port] = t
-		}
-	}
-	return states
-}
-
 // containerAction starts or stops one of a workspace's containers.
 func containerAction(workspace, service, action string) error {
 	cfg, err := config.Load()
@@ -516,6 +446,6 @@ func containerAction(workspace, service, action string) error {
 	if host == nil {
 		return fmt.Errorf("unknown workspace %q", workspace)
 	}
-	return callAgent(host, nil, "workspace-container",
+	return forge.CallAgent(host, nil, "workspace-container",
 		"--name", workspace, "--service", service, "--action", action)
 }

@@ -1,7 +1,11 @@
 # Build output (root-anchored so cmd/forge/ and cmd/forge-agent/ are NOT ignored)
+#
+# There is no /forge line any more: the core package now sits there, and the
+# pattern would have ignored it wholesale. Nothing is lost — the stray binary it
+# covered came from `go build ./cmd/forge` in the repo root, which today refuses
+# to write over a directory of that name. `make` puts binaries in bin/ regardless.
 /bin/
 /dist/
-/forge
 /forge-agent
 *.exe
 

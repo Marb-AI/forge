@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
 )
 
 // setUIPort is what both `forge ui port` and the UI's settings panel go through,

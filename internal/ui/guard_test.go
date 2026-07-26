@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
 )
 
 // testServer builds a server with the guard in place and a trivial handler

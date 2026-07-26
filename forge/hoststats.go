@@ -1,16 +1,45 @@
-package cli
+package forge
 
 import (
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/config"
-	"github.com/Marb-AI/forge/internal/ui"
 )
 
-// hostsStats measures every registered server — CPU, memory, disk — for the
+// HostStat is one registered server's resource usage, for the panel under the
+// file tree.
+//
+// A host that could not be measured still gets a row — Reachable false, Note
+// saying why. Dropping it would make a server that went down look like one you
+// never registered, and the moment a server stops answering is exactly when you
+// want to see it in the list.
+type HostStat struct {
+	Host      string `json:"host"` // the alias, as registered
+	Addr      string `json:"addr"`
+	Reachable bool   `json:"reachable"`
+	// Note is the few words the row itself shows when a host could not be measured
+	// ("unreachable"); Detail is the longer version for the tooltip, including what
+	// to do about it. Two fields because the row is a sidebar wide — a note long
+	// enough to explain the problem squeezes out the name of the server having it.
+	Note   string `json:"note,omitempty"`
+	Detail string `json:"detail,omitempty"`
+
+	// Zero means "not measured" for each of these — no real host has zero cores or
+	// zero bytes of RAM — so the browser can show "—" instead of a confident 0%.
+	CPUPercent float64 `json:"cpu_percent"`
+	CPUCores   int     `json:"cpu_cores"`
+	MemTotal   uint64  `json:"mem_total"`
+	MemUsed    uint64  `json:"mem_used"`
+	DiskPath   string  `json:"disk_path"`
+	DiskTotal  uint64  `json:"disk_total"`
+	DiskUsed   uint64  `json:"disk_used"`
+	Uptime     int64   `json:"uptime"`
+}
+
+// HostStats measures every registered server — CPU, memory, disk — for the
 // browser's servers panel.
 //
 // Every host is asked, not just the ones we keep workspaces on. The panel is a
@@ -21,7 +50,7 @@ import (
 // sum of every server's SSH handshake, and one unreachable host would hold the
 // whole list up for the full connect timeout — with a fan-out, the slowest host
 // costs what the slowest host costs and no more.
-func hostsStats() ([]ui.HostStat, error) {
+func HostStats() ([]HostStat, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, err
@@ -35,7 +64,7 @@ func hostsStats() ([]ui.HostStat, error) {
 	}
 	sort.Strings(aliases)
 
-	out := make([]ui.HostStat, len(aliases))
+	out := make([]HostStat, len(aliases))
 	var wg sync.WaitGroup
 	for i, alias := range aliases {
 		wg.Add(1)
@@ -51,10 +80,10 @@ func hostsStats() ([]ui.HostStat, error) {
 // hostStat measures one server. A failure is part of the answer, not an error:
 // the row says the machine could not be measured and why, which is worth more
 // than its absence.
-func hostStat(alias string, h *config.Host) ui.HostStat {
-	stat := ui.HostStat{Host: alias, Addr: h.Addr}
+func hostStat(alias string, h *config.Host) HostStat {
+	stat := HostStat{Host: alias, Addr: h.Addr}
 	var res agentproto.HostStats
-	if err := callAgent(h, &res, "host-stats"); err != nil {
+	if err := CallAgent(h, &res, "host-stats"); err != nil {
 		stat.Note, stat.Detail = statsNote(err)
 		return stat
 	}

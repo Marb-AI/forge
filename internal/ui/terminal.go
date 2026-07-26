@@ -17,8 +17,8 @@ import (
 
 	"github.com/creack/pty"
 
+	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/config"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 

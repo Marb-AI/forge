@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 	"unicode"
 
+	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/forge"
 	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/clip"
-	"github.com/Marb-AI/forge/internal/config"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
@@ -91,7 +91,7 @@ func createWorkspace(name, alias string) (*agentproto.PortBlock, error) {
 	}
 
 	var res agentproto.CreateResult
-	if err := callAgent(host, &res, "workspace-create",
+	if err := forge.CallAgent(host, &res, "workspace-create",
 		"--name", name,
 		"--pubkey", enc,
 		"--port-start", strconv.Itoa(block.Start),
@@ -143,183 +143,13 @@ func deleteWorkspace(name string) error {
 	if host == nil {
 		return fmt.Errorf("unknown workspace %q — not created by this client", name)
 	}
-	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
+	if err := forge.CallAgent(host, nil, "workspace-delete", "--name", name); err != nil {
 		return err
 	}
 	return config.Update(func(c *config.Config) error {
 		c.RemoveWorkspace(name)
 		return nil
 	})
-}
-
-// WorkspaceStatus is one workspace of ours, and the state of the Claude session in
-// it. The status is the session's — a workspace is a Linux user and a home
-// directory, and cannot itself be "stopped".
-type WorkspaceStatus struct {
-	Name string
-	Host string
-	// HostUser is the host's own login account (config's Host.User) — root, or a
-	// passwordless-sudo user. Resolved here from the config we already loaded, so
-	// callers that need it (the browser UI's host shell) don't reload the config.
-	HostUser string
-	Status   string
-}
-
-// listWorkspaces returns the workspaces THIS CLIENT created, with the state of the
-// Claude session in each.
-//
-// The list comes from our config, not from the host. The host's own list is every
-// directory under /home/workspaces — including ones Forge never made, belonging to
-// someone else or created by hand. Those are not ours: every command here refuses
-// to touch a workspace that isn't in the config ("not created by this client"), so
-// listing them only offers what we will then decline to do.
-//
-// The host is still asked, but only for what the config cannot know: whether a
-// Claude session is running. That answer costs an SSH round trip, which is why the
-// name and host — the parts we already have — are never made to wait for it.
-func listWorkspaces() ([]WorkspaceStatus, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-
-	// Ask only the hosts we actually have workspaces on, and each of them once. A
-	// host we have nothing on has nothing to tell us, and every one of these is an
-	// SSH round trip.
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
-
-	sessions := map[string]map[string]string{} // host alias -> workspace -> session status
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue // config names a host it no longer has; treated as unreachable
-		}
-		var res agentproto.ListResult
-		if err := callAgent(host, &res, "workspace-list"); err != nil {
-			continue // unreachable; its workspaces are reported as such below
-		}
-		byName := map[string]string{}
-		for _, ws := range res.Workspaces {
-			byName[ws.Name] = ws.Status
-		}
-		sessions[alias] = byName
-	}
-
-	out := mergeWorkspaceStatus(cfg.Workspaces, sessions)
-	// Fill in each workspace's host login user from the config already in hand —
-	// mergeWorkspaceStatus works off the name→alias map alone (so it stays unit-
-	// testable), and only here do we still hold cfg.Hosts to resolve the user.
-	for i := range out {
-		if h := cfg.Hosts[out[i].Host]; h != nil {
-			out[i].HostUser = h.User
-		}
-	}
-	return out, nil
-}
-
-// workspacesActivity asks each host once for the Claude attention state of the
-// workspaces on it, and keeps only the ones this client owns (same rule as
-// listWorkspaces — the host's directory may hold workspaces that aren't ours). A
-// host we can't reach simply contributes nothing.
-func workspacesActivity() (map[string]agentproto.Activity, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
-	out := map[string]agentproto.Activity{}
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue
-		}
-		var res agentproto.ActivityResult
-		if err := callAgent(host, &res, "workspace-activity"); err != nil {
-			continue // unreachable: its tabs just stay dim
-		}
-		for name, a := range res.Activity {
-			if cfg.Workspaces[name] == alias { // ours, on this host
-				out[name] = a
-			}
-		}
-	}
-	return out, nil
-}
-
-// workspacesTrack asks each host once for the session tracking of the workspaces on
-// it — when the current Claude session began and how long the user has been present
-// at it — and keeps only the ones this client owns. Same host fan-out and ownership
-// filter as workspacesActivity; an unreachable host contributes nothing.
-func workspacesTrack() (map[string]agentproto.Track, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
-	out := map[string]agentproto.Track{}
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue
-		}
-		var res agentproto.TrackResult
-		if err := callAgent(host, &res, "workspace-track"); err != nil {
-			continue // unreachable: its clocks just don't update this round
-		}
-		for name, t := range res.Sessions {
-			if cfg.Workspaces[name] == alias { // ours, on this host
-				out[name] = t
-			}
-		}
-	}
-	return out, nil
-}
-
-// workspacesUsage asks each host once for the Claude usage of the workspaces on it —
-// the login each is signed in as, its context and cost, and where that login stands
-// against its rate limits — and keeps only the ones this client owns. Same host
-// fan-out and ownership filter as workspacesActivity.
-//
-// The hosts are asked one after another, like the other two sweeps and unlike
-// hostsStats: those fan out because the servers panel asks every registered machine
-// including the empty ones, while this only ever visits hosts we actually keep
-// workspaces on. A host that cannot be reached contributes nothing and its logins
-// keep the reading they last gave, which is why the sample carries its own timestamp.
-func workspacesUsage() (map[string]agentproto.Usage, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
-	out := map[string]agentproto.Usage{}
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue
-		}
-		var res agentproto.UsageResult
-		if err := callAgent(host, &res, "workspace-usage"); err != nil {
-			continue // unreachable, or an agent too old to know the op
-		}
-		for name, u := range res.Usage {
-			if cfg.Workspaces[name] == alias { // ours, on this host
-				out[name] = u
-			}
-		}
-	}
-	return out, nil
 }
 
 // trackInc adds seconds of user-present time to a workspace's session tracking, via
@@ -334,43 +164,12 @@ func trackInc(name string, seconds int) error {
 	if host == nil {
 		return fmt.Errorf("unknown workspace %q", name)
 	}
-	return callAgent(host, nil, "workspace-track-inc",
+	return forge.CallAgent(host, nil, "workspace-track-inc",
 		"-name", name, "-seconds", strconv.Itoa(seconds))
 }
 
-// mergeWorkspaceStatus is the decision, separated from the SSH so it can be tested:
-// given the workspaces our config claims (name -> host alias) and what each host
-// reported (alias -> name -> session status), what do we show?
-//
-// Only ours. A workspace the host has but our config doesn't is somebody else's, or
-// was made by hand — and every command refuses to touch it anyway.
-func mergeWorkspaceStatus(mine map[string]string, sessions map[string]map[string]string) []WorkspaceStatus {
-	names := make([]string, 0, len(mine))
-	for name := range mine {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	out := make([]WorkspaceStatus, 0, len(names))
-	for _, name := range names {
-		alias := mine[name]
-		status := agentproto.StatusUnreachable
-		if byName, answered := sessions[alias]; answered {
-			// The host answered and doesn't have it: it is gone — deleted from another
-			// machine, most likely. Reporting "stopped" would be a lie you could act
-			// on (there is nothing left to start).
-			status = agentproto.StatusMissing
-			if s, ok := byName[name]; ok {
-				status = s
-			}
-		}
-		out = append(out, WorkspaceStatus{Name: name, Host: alias, Status: status})
-	}
-	return out
-}
-
 func workspaceList() int {
-	list, err := listWorkspaces()
+	list, err := forge.ListWorkspaces()
 	if err != nil {
 		return fail("%v", err)
 	}
