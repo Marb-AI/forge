@@ -1,11 +1,18 @@
 // Package config manages Forge's local client state: registered hosts and the
-// set of ports to keep forwarded. It lives entirely on the laptop as a single
-// JSON file at ~/.forge/config.json. Workspaces themselves live on the server;
-// the client only needs to know which hosts exist and what to tunnel.
+// set of ports to keep forwarded. Workspaces themselves live on the server; the
+// client only needs to know which hosts exist and what to tunnel.
+//
+// Where that state lives is the caller's to say. A Store is the seam: the core is
+// handed one and never resolves a path itself, because ~/.forge is a laptop's
+// answer and not everyone's — an iOS app has a container, an Android app has its
+// own directories, and neither has $HOME. FileStore is that seam's answer for a
+// machine with a filesystem, and DefaultDir is the only place the home directory
+// is consulted at all.
 //
 // It sits outside internal/ because the core does: a Host is what several of the
 // core's operations take and return, so anything that can call them has to be able
-// to name the type.
+// to name the type — and a front end that supplies its own Store has to be able to
+// name that too.
 package config
 
 import (
@@ -211,21 +218,71 @@ func (c *Config) UIPortOr() int {
 	return DefaultUIPort
 }
 
-// Dir returns ~/.forge, creating it if necessary.
-func Dir() (string, error) {
+// Store is where one device keeps Forge's client state. Every read and every
+// write the core makes goes through one, so the answer to "where does this live"
+// is given once, by whoever starts the core, rather than assumed in thirty places.
+//
+// Dir is part of it because the daemons' files — pidfiles, logs, the UI token —
+// are the same device's state, kept beside the config and by the same rules. A
+// store with no directory to offer (a phone) returns an error from it, and the
+// daemon operations fail with that error; there are no detached daemons there to
+// start anyway.
+type Store interface {
+	// Load reads the state, yielding an empty config when there is none yet.
+	Load() (*Config, error)
+	// Update applies a change as one atomic read-modify-write.
+	Update(change func(*Config) error) error
+	// Dir returns a directory this device can keep runtime files in.
+	Dir() (string, error)
+}
+
+// DefaultDir returns ~/.forge — the conventional location on a machine that has a
+// home directory.
+//
+// This is the ONLY place Forge consults $HOME. Everything else takes a directory
+// or a Store, which is what lets the same core run where there is no such thing
+// as a home directory.
+func DefaultDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".forge")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return filepath.Join(home, ".forge"), nil
 }
 
-func path() (string, error) {
-	dir, err := Dir()
+// FileStore keeps the state in one directory on this machine: config.json, and
+// whatever the daemons put beside it.
+type FileStore struct {
+	dir string
+	// updateMu serialises read-modify-write cycles on the config file. Save alone
+	// cannot: every mutation is load, change, save, and it is the gap between the
+	// load and the save that loses data — two of them interleaved each read the same
+	// file and the second save silently drops the first one's change. Load and save
+	// stay lock-free (a plain read never loses anything, and the write is atomic);
+	// the lock belongs to the cycle, which is what Update is.
+	//
+	// This covers one store in one process, which is the one that matters: the UI
+	// daemon runs every mutation the browser can reach — the UI port set in one tab,
+	// a workspace being created in another. A `forge` command in a terminal is a
+	// SEPARATE process and this does not serialise against it; that would need a lock
+	// in the filesystem, and the cost of losing that race is a re-typed setting, not
+	// a broken file (the write is temp-then-rename).
+	updateMu sync.Mutex
+}
+
+// NewFileStore returns a Store backed by dir, which is created on first use.
+func NewFileStore(dir string) *FileStore { return &FileStore{dir: dir} }
+
+// Dir returns the store's directory, creating it if necessary.
+func (s *FileStore) Dir() (string, error) {
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+		return "", err
+	}
+	return s.dir, nil
+}
+
+func (s *FileStore) path() (string, error) {
+	dir, err := s.Dir()
 	if err != nil {
 		return "", err
 	}
@@ -233,8 +290,8 @@ func path() (string, error) {
 }
 
 // Load reads the config, returning an empty (initialised) config if none exists.
-func Load() (*Config, error) {
-	p, err := path()
+func (s *FileStore) Load() (*Config, error) {
+	p, err := s.path()
 	if err != nil {
 		return nil, err
 	}
@@ -265,43 +322,28 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// updateMu serialises read-modify-write cycles on the config file. Save() alone
-// cannot: every mutation is load, change, save, and it is the gap between the
-// load and the save that loses data — two of them interleaved each read the same
-// file and the second save silently drops the first one's change. Load and Save
-// stay lock-free (a plain read never loses anything, and Save is atomic); the
-// lock belongs to the cycle, which is what Update is.
-//
-// This covers one process, which is the one that matters: the UI daemon runs
-// every mutation the browser can reach — the UI port set in one tab, a workspace
-// being created in another. A `forge` command in a terminal is a SEPARATE process
-// and this does not serialise against it; that would need a lock in the
-// filesystem, and the cost of losing that race is a re-typed setting, not a
-// broken file (Save is write-temp-then-rename).
-var updateMu sync.Mutex
-
 // Update applies a change to the config as one atomic step: it loads the current
-// file, hands it to change, and saves the result — with no other Update able to
-// interleave.
+// file, hands it to change, and saves the result — with no other Update on this
+// store able to interleave.
 //
 // Keep change SHORT. It runs under the lock, so anything slow in it (an SSH
 // round trip, say) blocks every other config write for as long as it takes. The
 // pattern is: do the slow work first, then Update to record the result.
-func Update(change func(*Config) error) error {
-	updateMu.Lock()
-	defer updateMu.Unlock()
+func (s *FileStore) Update(change func(*Config) error) error {
+	s.updateMu.Lock()
+	defer s.updateMu.Unlock()
 
-	c, err := Load()
+	c, err := s.Load()
 	if err != nil {
 		return err
 	}
 	if err := change(c); err != nil {
 		return err
 	}
-	return c.Save()
+	return s.save(c)
 }
 
-// Save writes the config atomically (write temp + rename) so a crash mid-write
+// save writes the config atomically (write temp + rename) so a crash mid-write
 // can't corrupt it.
 //
 // The temp file gets a unique name. A fixed one (config.json.tmp) is shared
@@ -311,8 +353,8 @@ func Update(change func(*Config) error) error {
 // after the winner already renamed it away. Losing that race should cost you the
 // last writer's version of the file — not an error on a save that had nothing
 // wrong with it.
-func (c *Config) Save() error {
-	p, err := path()
+func (s *FileStore) save(c *Config) error {
+	p, err := s.path()
 	if err != nil {
 		return err
 	}

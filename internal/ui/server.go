@@ -37,7 +37,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/forge"
 )
 
@@ -240,15 +239,15 @@ type wsListCall struct {
 // It lives here rather than in whichever command spawned the daemon, because the
 // wiring below is this front end's own statement of what it needs from Forge.
 func Run() error {
-	dir, err := config.Dir()
+	dir, err := forge.StateDir()
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load()
+	port, err := forge.UIPort()
 	if err != nil {
 		return err
 	}
-	return Serve(dir, cfg.UIPortOr(), CoreDeps())
+	return Serve(dir, port, CoreDeps())
 }
 
 // CoreDeps wires the UI to the real Forge core: one line per operation, none of

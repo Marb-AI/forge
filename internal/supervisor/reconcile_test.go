@@ -30,7 +30,16 @@ func testConfig() *config.Config {
 
 func newTestSupervisor(t *testing.T) *Supervisor {
 	t.Helper()
-	return &Supervisor{dir: t.TempDir(), state: map[key]*TunnelStatus{}, workers: map[key]*worker{}}
+	dir := t.TempDir()
+	// Its own directory, and its own store in it: the supervisor writes the config
+	// back on every poll, so a test that shared one would be writing over whatever
+	// else is there — and before the store existed, over the developer's own.
+	return &Supervisor{
+		dir:     dir,
+		store:   config.NewFileStore(dir),
+		state:   map[key]*TunnelStatus{},
+		workers: map[key]*worker{},
+	}
 }
 
 func TestObserveAllTunnelsOnlyInsideTheBlock(t *testing.T) {
@@ -134,9 +143,6 @@ type errUnreachable struct{}
 func (errUnreachable) Error() string { return "unreachable" }
 
 func TestCacheRoundTrip(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
 	s := newTestSupervisor(t)
 	s.cache(map[key]bool{
 		{"srv", "crm", 16001}:   true,
@@ -144,7 +150,7 @@ func TestCacheRoundTrip(t *testing.T) {
 		{"srv2", "shop", 16100}: true,
 	}, map[string]bool{"srv": true, "srv2": true})
 
-	cfg, err := config.Load()
+	cfg, err := s.store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,9 +358,6 @@ func TestReconcileLeavesUnansweredHostsAlone(t *testing.T) {
 // The cache is per host for the same reason: overwriting it wholesale would erase
 // the last known ports of the very host the cache exists for — one that is down.
 func TestCacheKeepsUnansweredHostsEntries(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
 	s := newTestSupervisor(t)
 	s.cache(map[key]bool{
 		{"srv", "crm", 16000}:   true,
@@ -364,7 +367,7 @@ func TestCacheKeepsUnansweredHostsEntries(t *testing.T) {
 	// Now only srv answers, and it publishes nothing.
 	s.cache(map[key]bool{}, map[string]bool{"srv": true})
 
-	cfg, err := config.Load()
+	cfg, err := s.store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

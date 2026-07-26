@@ -6,7 +6,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/proc"
 	"github.com/Marb-AI/forge/internal/supervisor"
 )
@@ -51,7 +50,7 @@ type Forwarding struct {
 // its pidfile, so the pid is a real one and a daemon that died on startup is
 // reported as the failure it is rather than as a successful spawn.
 func SpawnSupervisor() (pid int, already bool, err error) {
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return 0, false, err
 	}
@@ -73,7 +72,7 @@ func SpawnSupervisor() (pid int, already bool, err error) {
 // continuously now, so there is nothing here to scan: a restart is only worth
 // asking for when you would rather not wait out the poll.
 func RestartForwarding() error {
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return err
 	}
@@ -91,7 +90,7 @@ func RestartForwarding() error {
 // StopForwarding signals the supervisor to shut down and waits for it to go,
 // dropping the status it left behind. Reports false if none was running.
 func StopForwarding() (bool, error) {
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return false, err
 	}
@@ -110,7 +109,7 @@ func StopForwarding() (bool, error) {
 // workspace and port — a stable order, so the same state reads the same way
 // twice running.
 func ForwardingStatus() (Forwarding, error) {
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return Forwarding{}, err
 	}
@@ -142,19 +141,15 @@ func ForwardingStatus() (Forwarding, error) {
 }
 
 // RunSupervisor is the foreground body of the detached supervisor process: it
-// loads the config and blocks until signalled. The observer is handed in from
-// here so the transport stays in one place — the supervisor never reaches for an
-// agent itself.
+// blocks until signalled. Both the store and the observer are handed in from
+// here, so neither where the config lives nor how a host is reached is something
+// the supervisor decides for itself.
 func RunSupervisor() error {
-	dir, err := config.Dir()
+	st, err := Store()
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	return supervisor.Run(dir, cfg, ObservePorts)
+	return supervisor.Run(st, ObservePorts)
 }
 
 // startSupervisor launches the detached supervisor daemon and waits for it to

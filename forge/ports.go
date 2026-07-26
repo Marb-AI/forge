@@ -66,7 +66,7 @@ type WorkspacePortsInfo struct {
 // tunnel carrying it is up, blocked by something on this laptop, or absent. A
 // panel that showed one without the other would offer links that quietly fail.
 func Ports(workspace string) (WorkspacePortsInfo, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return WorkspacePortsInfo{}, err
 	}
@@ -98,7 +98,7 @@ func ObservePorts(host *config.Host) (map[string]agentproto.WorkspacePorts, erro
 // ContainerAction starts or stops one of a workspace's containers. It never
 // creates one: that would need to know the project.
 func ContainerAction(workspace, service, action string) error {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
@@ -140,7 +140,7 @@ func portsInfo(wp agentproto.WorkspacePorts, tunnels map[int]supervisor.TunnelSt
 // the panel shows as "no tunnel", because that is exactly what it means.
 func tunnelStates(workspace string) map[int]supervisor.TunnelStatus {
 	states := map[int]supervisor.TunnelStatus{}
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return states
 	}
