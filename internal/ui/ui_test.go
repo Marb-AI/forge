@@ -267,8 +267,6 @@ func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 		DeleteWorkspace: func(string) error { return nil },
 		RemoveHost:      func(string) error { return nil },
 		SetUIPort:       func(int) error { return nil },
-		Prompts:         func() ([]Prompt, error) { return nil, nil },
-		SetPrompts:      func([]Prompt) error { return nil },
 		Ports:           func(string) (WorkspacePortsInfo, error) { return WorkspacePortsInfo{}, nil },
 		ContainerAction: func(string, string, string) error { return nil },
 	}
@@ -290,8 +288,6 @@ func TestDepsValidateCatchesUnwiredOps(t *testing.T) {
 		"DeleteWorkspace": func(d *Deps) { d.DeleteWorkspace = nil },
 		"RemoveHost":      func(d *Deps) { d.RemoveHost = nil },
 		"SetUIPort":       func(d *Deps) { d.SetUIPort = nil },
-		"Prompts":         func(d *Deps) { d.Prompts = nil },
-		"SetPrompts":      func(d *Deps) { d.SetPrompts = nil },
 	}
 	for name, drop := range drops {
 		d := full

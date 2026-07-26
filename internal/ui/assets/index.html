@@ -202,9 +202,6 @@
         <button class="rail-btn" data-action="ssh" title="Open a shell in this workspace, as the workspace user">
           <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5"></path></svg></span><span class="cap">ssh</span>
         </button>
-        <button class="rail-btn" data-action="prompts" title="Prompts you send Claude often — click one to send it">
-          <span class="ico">≡</span><span class="cap">prompts</span>
-        </button>
         <!-- Below the fold: the things that are NOT about the workspace you have
              open. A shell on the server, a shell on this machine, and the
              settings — all three outlive whichever tab is selected, so they sit
@@ -244,41 +241,6 @@
         <button id="cf-cancel">Cancel</button>
         <button id="cf-ok" class="primary">Confirm</button>
       </div>
-    </div>
-  </div>
-
-  <!-- Prompts: the texts you send Claude over and over. A popover off the rail
-       rather than a section in Settings — nothing here changes how Forge behaves,
-       it is content you write, and you open it to USE it, not to configure it. -->
-  <div id="prompts" hidden>
-    <div id="pr-backdrop"></div>
-    <div id="pr-pop" role="dialog" aria-label="Prompts">
-      <div class="pane-head">
-        <span>Prompts</span>
-        <span class="pane-actions">
-          <button id="pr-new" title="New prompt">+</button>
-          <button id="pr-close" title="Close (Esc)">✕</button>
-        </span>
-      </div>
-      <div id="pr-list"></div>
-      <div id="pr-note" class="hint pad" hidden></div>
-      <form id="pr-edit" hidden>
-        <label for="pr-title">Title</label>
-        <input id="pr-title" type="text" autocomplete="off" spellcheck="false"
-               placeholder="e.g. review the diff">
-        <label for="pr-text">Text</label>
-        <textarea id="pr-text" rows="6" spellcheck="false"
-                  placeholder="What you'd type into Claude…"></textarea>
-        <div class="hint">
-          Sent as if you typed it, then Enter. Hit <b>Esc</b> in Claude to stop it —
-          the message comes back into the box, editable.
-        </div>
-        <div id="pr-error" class="err" hidden></div>
-        <div class="pr-foot">
-          <button type="button" id="pr-cancel">Cancel</button>
-          <button type="submit" id="pr-save" class="primary">Save</button>
-        </div>
-      </form>
     </div>
   </div>
 

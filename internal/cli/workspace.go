@@ -103,8 +103,8 @@ func createWorkspace(name, alias string) (*agentproto.PortBlock, error) {
 
 	// Record it in its own step, and only it. The load above is minutes old by now
 	// (creating the user on the server is an SSH round trip), so saving that whole
-	// copy back would undo anything else written meanwhile — a prompt, the UI port,
-	// another workspace created from a second tab.
+	// copy back would undo anything else written meanwhile — the UI port, a server
+	// just registered, another workspace created from a second tab.
 	if err := config.Update(func(c *config.Config) error {
 		c.AddWorkspace(name, alias)
 		// The workspace now holds the block on its host, which is the real record;
