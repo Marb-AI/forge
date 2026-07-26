@@ -79,6 +79,6 @@ func spawnCmd(_ []string) int {
 		fmt.Printf("supervisor already running (pid %d)\n", pid)
 		return 0
 	}
-	fmt.Println("supervisor started")
+	fmt.Printf("supervisor started (pid %d)\n", pid)
 	return 0
 }

@@ -128,6 +128,24 @@ func TestSetPortRangeKeepsWhatWasNotAskedAbout(t *testing.T) {
 		t.Errorf("stored %+v, reported %+v", stored, got)
 	}
 
+	// One bound alone leaves the other where it was. Moving them as a pair looks
+	// harmless while the only caller parses a span and always has both — but a
+	// ceiling raised on its own would take the floor to zero with it.
+	got, err = SetPortRange(0, 32000, 0)
+	if err != nil {
+		t.Fatalf("end only: %v", err)
+	}
+	if got.Start != 30000 || got.End != 32000 || got.Block != 25 {
+		t.Errorf("end only = %+v, want the start kept at 30000", got)
+	}
+	got, err = SetPortRange(31000, 0, 0)
+	if err != nil {
+		t.Fatalf("start only: %v", err)
+	}
+	if got.Start != 31000 || got.End != 32000 || got.Block != 25 {
+		t.Errorf("start only = %+v, want the end kept at 32000", got)
+	}
+
 	// A span that holds no whole block is refused rather than stored, since every
 	// allocation from it would fail.
 	if _, err := SetPortRange(30000, 30010, 100); err == nil {

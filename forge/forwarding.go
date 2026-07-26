@@ -2,6 +2,7 @@ package forge
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -45,6 +46,10 @@ type Forwarding struct {
 // SpawnSupervisor makes sure the supervisor is running and reports its pid,
 // along with whether it was already up. Idempotent, so it is safe to call from a
 // shell rc on every new terminal.
+//
+// "Is running" is meant literally: it returns once the supervisor has claimed
+// its pidfile, so the pid is a real one and a daemon that died on startup is
+// reported as the failure it is rather than as a successful spawn.
 func SpawnSupervisor() (pid int, already bool, err error) {
 	dir, err := config.Dir()
 	if err != nil {
@@ -56,7 +61,8 @@ func SpawnSupervisor() (pid int, already bool, err error) {
 	if err := startSupervisor(dir); err != nil {
 		return 0, false, err
 	}
-	return 0, false, nil
+	pid, _ = daemonPID(supervisor.PIDPath(dir))
+	return pid, false, nil
 }
 
 // RestartForwarding stops the supervisor if it is up and starts a fresh one,
@@ -151,9 +157,21 @@ func RunSupervisor() error {
 	return supervisor.Run(dir, cfg, ObservePorts)
 }
 
-// startSupervisor launches the detached supervisor daemon.
+// startSupervisor launches the detached supervisor daemon and waits for it to
+// claim its pidfile, which Run does before anything else.
+//
+// Waiting is what makes the answer worth anything. Launching a process only says
+// the fork worked; a supervisor that exits immediately — a config it cannot read,
+// a second one already holding the pidfile — would otherwise be reported as
+// started, and the first sign of trouble would be tunnels that never come up.
 func startSupervisor(dir string) error {
-	return startDetached(dir, "forge.log", RunSupervisorArg)
+	if err := startDetached(dir, "forge.log", RunSupervisorArg); err != nil {
+		return err
+	}
+	if !awaitPID(supervisor.PIDPath(dir), true, 3*time.Second) {
+		return fmt.Errorf("the supervisor didn't come up — see %s", filepath.Join(dir, "forge.log"))
+	}
+	return nil
 }
 
 // stopSupervisor signals a running supervisor to shut down. Reports false if

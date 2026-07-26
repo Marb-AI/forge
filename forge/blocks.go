@@ -172,8 +172,15 @@ func SetPortRange(start, end, block int) (config.PortRange, error) {
 		return config.PortRange{}, err
 	}
 	next := cfg.PortRangeOr()
-	if start > 0 || end > 0 {
-		next.Start, next.End = start, end
+	// Each bound on its own. Moving them together looks harmless — the CLI parses a
+	// span and always has both — but "0 means leave it alone" has to hold for one
+	// bound as well as three, or a caller that raises only the ceiling silently
+	// takes the floor to zero with it.
+	if start > 0 {
+		next.Start = start
+	}
+	if end > 0 {
+		next.End = end
 	}
 	if block > 0 {
 		next.Block = block

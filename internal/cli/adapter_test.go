@@ -29,28 +29,40 @@ func TestTheCLIReachesForgeOnlyThroughTheCore(t *testing.T) {
 }
 
 // And the rule itself, against the imports it exists to catch — the ones this
-// package held until it became an adapter. A rule that has stopped matching
-// anything passes for a rule that is satisfied.
+// package held until it became an adapter, plus a third-party one, since "not
+// ours" is not the same as "harmless". A rule that has stopped matching anything
+// passes for a rule that is satisfied.
 func TestTheRuleRecognisesWhatItForbids(t *testing.T) {
-	got := beyondTheAdapter([]string{
+	allowed := []string{
 		"fmt",
 		"text/tabwriter",
+		"os/exec", // stdlib, and the adapter does open a browser with it
 		"github.com/Marb-AI/forge/forge",
 		"github.com/Marb-AI/forge/internal/clip",
 		"github.com/Marb-AI/forge/internal/ui",
+	}
+	forbidden := []string{
 		"github.com/Marb-AI/forge/config",
 		"github.com/Marb-AI/forge/internal/sshx",
 		"github.com/Marb-AI/forge/internal/supervisor",
 		"github.com/Marb-AI/forge/internal/agentproto",
 		"github.com/Marb-AI/forge/internal/proc",
-	})
-	if len(got) != 5 {
-		t.Errorf("forbidden imports found = %v; want the five that are not stdlib, "+
-			"the core, the clipboard filter or the UI daemon", got)
+		// Nothing about a dependency being someone else's makes it an adapter's:
+		// a CLI that grew its own ssh client would be as far from this rule as one
+		// that reached for ours.
+		"golang.org/x/crypto/ssh",
+		"github.com/creack/pty",
+	}
+	if got := beyondTheAdapter(allowed); len(got) > 0 {
+		t.Errorf("the rule rejects what an adapter may have: %v", got)
+	}
+	if got := beyondTheAdapter(forbidden); len(got) != len(forbidden) {
+		t.Errorf("the rule caught %v; want all %d of %v", got, len(forbidden), forbidden)
 	}
 }
 
-// beyondTheAdapter picks out the imports an adapter has no business having.
+// beyondTheAdapter picks out the imports an adapter has no business having:
+// anything that is not the standard library or one of the three below.
 //
 // The three it may have: the core, the clipboard filter (which exists because of
 // the terminal this front end is attached to, and means nothing to any other),
@@ -65,10 +77,18 @@ func beyondTheAdapter(imports []string) []string {
 	}
 	var bad []string
 	for _, imp := range imports {
-		if !strings.HasPrefix(imp, mod) || allowed[imp] {
-			continue // stdlib, or one of ours that an adapter may have
+		if stdlib(imp) || allowed[imp] {
+			continue
 		}
 		bad = append(bad, imp)
 	}
 	return bad
+}
+
+// stdlib reports whether an import path is a standard library package. The test
+// go/build itself uses: a domain in the first element is what makes a path
+// external, and the standard library has none.
+func stdlib(path string) bool {
+	first, _, _ := strings.Cut(path, "/")
+	return !strings.Contains(first, ".")
 }
