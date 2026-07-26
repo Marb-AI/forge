@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/Marb-AI/forge/forge"
+	"github.com/Marb-AI/forge/internal/ui"
 )
 
 // uiCmd handles `forge ui [start|stop|status|port <port>]`. Bare `forge ui`
@@ -36,7 +37,7 @@ func uiStart() int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	url := uiURL(d.Port, d.Token)
+	url := ui.URL(d.Port, d.Token)
 	if already {
 		fmt.Printf("forge ui already running (pid %d)\n  %s\n", d.PID, url)
 		return 0
@@ -68,7 +69,7 @@ func uiStatus() int {
 		fmt.Println("forge ui not running (start with: forge ui)")
 		return 0
 	}
-	fmt.Printf("forge ui running (pid %d)\n  %s\n", d.PID, uiURL(d.Port, d.Token))
+	fmt.Printf("forge ui running (pid %d)\n  %s\n", d.PID, ui.URL(d.Port, d.Token))
 	return 0
 }
 
@@ -89,13 +90,6 @@ func uiSetPort(rest []string) int {
 		fmt.Println("restart to apply: forge ui stop && forge ui")
 	}
 	return 0
-}
-
-func uiURL(port int, token string) string {
-	if token == "" {
-		return fmt.Sprintf("http://127.0.0.1:%d/", port)
-	}
-	return fmt.Sprintf("http://127.0.0.1:%d/?t=%s", port, token)
 }
 
 // openBrowser best-effort opens url in the default browser. Failure is silent —

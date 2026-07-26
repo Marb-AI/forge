@@ -19,8 +19,9 @@ import (
 //
 // What it deliberately still allows: the daemon's own process — binding a port,
 // claiming a pidfile, catching a signal, serving embedded files. That is this
-// package being a program, not this package reaching a server, and it is the next
-// thing to move when where-things-are-stored becomes something the core answers.
+// package being a program, not this package reaching a server. It is now confined
+// to Serve: Start (inprocess.go) is the same server with none of it, for a shell
+// that is its own process and has no pidfile to claim.
 func TestTheUIReachesForgeOnlyThroughTheCore(t *testing.T) {
 	pkg, err := build.ImportDir(".", 0)
 	if err != nil {
