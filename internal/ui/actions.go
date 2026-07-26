@@ -11,16 +11,23 @@ import (
 
 // The Claude session actions exposed to the UI: stop, restart, and the involved
 // save-handoff-then-restart flow that is checkpoint. All three are the core's
-// operations — the same ones the CLI runs — so what happens to a session does not
-// depend on which front end asked.
+// operations; this package implements none of them itself.
 //
-// What is left here is the HTTP shape of them: an unknown workspace is a 404,
-// because the browser asked for something that does not exist, while a failure
-// past that point is a 502 — the server we were told to reach did not answer.
+// Restart and checkpoint are the very same calls the CLI makes. Stop is not, yet:
+// forge.StopSession also clears the session's clocks, where `forge workspace
+// <name> claude stop` kills the tmux session and nothing else — and reports when
+// there was no session to kill, which the core's stop deliberately tolerates.
+// That drift predates the core and wants a PR that can decide what a stop should
+// say, rather than one that moved code on the promise of changing no behaviour.
+//
+// What is left here is the HTTP shape: an unknown workspace is a 404, because the
+// browser asked for something that does not exist, while a failure past that
+// point is a 502 — the server we were told to reach did not answer.
 
-// handleStop kills the workspace's Claude tmux session. The attached browser
-// terminal sees the stream end; the session is gone from the server (like
-// `forge workspace <name> claude stop`).
+// handleStop kills the workspace's Claude tmux session and ends its clocks with
+// it: a stop is the end of a session, so the next one starts them over. The
+// attached browser terminal sees the stream end; the session is gone from the
+// server.
 func (s *server) handleStop(w http.ResponseWriter, r *http.Request) {
 	ws := r.PathValue("ws")
 	if s.deps.HostFor(ws) == nil {

@@ -138,6 +138,10 @@ func workspaceClaude(name string, target sshx.Target, rest []string) int {
 		remote := agentproto.KillClaude + "; " + agentproto.AttachClaude
 		return runInteractive(target.TTYArgs(remote))
 	case "stop":
+		// Not forge.StopSession: that one also clears the session's clocks and
+		// succeeds when there is nothing to kill, where this reports it. Reconciling
+		// the two means deciding which of those a stop should be, so it is left as
+		// it has always been rather than changed in passing.
 		if err := runCapture(target.Args("tmux", "kill-session", "-t", session)); err != nil {
 			return fail("stop: %v (session may not be running)", err)
 		}
