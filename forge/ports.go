@@ -75,10 +75,39 @@ func Ports(workspace string) (WorkspacePortsInfo, error) {
 		return WorkspacePortsInfo{}, fmt.Errorf("unknown workspace %q", workspace)
 	}
 	var res agentproto.PortsResult
-	if err := CallAgent(host, &res, "workspace-ports"); err != nil {
+	if err := callAgent(host, &res, "workspace-ports"); err != nil {
 		return WorkspacePortsInfo{}, err
 	}
 	return portsInfo(res.Workspaces[workspace], tunnelStates(workspace)), nil
+}
+
+// ObservePorts asks one host what its workspaces publish. It is the tunnel
+// supervisor's feed: the supervisor is handed this rather than reaching for the
+// agent itself, so the transport stays in one place.
+//
+// It answers in the agent's own wire types, which is why it is the one operation
+// here shaped by an internal package: its caller is internal too.
+func ObservePorts(host *config.Host) (map[string]agentproto.WorkspacePorts, error) {
+	var res agentproto.PortsResult
+	if err := callAgent(host, &res, "workspace-ports"); err != nil {
+		return nil, err
+	}
+	return res.Workspaces, nil
+}
+
+// ContainerAction starts or stops one of a workspace's containers. It never
+// creates one: that would need to know the project.
+func ContainerAction(workspace, service, action string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	host := cfg.HostFor(workspace)
+	if host == nil {
+		return fmt.Errorf("unknown workspace %q", workspace)
+	}
+	return callAgent(host, nil, "workspace-container",
+		"--name", workspace, "--service", service, "--action", action)
 }
 
 // portsInfo turns one workspace's observation into rows, marking each with the

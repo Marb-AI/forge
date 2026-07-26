@@ -1,4 +1,4 @@
-package cli
+package forge
 
 import (
 	"io"

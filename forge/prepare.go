@@ -1,4 +1,4 @@
-package cli
+package forge
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
-// hostPrepare provisions a bare server into a Forge host and registers it:
+// PrepareHost provisions a bare server into a Forge host and registers it:
 // installs git, make, tmux, iproute2 (ss), docker + compose, gh, and forge-agent;
 // creates the host's git identity (an SSH key); locks the firewall to SSH-only;
 // and disables SSH password auth. Everything is idempotent — already-present
@@ -23,35 +23,11 @@ import (
 // Must connect as root or a passwordless-sudo user (it installs system packages
 // and edits sshd/iptables). This path is not exercised on the dev machine — it
 // needs a real Linux host; test on a throwaway box first.
-func hostPrepare(args []string) int {
-	alias, rest := extractFlag(args, "alias")
-	noFirewall := hasBoolFlag(rest, "--no-firewall")
-	noHarden := hasBoolFlag(rest, "--no-ssh-harden")
-	noPrune := hasBoolFlag(rest, "--no-docker-prune")
-	pruneImages := hasBoolFlag(rest, "--docker-prune-images")
-	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune", "--docker-prune-images")
-
-	// The image sweep is a tier of the nightly clean-up, not a standalone job — it's
-	// injected into that script. Asking for it while declining the clean-up would
-	// silently install nothing, so reject the contradiction rather than no-op.
-	if noPrune && pruneImages {
-		return fail("--docker-prune-images is part of the nightly clean-up; drop --no-docker-prune to use it")
-	}
-
-	if len(rest) < 1 || alias == "" {
-		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images]")
-	}
-	if err := runHostPrepare(rest[0], alias, !noFirewall, !noHarden, !noPrune, pruneImages, os.Stdout); err != nil {
-		return fail("%v", err)
-	}
-	return 0
-}
-
-// runHostPrepare is the transport-agnostic `host prepare`: it provisions a bare
-// server and registers it, writing every line of progress to out. The CLI passes
-// os.Stdout; the browser UI passes an SSE stream, so the wizard can show the same
-// long provisioning run live instead of a spinner.
-func runHostPrepare(sshTarget, alias string, firewall, harden, dockerPrune, pruneImages bool, out io.Writer) error {
+//
+// It takes minutes and the progress is the point, so every line goes to out as it
+// happens. The CLI passes os.Stdout; the browser UI passes an SSE stream, so the
+// wizard shows the same long provisioning run live instead of a spinner.
+func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneImages bool, out io.Writer) error {
 	user, addr, port, err := config.ParseSSHTarget(sshTarget)
 	if err != nil {
 		return err
@@ -149,9 +125,13 @@ func runHostPrepare(sshTarget, alias string, firewall, harden, dockerPrune, prun
 const (
 	hostKeyDir  = "/etc/forge"
 	hostKeyPath = hostKeyDir + "/id_ed25519"
-	// hostGhDir holds the host-wide gh credential, seeded by `forge host gh-login`
+	// HostGhDir holds the host-wide gh credential, seeded by `forge host gh-login`
 	// and copied into each workspace at create. Kept in sync with internal/agent.
-	hostGhDir = hostKeyDir + "/gh"
+	//
+	// Exported for the one step this package cannot do yet: the gh login itself is
+	// an interactive browser-or-token flow, so it needs a terminal — and terminals
+	// are still the front end's, until they move behind this boundary too.
+	HostGhDir = hostKeyDir + "/gh"
 )
 
 // unameToGoArch maps `uname -m` to a Go arch used in the agent binary name.
@@ -229,26 +209,6 @@ func locateAgentBinary(goarch string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("agent binary %s not found — build it with `make agent-linux` (or set FORGE_AGENT_BIN)", name)
-}
-
-// dropFlags removes the given boolean flags from args.
-func dropFlags(args []string, flags ...string) []string {
-	out := make([]string, 0, len(args))
-	for _, a := range args {
-		if !contains(flags, a) {
-			out = append(out, a)
-		}
-	}
-	return out
-}
-
-func contains(ss []string, s string) bool {
-	for _, x := range ss {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // buildPrepareScript assembles the idempotent remote provisioning script. It

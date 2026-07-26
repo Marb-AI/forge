@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,9 +12,7 @@ import (
 
 	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/forge"
-	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/proc"
-	"github.com/Marb-AI/forge/internal/sshx"
 	"github.com/Marb-AI/forge/internal/ui"
 )
 
@@ -155,7 +152,7 @@ func uiSetPort(rest []string) int {
 	if err != nil {
 		return fail("invalid port %q (want 1-65535)", rest[0])
 	}
-	if err := setUIPort(p); err != nil {
+	if err := forge.SetUIPort(p); err != nil {
 		return fail("%v", err)
 	}
 	fmt.Printf("forge ui port set to %d\n", p)
@@ -167,22 +164,12 @@ func uiSetPort(rest []string) int {
 	return 0
 }
 
-// setUIPort records the port the browser UI should bind to. It only takes effect
-// on the next start — a running daemon already holds the old port. Shared by
-// `forge ui port` and the UI's settings panel.
-func setUIPort(port int) error {
-	if port < 1 || port > 65535 {
-		return fmt.Errorf("invalid port %d (want 1-65535)", port)
-	}
-	return config.Update(func(c *config.Config) error {
-		c.UIPort = port
-		return nil
-	})
-}
-
 // runUI is the foreground body of the detached UI daemon. It loads config and
 // the session token, wires the Forge operations the server needs, and blocks in
 // ui.Serve until signalled.
+//
+// Every operation is now the core's own, wired one line each — the UI is a front
+// end over forge, and this is the seam where that is said out loud.
 func runUI(_ []string) int {
 	dir, err := config.Dir()
 	if err != nil {
@@ -197,35 +184,26 @@ func runUI(_ []string) int {
 		WorkspaceActivity: forge.WorkspaceActivity,
 		WorkspaceTrack:    forge.WorkspaceTrack,
 		WorkspaceUsage:    forge.WorkspaceUsage,
-		TrackInc:          trackInc,
+		TrackInc:          forge.TrackInc,
 		HostStats:         forge.HostStats,
 		HostFor:           forge.HostFor,
-		Checkpoint: func(name string, out io.Writer) error {
-			c, err := config.Load()
-			if err != nil {
-				return err
-			}
-			host := c.HostFor(name)
-			if host == nil {
-				return fmt.Errorf("unknown workspace %q", name)
-			}
-			return runCheckpoint(sshx.WorkspaceTarget(host, name), agentproto.TmuxSession,
-				func(m string) { fmt.Fprintln(out, m) })
-		},
-		ListHosts: forge.ListHosts,
+		Checkpoint:        forge.Checkpoint,
+		StopSession:       forge.StopSession,
+		RestartSession:    forge.RestartSession,
+		ListHosts:         forge.ListHosts,
 		// The block the workspace was given is dropped here: the browser wizard has
 		// nowhere to say it yet. Nothing is lost — it is on the workspace, and
 		// `forge ports` reports it.
 		CreateWorkspace: func(name, host string) error {
-			_, err := createWorkspace(name, host)
+			_, err := forge.CreateWorkspace(name, host)
 			return err
 		},
-		PrepareHost:     runHostPrepare,
-		DeleteWorkspace: deleteWorkspace,
-		RemoveHost:      removeHost,
-		SetUIPort:       setUIPort,
+		PrepareHost:     forge.PrepareHost,
+		DeleteWorkspace: forge.DeleteWorkspace,
+		RemoveHost:      forge.RemoveHost,
+		SetUIPort:       forge.SetUIPort,
 		Ports:           forge.Ports,
-		ContainerAction: containerAction,
+		ContainerAction: forge.ContainerAction,
 	}
 	if err := ui.Serve(dir, cfg.UIPortOr(), deps); err != nil {
 		return fail("%v", err)

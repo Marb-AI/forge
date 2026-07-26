@@ -2,9 +2,9 @@
 // terminal into each workspace's Claude session, checkpoint/restart/stop, a
 // read-only file browser, and shells that overlay the terminal — on the
 // workspace, on the host, and on this machine. It runs as a detached daemon
-// started by `forge ui`, binds to 127.0.0.1 only, and reuses the same ssh/tmux
-// plumbing the CLI uses — so the UI is a second front end over the exact same
-// actions, not a reimplementation of them.
+// started by `forge ui`, binds to 127.0.0.1 only, and runs every operation
+// through package forge, the same core the CLI runs — so the UI is a second front
+// end over the exact same actions, not a reimplementation of them.
 //
 // Security model (localhost, no login): the server binds to the loopback
 // interface, validates the Host header (so a rebound DNS name can't reach it),
@@ -71,8 +71,9 @@ type (
 // directly so this package stays free of the agent/command machinery (and of the
 // SSH round trips, which is what lets the handlers be tested at all).
 //
-// The reads are now the core's own functions, wired in one line each; what is left
-// injected from the cli package are the writes, until they move too.
+// Every one of them is now the core's own function, wired a line each. Nothing
+// here is implemented by the front end that wires it: this struct is the list of
+// what the UI asks Forge to do, and the tests fill it with fakes.
 type Deps struct {
 	// ListWorkspaces returns the current workspaces across all hosts.
 	ListWorkspaces func() ([]WorkspaceInfo, error)
@@ -106,9 +107,13 @@ type Deps struct {
 	HostFor func(name string) *config.Host
 	// Checkpoint saves a handoff to memory and restarts the session from it. It
 	// blocks for minutes and can fail (Claude busy), so it runs as a job and
-	// reports progress to out. Still injected from the cli package (the exact CLI
-	// logic), like the rest of the writes.
+	// reports progress to out.
 	Checkpoint func(name string, out io.Writer) error
+	// StopSession kills the workspace's Claude session, ending its clocks with it.
+	StopSession func(name string) error
+	// RestartSession kills the session and starts a fresh one. A hard restart is a
+	// new session, so its clocks start over — unlike a checkpoint's.
+	RestartSession func(name string) error
 	// ListHosts returns the registered host aliases (for the new-workspace wizard).
 	ListHosts func() ([]string, error)
 	// CreateWorkspace provisions a workspace on a registered host. It talks to the
@@ -142,6 +147,8 @@ func (d Deps) validate() error {
 		"ListWorkspaces":  d.ListWorkspaces,
 		"HostFor":         d.HostFor,
 		"Checkpoint":      d.Checkpoint,
+		"StopSession":     d.StopSession,
+		"RestartSession":  d.RestartSession,
 		"ListHosts":       d.ListHosts,
 		"CreateWorkspace": d.CreateWorkspace,
 		"PrepareHost":     d.PrepareHost,

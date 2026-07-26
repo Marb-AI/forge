@@ -101,6 +101,26 @@ func hasBoolFlag(args []string, names ...string) bool {
 	return false
 }
 
+// dropFlags removes the given boolean flags from args.
+func dropFlags(args []string, flags ...string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if !contains(flags, a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // extractFlag pulls a --name=value / --name value (or single-dash) flag out of
 // args wherever it appears, returning its value and the remaining positional
 // args. Unlike the stdlib flag package this tolerates flags placed after

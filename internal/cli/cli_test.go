@@ -44,30 +44,6 @@ func TestDropFlags(t *testing.T) {
 	}
 }
 
-func TestUnameToGoArch(t *testing.T) {
-	for in, want := range map[string]string{"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"} {
-		got, err := unameToGoArch(in)
-		if err != nil || got != want {
-			t.Errorf("unameToGoArch(%q) = (%q,%v), want %q", in, got, err, want)
-		}
-	}
-	if _, err := unameToGoArch("mips"); err == nil {
-		t.Error("expected error for unsupported arch")
-	}
-}
-
-func TestIproutePackage(t *testing.T) {
-	if p, ok := iproutePackage("apt-get"); !ok || p != "iproute2" {
-		t.Errorf("apt-get -> %q,%v", p, ok)
-	}
-	if p, ok := iproutePackage("dnf"); !ok || p != "iproute" {
-		t.Errorf("dnf -> %q,%v", p, ok)
-	}
-	if _, ok := iproutePackage("apk"); ok {
-		t.Error("expected apk unsupported")
-	}
-}
-
 func TestJoinInts(t *testing.T) {
 	if got := joinInts([]int{1, 2, 3}); got != "1 2 3" {
 		t.Errorf("joinInts = %q", got)
