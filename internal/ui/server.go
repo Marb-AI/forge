@@ -297,11 +297,22 @@ func CoreDeps() Deps {
 // It lives here, in the package that mints the token and checks it, because both
 // front ends need to say the same thing: the CLI prints it for the daemon it
 // spawned, and a desktop shell points its webview at the instance it started.
+//
+// The token is escaped rather than interpolated. Today's is hex and needs none,
+// but this is the one place that turns a token into a URL, and the day newToken
+// answers in anything wider — base64, a signed value — a helper that pastes it
+// raw produces an address that opens a UI which refuses it. The guard reads the
+// query back with the same escaping, so the two stay each other's inverse.
 func URL(port int, token string) string {
-	if token == "" {
-		return fmt.Sprintf("http://127.0.0.1:%d/", port)
+	u := url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		Path:   "/",
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d/?t=%s", port, token)
+	if token != "" {
+		u.RawQuery = url.Values{"t": {token}}.Encode()
+	}
+	return u.String()
 }
 
 // newToken mints a session token.

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -122,6 +123,36 @@ func TestStartIsGuardedByItsToken(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("a wrong token answered %d, want 403", resp.StatusCode)
 	}
+}
+
+// URL and the guard have to be each other's inverse: whatever the token is, the
+// address handed to a webview must arrive at the server as that same token.
+// Today's is hex and would survive either way — this is about the day it isn't.
+func TestURLCarriesAnyTokenIntact(t *testing.T) {
+	for _, token := range []string{
+		"0f1e2d3c4b5a69788796a5b4c3d2e1f0", // what newToken mints today
+		"a+b/c=d&e f?g#h%i",                // and what a wider alphabet would look like
+	} {
+		u, err := url.Parse(URL(4747, token))
+		if err != nil {
+			t.Fatalf("URL(%q) is not a URL: %v", token, err)
+		}
+		if got := u.Query().Get("t"); got != token {
+			t.Errorf("token %q arrives as %q — that URL opens a UI which refuses it", token, got)
+		}
+	}
+	if q := mustParse(t, URL(4747, "")).RawQuery; q != "" {
+		t.Errorf("no token should mean no query, got %q", q)
+	}
+}
+
+func mustParse(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }
 
 // Two at once is the case that matters: a desktop app started this way runs on a
@@ -243,7 +274,14 @@ func TestServeWritesTheDaemonsFilesAndStopsOnASignal(t *testing.T) {
 		t.Error("the token on disk is not the one being served")
 	}
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+	// Signalled through os.Process rather than syscall.Kill, which does not exist
+	// on Windows — this package builds there, and a test file that does not is a
+	// build failure for the whole package rather than a skipped test.
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := self.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
 	select {

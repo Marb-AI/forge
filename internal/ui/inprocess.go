@@ -57,8 +57,14 @@ type Instance struct {
 	stopErr  error
 }
 
-// Start serves the UI in this process and returns once it is bound and
-// answering. This is what a desktop shell calls, in place of spawning `forge ui`.
+// Start serves the UI in this process. This is what a desktop shell calls, in
+// place of spawning `forge ui`.
+//
+// The port is bound before it returns — the accept loop is what runs in the
+// background, not the bind — so a caller may open the URL on the next line: a
+// connection made before the loop gets there waits in the kernel's backlog
+// rather than being refused. A failure to take the port, or a wiring the server
+// would refuse to start on, is this call's error and not a surprise later.
 //
 // dir is where this device's state lives; the core is pointed at it, exactly as
 // `forge` points itself at ~/.forge. Empty means the caller has already said —
