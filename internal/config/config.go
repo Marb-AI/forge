@@ -26,30 +26,12 @@ type Host struct {
 	Port  int    `json:"port"`
 }
 
-// Prompt is one saved piece of text you send Claude over and over — a title to
-// recognise it by in the list, and the content that actually gets typed into the
-// session.
-//
-// It lives in the client's config, not on a host and not per workspace, because
-// that is what it is: how one PERSON works. The same "review this branch the way
-// I like it" belongs in every workspace on every server you own, and a prompt
-// tied to a codebase would have to be written out again for the next one.
-type Prompt struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	Text  string `json:"text"`
-}
-
 // Config is the whole client state. Forwards maps host alias -> workspace name
 // -> the list of local ports to keep tunnelled, as discovered by
 // `forge forwarding start`.
 type Config struct {
 	Hosts map[string]*Host            `json:"hosts"`
 	Ports map[string]map[string][]int `json:"forwards"`
-	// Prompts are the saved texts the UI's prompts panel offers, in the order they
-	// are shown. A slice, not a map: the order is the user's, and a map would
-	// reshuffle the list on every save.
-	Prompts []Prompt `json:"prompts,omitempty"`
 	// Workspaces maps a workspace name to the host alias it lives on — and it is
 	// the record of which workspaces are OURS.
 	//
@@ -287,11 +269,11 @@ func Load() (*Config, error) {
 // lock belongs to the cycle, which is what Update is.
 //
 // This covers one process, which is the one that matters: the UI daemon runs
-// every mutation the browser can reach — a prompt saved in one tab, the UI port
-// in another, a workspace being created in a third. A `forge` command in a
-// terminal is a SEPARATE process and this does not serialise against it; that
-// would need a lock in the filesystem, and the cost of losing that race is a
-// re-typed setting, not a broken file (Save is write-temp-then-rename).
+// every mutation the browser can reach — the UI port set in one tab, a workspace
+// being created in another. A `forge` command in a terminal is a SEPARATE process
+// and this does not serialise against it; that would need a lock in the
+// filesystem, and the cost of losing that race is a re-typed setting, not a
+// broken file (Save is write-temp-then-rename).
 var updateMu sync.Mutex
 
 // Update applies a change to the config as one atomic step: it loads the current

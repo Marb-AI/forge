@@ -101,61 +101,32 @@ func TestOldConfigWithoutUIPortLoads(t *testing.T) {
 	}
 }
 
-// Saved prompts are the one thing in here the user typed by hand, so losing them
-// to a round trip is losing work — and their ORDER is theirs too, which is why
-// they are a slice and not a map.
-func TestPromptsRoundTrip(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	c, _ := Load()
-	if len(c.Prompts) != 0 {
-		t.Fatalf("a fresh config should hold no prompts, got %+v", c.Prompts)
-	}
-	c.Prompts = []Prompt{
-		{ID: "a1", Title: "review the diff", Text: "Review the diff and tell me\nwhat you'd change."},
-		{ID: "b2", Title: "run the tests", Text: "Run the tests and fix what breaks."},
-	}
-	if err := c.Save(); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Prompts) != 2 {
-		t.Fatalf("prompts not persisted: %+v", got.Prompts)
-	}
-	if got.Prompts[0].ID != "a1" || got.Prompts[1].ID != "b2" {
-		t.Errorf("prompt order not preserved: %+v", got.Prompts)
-	}
-	// A prompt is usually several lines; a round trip that flattened one would
-	// change what gets typed into the session.
-	if got.Prompts[0].Text != "Review the diff and tell me\nwhat you'd change." {
-		t.Errorf("prompt text not preserved verbatim: %q", got.Prompts[0].Text)
-	}
-}
-
-// A config written by a forge that had no prompts must still load — and come
-// back with an empty library, not an error.
-func TestOldConfigWithoutPromptsLoads(t *testing.T) {
+// A config file can outlive the field it was written for: the prompts panel was
+// dropped and `prompts` went with it, so every config saved while it existed now
+// carries a key nothing here knows. It must load anyway — a key we no longer
+// understand is not a broken config, and refusing it would lock someone out of
+// their hosts over a feature they never used.
+func TestConfigWithARetiredFieldStillLoads(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".forge")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	old := `{"hosts":{},"forwards":{},"workspaces":{},"ui_port":8099}`
+	old := `{"hosts":{"srv":{"alias":"srv","user":"root","addr":"10.0.0.1","port":22}},` +
+		`"forwards":{},"workspaces":{"api":"srv"},"ui_port":8099,` +
+		`"prompts":[{"id":"a1","title":"review the diff","text":"Review the diff."}]}`
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load()
 	if err != nil {
-		t.Fatalf("an older config must still load: %v", err)
+		t.Fatalf("a config carrying a retired field must still load: %v", err)
 	}
-	if len(c.Prompts) != 0 {
-		t.Errorf("expected no prompts, got %+v", c.Prompts)
+	// And everything beside it survives the trip, which is the actual worry: an
+	// unknown key must be ignored, not swallow the fields around it.
+	if c.Hosts["srv"] == nil || c.Workspaces["api"] != "srv" || c.UIPort != 8099 {
+		t.Errorf("the rest of the config did not survive: %+v", c)
 	}
 }
 
@@ -163,15 +134,15 @@ func TestOldConfigWithoutPromptsLoads(t *testing.T) {
 // the save that loses data. Two of them interleaved each read the same file, and
 // the second save writes back a copy that never saw the first one's change.
 //
-// The UI daemon runs all of them: a prompt saved in one tab while another sets
-// the UI port, while a third finishes creating a workspace. Update is what makes
-// each of those one atomic step.
+// The UI daemon runs all of them: a workspace being created in one tab while
+// another registers a server, while a third sets the UI port. Update is what
+// makes each of those one atomic step.
 func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	// Deliberately different FIELDS, which is the case a per-feature lock misses:
-	// serialising prompt writes against each other does nothing about a prompt
-	// write racing the UI port.
+	// serialising workspace writes against each other does nothing about one of
+	// them racing a host being registered.
 	const writers = 8
 	var wg sync.WaitGroup
 	wg.Add(2 * writers)
@@ -179,10 +150,10 @@ func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			if err := Update(func(c *Config) error {
-				c.Prompts = append(c.Prompts, Prompt{ID: strconv.Itoa(i), Title: "t", Text: "x"})
+				c.Workspaces["w"+strconv.Itoa(i)] = "h"
 				return nil
 			}); err != nil {
-				t.Errorf("update prompts: %v", err)
+				t.Errorf("update workspaces: %v", err)
 			}
 		}(i)
 		go func(i int) {
@@ -201,8 +172,8 @@ func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Prompts) != writers {
-		t.Errorf("%d prompts survived %d concurrent writes, want %d", len(got.Prompts), writers, writers)
+	if len(got.Workspaces) != writers {
+		t.Errorf("%d workspaces survived %d concurrent writes, want %d", len(got.Workspaces), writers, writers)
 	}
 	if len(got.Hosts) != writers {
 		t.Errorf("%d hosts survived %d concurrent writes, want %d", len(got.Hosts), writers, writers)
