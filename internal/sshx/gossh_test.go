@@ -218,6 +218,25 @@ func (s *testServer) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 	}
 }
 
+// next is the server's next event, or a failure saying which one never came.
+//
+// Waiting on the channel bare is what a request the server does not answer looks
+// like from here, and it looks like nothing at all: the test hangs until the whole
+// package times out, ten minutes later, and the report is a goroutine dump rather
+// than a sentence. A request that goes unanswered is exactly the bug these tests
+// exist to catch, so it has to arrive as one.
+func (s *testServer) next(t *testing.T, want string) string {
+	t.Helper()
+	select {
+	case ev := <-s.events:
+		return ev
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the server was never asked for %s — the request did not arrive, or it "+
+			"arrived while the session was too busy to read it", want)
+		return ""
+	}
+}
+
 // target is the Target that reaches this server.
 func (s *testServer) target(user string) Target {
 	host, port, _ := net.SplitHostPort(s.addr.String())
@@ -295,7 +314,7 @@ func TestTheGoClientRunsACommandAndBringsBackWhatItPrinted(t *testing.T) {
 	}
 	// One string for the login shell to parse, exactly as `ssh host tmux ls`
 	// would have sent it.
-	if got := <-srv.events; got != "exec tmux ls" {
+	if got := srv.next(t, "the command"); got != "exec tmux ls" {
 		t.Errorf("the server was asked for %q, want %q", got, "exec tmux ls")
 	}
 }
@@ -422,12 +441,12 @@ func TestTheGoClientOpensATerminalOnTheServer(t *testing.T) {
 	// The pty comes first, at the size the caller asked for and with this
 	// process's own terminal type — the same two things the exec'd ssh sends from
 	// the pty it was given.
-	if got := <-srv.events; got != "pty xterm-256color 100x30" {
+	if got := srv.next(t, "a pty"); got != "pty xterm-256color 100x30" {
 		t.Errorf("first request = %q, want the pty at the size asked for", got)
 	}
 	// And then a login shell, because no command was named: what `ssh host` alone
 	// gives you.
-	if got := <-srv.events; got != "shell" {
+	if got := srv.next(t, "a login shell"); got != "shell" {
 		t.Errorf("second request = %q, want a login shell", got)
 	}
 
@@ -457,10 +476,10 @@ func TestATerminalRunsItsCommandOnThePtyItAskedFor(t *testing.T) {
 	}
 	defer term.Close()
 
-	if got := <-srv.events; got != "pty xterm-256color 80x24" {
+	if got := srv.next(t, "a pty"); got != "pty xterm-256color 80x24" {
 		t.Errorf("first request = %q, want a pty at 80x24", got)
 	}
-	if got := <-srv.events; got != "exec tmux attach" {
+	if got := srv.next(t, "the attach"); got != "exec tmux attach" {
 		t.Errorf("second request = %q, want the attach as one command line", got)
 	}
 }
@@ -479,13 +498,13 @@ func TestResizingATerminalTellsTheServerTheWindowChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer term.Close()
-	<-srv.events // the pty
-	<-srv.events // the shell
+	srv.next(t, "a pty")
+	srv.next(t, "a login shell")
 
 	if err := term.Resize(120, 40); err != nil {
 		t.Fatal(err)
 	}
-	if got := <-srv.events; got != "window-change 120x40" {
+	if got := srv.next(t, "a window change"); got != "window-change 120x40" {
 		t.Errorf("after Resize the server saw %q, want the new size", got)
 	}
 }
@@ -506,18 +525,18 @@ func TestATerminalForwardsTheAgentOnlyWhenAskedTo(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer asked.Close()
-	if got := <-srv.events; got != "agent-forward" {
+	if got := srv.next(t, "the agent"); got != "agent-forward" {
 		t.Errorf("first request = %q, want the agent offered before the session starts", got)
 	}
-	<-srv.events // the pty
-	<-srv.events // the shell
+	srv.next(t, "a pty")
+	srv.next(t, "a login shell")
 
 	plain, err := srv.target("admin").Open(Shell{Cols: 80, Rows: 24})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer plain.Close()
-	if got := <-srv.events; strings.HasPrefix(got, "agent-forward") {
+	if got := srv.next(t, "a pty"); strings.HasPrefix(got, "agent-forward") {
 		t.Error("a terminal that did not ask for the agent forwarded it anyway")
 	}
 }
