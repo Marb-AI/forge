@@ -1,16 +1,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"text/tabwriter"
 
-	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/forge"
-	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/clip"
-	"github.com/Marb-AI/forge/internal/sshx"
 )
 
 func workspaceCmd(args []string) int {
@@ -85,64 +84,34 @@ func workspaceList() int {
 
 // workspaceAction handles `forge workspace <name> <ssh|claude|expose>`.
 func workspaceAction(name, action string, rest []string) int {
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
-	host := cfg.HostFor(name)
-	if host == nil {
-		return fail("unknown workspace %q — not created by this client", name)
-	}
-	target := sshx.WorkspaceTarget(host, name)
-
 	switch action {
 	case "ssh":
-		args := target.TTYArgs()
-		// Forward the local SSH agent by default, so git operations in the
-		// workspace use your keys with no credential stored on the server.
-		// Opt out with --no-agent.
-		if !hasBoolFlag(rest, "--no-agent") {
-			args = append([]string{"-A"}, args...)
-		}
-		return runInteractive(args)
+		// The local SSH agent is forwarded by default, so git operations in the
+		// workspace use your keys with no credential stored on the server. Opt out
+		// with --no-agent.
+		agent := !hasBoolFlag(rest, "--no-agent")
+		return interactive(func(out io.Writer) error { return forge.Shell(name, agent, out) })
 	case "claude":
-		return workspaceClaude(name, target, rest)
+		return workspaceClaude(name, rest)
 	case "expose":
-		return workspaceExpose(target, rest)
+		return workspaceExpose(name, rest)
 	default:
 		return fail("unknown action %q (want ssh|claude|expose)", action)
 	}
 }
 
-// workspaceClaude launches plain `claude` in tmux. tmux gives the persistence:
-// detach (Ctrl-b d) keeps the session to reattach later; /exit or Ctrl-C ends
-// Claude, the command finishes, the tmux session is gone, and the next launch is
-// a clean new session — a killed session stays killed, never offered for resume.
-//
-// Remote Control is intentionally NOT auto-started here (its resume-the-last-
-// session behaviour breaks that guarantee). To surface a session in the Claude
-// app, run `/remote-control` inside it — it's named after the workspace via
-// CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX in the env.
-func workspaceClaude(name string, target sshx.Target, rest []string) int {
-	session := agentproto.TmuxSession
+func workspaceClaude(name string, rest []string) int {
 	sub := ""
 	if len(rest) > 0 {
 		sub = rest[0]
 	}
 	switch sub {
 	case "", "attach":
-		// attach-or-create in one command; survives disconnect via tmux.
-		return runInteractive(target.TTYArgs(agentproto.AttachClaude))
+		return interactive(func(out io.Writer) error { return forge.AttachClaude(name, false, out) })
 	case "renew":
-		// kill the existing session (reset context) then start fresh and attach.
-		remote := agentproto.KillClaude + "; " + agentproto.AttachClaude
-		return runInteractive(target.TTYArgs(remote))
+		return interactive(func(out io.Writer) error { return forge.AttachClaude(name, true, out) })
 	case "stop":
-		// Not forge.StopSession: that one also clears the session's clocks and
-		// succeeds when there is nothing to kill, where this reports it. Reconciling
-		// the two means deciding which of those a stop should be, so it is left as
-		// it has always been rather than changed in passing.
-		if err := runCapture(target.Args("tmux", "kill-session", "-t", session)); err != nil {
+		if err := forge.KillClaude(name); err != nil {
 			return fail("stop: %v (session may not be running)", err)
 		}
 		fmt.Println("claude session stopped")
@@ -165,7 +134,7 @@ func workspaceCheckpoint(name string) int {
 	return 0
 }
 
-func workspaceExpose(target sshx.Target, rest []string) int {
+func workspaceExpose(name string, rest []string) int {
 	if len(rest) < 1 {
 		return fail("usage: forge workspace <name> expose <port>")
 	}
@@ -174,33 +143,36 @@ func workspaceExpose(target sshx.Target, rest []string) int {
 		return fail("invalid port %q", rest[0])
 	}
 	fmt.Printf("exposing localhost:%d  (Ctrl-C to stop)\n", port)
-	// Foreground, blocks until Ctrl-C. For always-on tunnels use forwarding.
-	return runInteractive(target.LocalForwardArgs(port, port))
+	return interactive(func(out io.Writer) error { return forge.ExposePort(name, port, out) })
 }
 
-// runInteractive runs an interactive ssh session with its output passing through
-// the clipboard filter, so text copied inside the session (Claude's "press c" on
-// the login URL, a tmux yank) reaches the clipboard on *this* machine whatever
-// terminal it is being run in — Terminal.app has never supported OSC 52, and Warp
-// now denies it by default. See internal/clip.
-func runInteractive(args []string) int {
+// interactive runs one of the core's terminal sessions with its output passing
+// through the clipboard filter, so text copied inside the session (Claude's
+// "press c" on the login URL, a tmux yank) reaches the clipboard on *this*
+// machine whatever terminal it is being run in — Terminal.app has never
+// supported OSC 52, and Warp now denies it by default. See internal/clip.
+//
+// The filter is the CLI's own business: it exists because of the terminal this
+// front end is attached to, and a front end without one has nothing to do with
+// it. Which is why the core takes a writer and asks no questions about it.
+func interactive(run func(io.Writer) error) int {
 	f := clip.NewFilter(os.Stdout)
-	err := sshx.RunInteractiveTo(f, args...)
+	err := run(f)
 	// Emit anything held back mid-escape when the session ended. A session that
-	// ended badly has already said so — but if ssh was happy and the flush is not,
-	// then the last thing the session drew never reached the screen, and only this
+	// ended badly has already said so — but if the session was happy and the flush
+	// is not, then the last thing it drew never reached the screen, and only this
 	// return value is left to say so.
 	if ferr := f.Flush(); ferr != nil && err == nil {
 		return fail("terminal output: %v", ferr)
 	}
-	if err != nil {
-		// Interactive exit codes (e.g. Ctrl-C) are normal; don't shout.
+	var exit *forge.ExitError
+	if errors.As(err, &exit) {
+		// The session ran and ended non-zero — a Ctrl-C, a remote exit. Normal, and
+		// whatever happened was on screen; don't shout over it.
 		return 1
 	}
+	if err != nil {
+		return fail("%v", err)
+	}
 	return 0
-}
-
-func runCapture(args []string) error {
-	_, err := sshx.Capture(args...)
-	return err
 }

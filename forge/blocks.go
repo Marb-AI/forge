@@ -40,16 +40,67 @@ type Assignment struct {
 	Block     PortBlock
 }
 
-// HeldBlocks reports which block each of this client's workspaces holds, plus
-// the aliases of the hosts that could not be asked — whose blocks are therefore
+// BlockMap is the whole picture of port allocation on this client: the span
+// blocks are cut from, who holds which one, which are held for a workspace being
+// created, and which hosts could not be asked — whose blocks are therefore
 // unknown, which is not the same as absent.
-func HeldBlocks() ([]Holder, []string, error) {
+type BlockMap struct {
+	Range config.PortRange
+	// Held is sorted by block, with the workspaces that have none last: the
+	// blockless are what `forge ports assign` exists to fix, and a list sorted by a
+	// value half of it lacks has to put them somewhere on purpose.
+	Held []Holder
+	// Reserved holds blocks for workspaces that do not exist yet. Worth reporting
+	// because a reservation outlives a creation that died, by half an hour — and an
+	// invisible thing holding a block is the kind of state you end up reading the
+	// source to explain.
+	Reserved    []config.PortReservation
+	Unreachable []string
+}
+
+// PortBlocks reports which block each of this client's workspaces holds, what is
+// reserved, and which hosts could not be reached.
+func PortBlocks() (BlockMap, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, nil, err
+		return BlockMap{}, err
 	}
 	held, unreachable := heldBlocks(cfg)
-	return held, unreachable, nil
+	sortHolders(held)
+	return BlockMap{
+		Range:       cfg.PortRangeOr(),
+		Held:        held,
+		Reserved:    cfg.ActiveReservations(time.Now()),
+		Unreachable: unreachable,
+	}, nil
+}
+
+// PortRange returns the span blocks are currently cut from, without asking any
+// host anything — the cheap half of PortBlocks, for when the span is all that was
+// asked about.
+func PortRange() (config.PortRange, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return config.PortRange{}, err
+	}
+	return cfg.PortRangeOr(), nil
+}
+
+// sortHolders orders workspaces by the block they hold, and puts the ones with no
+// block at the end — where they read as a list of what still needs one, under a
+// table whose third column they are the only ones missing.
+//
+// The comparator this replaced said the same thing in its comment and did the
+// opposite: `held[j].Block != nil` sorts the blockless FIRST, so `forge ports`
+// opened with the workspaces that have no ports and buried the ones that do.
+// It moved here verbatim, comment and all, and only then had to be read.
+func sortHolders(held []Holder) {
+	sort.Slice(held, func(i, j int) bool {
+		if held[i].Block == nil || held[j].Block == nil {
+			return held[i].Block != nil
+		}
+		return held[i].Block.Start < held[j].Block.Start
+	})
 }
 
 // AssignBlocks gives a block to every workspace that has none — the backfill for
@@ -105,38 +156,56 @@ func AssignBlocks(only string) ([]Assignment, error) {
 	return done, nil
 }
 
-// SetPortRange records the span Forge allocates blocks from.
+// SetPortRange records the span Forge allocates blocks from, and returns what
+// the span ended up being. A start, end or block size of 0 means "leave that one
+// alone", so a caller can move the span without restating the block size, or the
+// block size without restating the span.
 //
 // It does not move any block that already exists — blocks are immutable, which is
 // the property everything else here relies on. A new range only decides where the
 // NEXT block comes from, so widening one is safe, and narrowing one below an
 // existing block is refused rather than silently leaving that workspace
 // publishing ports this client no longer considers its own.
-func SetPortRange(next config.PortRange) error {
-	if len(next.Blocks()) == 0 {
-		return fmt.Errorf("range %d-%d holds no block of %d ports", next.Start, next.End, next.Block)
-	}
+func SetPortRange(start, end, block int) (config.PortRange, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return config.PortRange{}, err
+	}
+	next := cfg.PortRangeOr()
+	// Each bound on its own. Moving them together looks harmless — the CLI parses a
+	// span and always has both — but "0 means leave it alone" has to hold for one
+	// bound as well as three, or a caller that raises only the ceiling silently
+	// takes the floor to zero with it.
+	if start > 0 {
+		next.Start = start
+	}
+	if end > 0 {
+		next.End = end
+	}
+	if block > 0 {
+		next.Block = block
+	}
+	if len(next.Blocks()) == 0 {
+		return next, fmt.Errorf("range %d-%d holds no block of %d ports", next.Start, next.End, next.Block)
 	}
 	held, unreachable := heldBlocks(cfg)
 	if len(unreachable) > 0 {
-		return fmt.Errorf("cannot check existing blocks: %s unreachable", strings.Join(unreachable, ", "))
+		return next, fmt.Errorf("cannot check existing blocks: %s unreachable", strings.Join(unreachable, ", "))
 	}
 	for _, h := range held {
 		if h.Block == nil {
 			continue
 		}
 		if h.Block.Start < next.Start || h.Block.End() > next.End {
-			return fmt.Errorf("workspace %q holds %d-%d, which is outside %d-%d — blocks never move, so widen the range instead",
+			return next, fmt.Errorf("workspace %q holds %d-%d, which is outside %d-%d — blocks never move, so widen the range instead",
 				h.Workspace, h.Block.Start, h.Block.End(), next.Start, next.End)
 		}
 	}
-	return config.Update(func(c *config.Config) error {
+	err = config.Update(func(c *config.Config) error {
 		c.PortRange = next
 		return nil
 	})
+	return next, err
 }
 
 // heldBlocks asks every host which blocks its workspaces hold, and returns them

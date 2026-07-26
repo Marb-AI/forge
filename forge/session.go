@@ -63,6 +63,11 @@ func Checkpoint(name string, out io.Writer) error {
 }
 
 // workspaceTarget resolves a workspace name to the SSH target that logs into it.
+//
+// "Not created by this client" is the whole of why a name can be unknown while
+// the workspace plainly exists on the server: Forge acts only on what its own
+// config records. Same wording as DeleteWorkspace's, because it is the same
+// refusal.
 func workspaceTarget(name string) (sshx.Target, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -70,7 +75,7 @@ func workspaceTarget(name string) (sshx.Target, error) {
 	}
 	host := cfg.HostFor(name)
 	if host == nil {
-		return sshx.Target{}, fmt.Errorf("unknown workspace %q", name)
+		return sshx.Target{}, fmt.Errorf("unknown workspace %q — not created by this client", name)
 	}
 	return sshx.WorkspaceTarget(host, name), nil
 }

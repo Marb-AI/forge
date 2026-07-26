@@ -210,12 +210,55 @@ type wsListCall struct {
 	err  error
 }
 
-// PIDPath returns the ui daemon's pidfile location (sibling to the supervisor's).
-func PIDPath(dir string) string { return filepath.Join(dir, "ui.pid") }
+// Run is the body of the detached `forge ui` daemon: it resolves where the
+// config lives and which port to bind, wires every operation to the core, and
+// serves until the process is signalled.
+//
+// It lives here rather than in whichever command spawned the daemon, because the
+// wiring below is this front end's own statement of what it needs from Forge.
+func Run() error {
+	dir, err := config.Dir()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	return Serve(dir, cfg.UIPortOr(), CoreDeps())
+}
 
-// TokenPath returns the session token's location. The daemon writes it; `forge ui`
-// reads it back to build the URL it opens.
-func TokenPath(dir string) string { return filepath.Join(dir, "ui.token") }
+// CoreDeps wires the UI to the real Forge core: one line per operation, none of
+// them implemented here. It is the seam the whole package exists on the far side
+// of — tests build a Deps of fakes instead, and the handlers cannot tell.
+func CoreDeps() Deps {
+	return Deps{
+		ListWorkspaces:    forge.ListWorkspaces,
+		WorkspaceActivity: forge.WorkspaceActivity,
+		WorkspaceTrack:    forge.WorkspaceTrack,
+		WorkspaceUsage:    forge.WorkspaceUsage,
+		TrackInc:          forge.TrackInc,
+		HostStats:         forge.HostStats,
+		HostFor:           forge.HostFor,
+		Checkpoint:        forge.Checkpoint,
+		StopSession:       forge.StopSession,
+		RestartSession:    forge.RestartSession,
+		ListHosts:         forge.ListHosts,
+		// The block the workspace was given is dropped here: the browser wizard has
+		// nowhere to say it yet. Nothing is lost — it is on the workspace, and
+		// `forge ports` reports it.
+		CreateWorkspace: func(name, host string) error {
+			_, err := forge.CreateWorkspace(name, host)
+			return err
+		},
+		PrepareHost:     forge.PrepareHost,
+		DeleteWorkspace: forge.DeleteWorkspace,
+		RemoveHost:      forge.RemoveHost,
+		SetUIPort:       forge.SetUIPort,
+		Ports:           forge.Ports,
+		ContainerAction: forge.ContainerAction,
+	}
+}
 
 // newToken mints a session token.
 func newToken() (string, error) {
@@ -260,7 +303,7 @@ func Serve(dir string, port int, deps Deps) error {
 		_ = ln.Close()
 		return err
 	}
-	if err := os.WriteFile(TokenPath(dir), []byte(token), 0o600); err != nil {
+	if err := os.WriteFile(forge.UITokenPath(dir), []byte(token), 0o600); err != nil {
 		_ = ln.Close()
 		return err
 	}
@@ -273,11 +316,11 @@ func Serve(dir string, port int, deps Deps) error {
 		now:       time.Now,
 	}
 
-	if err := os.WriteFile(PIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	if err := os.WriteFile(forge.UIPIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		_ = ln.Close()
 		return err
 	}
-	defer os.Remove(PIDPath(dir))
+	defer os.Remove(forge.UIPIDPath(dir))
 
 	srv := &http.Server{
 		Handler: s.handler(),
