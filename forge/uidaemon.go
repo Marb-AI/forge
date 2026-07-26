@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/proc"
 )
 
@@ -32,15 +31,15 @@ type UIDaemon struct {
 
 // UIStatus reports whether the browser UI is running, and how to reach it.
 func UIStatus() (UIDaemon, error) {
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return UIDaemon{}, err
 	}
-	cfg, err := config.Load()
+	port, err := UIPort()
 	if err != nil {
 		return UIDaemon{}, err
 	}
-	d := UIDaemon{Port: cfg.UIPortOr()}
+	d := UIDaemon{Port: port}
 	pid, ok := daemonPID(UIPIDPath(dir))
 	if !ok {
 		return d, nil
@@ -56,7 +55,7 @@ func UIStatus() (UIDaemon, error) {
 // bind. That is what turns "the port is already in use" into an error here
 // rather than into a browser opening on a dead address.
 func StartUI() (d UIDaemon, already bool, err error) {
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return UIDaemon{}, false, err
 	}
@@ -86,7 +85,7 @@ func StartUI() (d UIDaemon, already bool, err error) {
 // and a replacement that starts while the old one still holds the port fails to
 // bind.
 func StopUI() (bool, error) {
-	dir, err := config.Dir()
+	dir, err := StateDir()
 	if err != nil {
 		return false, err
 	}

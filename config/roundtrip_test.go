@@ -10,8 +10,7 @@ import (
 )
 
 func TestLoadMissingReturnsEmpty(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	c, err := Load()
+	c, err := NewFileStore(t.TempDir()).Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,23 +20,23 @@ func TestLoadMissingReturnsEmpty(t *testing.T) {
 }
 
 func TestSaveLoadRoundTrip(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	s := NewFileStore(dir)
 
-	c, _ := Load()
+	c, _ := s.Load()
 	c.Hosts["myserver"] = &Host{Alias: "myserver", User: "root", Addr: "1.2.3.4", Port: 22}
 	c.AddWorkspace("crm", "myserver")
 	c.Ports["myserver"] = map[string][]int{"crm": {3000, 5173}}
-	if err := c.Save(); err != nil {
+	if err := s.save(c); err != nil {
 		t.Fatal(err)
 	}
 
-	// File exists under ~/.forge.
-	if _, err := os.Stat(filepath.Join(home, ".forge", "config.json")); err != nil {
+	// In the store's own directory, and nowhere else.
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); err != nil {
 		t.Fatalf("config file not written: %v", err)
 	}
 
-	got, err := Load()
+	got, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,11 +52,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 }
 
 func TestUIPortRoundTripAndDefault(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	s := NewFileStore(t.TempDir())
 
 	// Unset means "use the default" — never port 0.
-	c, _ := Load()
+	c, _ := s.Load()
 	if c.UIPort != 0 {
 		t.Errorf("fresh config should have no explicit UI port, got %d", c.UIPort)
 	}
@@ -66,10 +64,10 @@ func TestUIPortRoundTripAndDefault(t *testing.T) {
 	}
 
 	c.UIPort = 8099
-	if err := c.Save(); err != nil {
+	if err := s.save(c); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load()
+	got, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,18 +79,13 @@ func TestUIPortRoundTripAndDefault(t *testing.T) {
 // A config written by an older forge (no ui_port key) must still load, and fall
 // back to the default rather than to port 0.
 func TestOldConfigWithoutUIPortLoads(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".forge")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := t.TempDir()
 	old := `{"hosts":{},"forwards":{},"workspaces":{}}`
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	c, err := Load()
+	c, err := NewFileStore(dir).Load()
 	if err != nil {
 		t.Fatalf("an older config must still load: %v", err)
 	}
@@ -107,19 +100,14 @@ func TestOldConfigWithoutUIPortLoads(t *testing.T) {
 // understand is not a broken config, and refusing it would lock someone out of
 // their hosts over a feature they never used.
 func TestConfigWithARetiredFieldStillLoads(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	dir := filepath.Join(home, ".forge")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	dir := t.TempDir()
 	old := `{"hosts":{"srv":{"alias":"srv","user":"root","addr":"10.0.0.1","port":22}},` +
 		`"forwards":{},"workspaces":{"api":"srv"},"ui_port":8099,` +
 		`"prompts":[{"id":"a1","title":"review the diff","text":"Review the diff."}]}`
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c, err := Load()
+	c, err := NewFileStore(dir).Load()
 	if err != nil {
 		t.Fatalf("a config carrying a retired field must still load: %v", err)
 	}
@@ -138,7 +126,7 @@ func TestConfigWithARetiredFieldStillLoads(t *testing.T) {
 // another registers a server, while a third sets the UI port. Update is what
 // makes each of those one atomic step.
 func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	s := NewFileStore(t.TempDir())
 
 	// Deliberately different FIELDS, which is the case a per-feature lock misses:
 	// serialising workspace writes against each other does nothing about one of
@@ -149,7 +137,7 @@ func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
 	for i := 0; i < writers; i++ {
 		go func(i int) {
 			defer wg.Done()
-			if err := Update(func(c *Config) error {
+			if err := s.Update(func(c *Config) error {
 				c.Workspaces["w"+strconv.Itoa(i)] = "h"
 				return nil
 			}); err != nil {
@@ -158,7 +146,7 @@ func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
 		}(i)
 		go func(i int) {
 			defer wg.Done()
-			if err := Update(func(c *Config) error {
+			if err := s.Update(func(c *Config) error {
 				c.Hosts["h"+strconv.Itoa(i)] = &Host{Alias: "h" + strconv.Itoa(i)}
 				return nil
 			}); err != nil {
@@ -168,7 +156,7 @@ func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
 	}
 	wg.Wait()
 
-	got, err := Load()
+	got, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,19 +171,19 @@ func TestConcurrentUpdatesDoNotLoseChanges(t *testing.T) {
 // A change that fails must leave the file alone: half-applying it would be worse
 // than not applying it at all.
 func TestUpdateDoesNotSaveWhenTheChangeFails(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	s := NewFileStore(t.TempDir())
 
-	if err := Update(func(c *Config) error { c.UIPort = 8099; return nil }); err != nil {
+	if err := s.Update(func(c *Config) error { c.UIPort = 8099; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	boom := errors.New("no")
-	if err := Update(func(c *Config) error {
+	if err := s.Update(func(c *Config) error {
 		c.UIPort = 1234 // must not survive
 		return boom
 	}); !errors.Is(err, boom) {
 		t.Fatalf("Update should return the change's error, got %v", err)
 	}
-	got, err := Load()
+	got, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

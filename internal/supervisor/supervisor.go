@@ -84,7 +84,12 @@ type Status struct {
 
 // Supervisor owns the running tunnel workers and the status file.
 type Supervisor struct {
-	dir   string
+	dir string
+	// store is where the client state lives. The supervisor re-reads it on every
+	// poll and writes the cache back, and it is handed the store rather than
+	// resolving one, for the same reason the core is: this daemon does not get to
+	// decide where the device keeps its config.
+	store config.Store
 	mu    sync.Mutex
 	state map[key]*TunnelStatus
 	// workers is the tunnel currently supervised for each key. Reconciliation adds
@@ -117,9 +122,18 @@ func PIDPath(dir string) string { return filepath.Join(dir, "forge.pid") }
 // The last observation is cached in the config, so a laptop that starts with a host
 // unreachable still puts up the tunnels it had last time rather than none at all.
 // `-L` is lazy, so a tunnel to something not currently listening costs nothing.
-func Run(dir string, cfg *config.Config, observe Observer) error {
+func Run(store config.Store, observe Observer) error {
+	dir, err := store.Dir()
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
 	s := &Supervisor{
 		dir:     dir,
+		store:   store,
 		state:   map[key]*TunnelStatus{},
 		workers: map[key]*worker{},
 	}
@@ -166,7 +180,7 @@ func (s *Supervisor) pollLoop(ctx context.Context, observe Observer) {
 	t := time.NewTicker(pollInterval)
 	defer t.Stop()
 	for {
-		cfg, err := config.Load()
+		cfg, err := s.store.Load()
 		if err == nil {
 			// Only the hosts that answered are in scope: a silent one's tunnels are
 			// left running rather than read as "publishes nothing".
@@ -255,7 +269,7 @@ func (s *Supervisor) cache(want map[key]bool, answered map[string]bool) {
 			sort.Ints(ports)
 		}
 	}
-	_ = config.Update(func(c *config.Config) error {
+	_ = s.store.Update(func(c *config.Config) error {
 		if c.Ports == nil {
 			c.Ports = map[string]map[string][]int{}
 		}

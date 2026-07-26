@@ -59,8 +59,7 @@ func TestPortRangeBlocks(t *testing.T) {
 }
 
 func TestPortRangeSurvivesSave(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	s := NewFileStore(t.TempDir())
 
 	c := &Config{
 		Hosts:      map[string]*Host{},
@@ -68,10 +67,10 @@ func TestPortRangeSurvivesSave(t *testing.T) {
 		Workspaces: map[string]string{},
 		PortRange:  PortRange{Start: 20000, End: 30000, Block: 50},
 	}
-	if err := c.Save(); err != nil {
+	if err := s.save(c); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load()
+	got, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,8 +138,7 @@ func TestPortReservations(t *testing.T) {
 }
 
 func TestPortReservationsSurviveSave(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	s := NewFileStore(t.TempDir())
 
 	c := &Config{
 		Hosts:      map[string]*Host{},
@@ -148,10 +146,10 @@ func TestPortReservationsSurviveSave(t *testing.T) {
 		Workspaces: map[string]string{},
 	}
 	c.ReservePortBlock("crm", "srv", 16000, time.Now())
-	if err := c.Save(); err != nil {
+	if err := s.save(c); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load()
+	got, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}

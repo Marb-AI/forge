@@ -51,7 +51,7 @@ type HostStat struct {
 // whole list up for the full connect timeout — with a fan-out, the slowest host
 // costs what the slowest host costs and no more.
 func HostStats() ([]HostStat, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}

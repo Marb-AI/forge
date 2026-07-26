@@ -61,7 +61,7 @@ type BlockMap struct {
 // PortBlocks reports which block each of this client's workspaces holds, what is
 // reserved, and which hosts could not be reached.
 func PortBlocks() (BlockMap, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return BlockMap{}, err
 	}
@@ -79,7 +79,7 @@ func PortBlocks() (BlockMap, error) {
 // host anything — the cheap half of PortBlocks, for when the span is all that was
 // asked about.
 func PortRange() (config.PortRange, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return config.PortRange{}, err
 	}
@@ -112,7 +112,7 @@ func sortHolders(held []Holder) {
 // trip to a server, and one that failed does not undo the ones before it — a
 // caller that dropped them on the floor would be hiding blocks that now exist.
 func AssignBlocks(only string) ([]Assignment, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func AssignBlocks(only string) ([]Assignment, error) {
 // existing block is refused rather than silently leaving that workspace
 // publishing ports this client no longer considers its own.
 func SetPortRange(start, end, block int) (config.PortRange, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return config.PortRange{}, err
 	}
@@ -201,7 +201,7 @@ func SetPortRange(start, end, block int) (config.PortRange, error) {
 				h.Workspace, h.Block.Start, h.Block.End(), next.Start, next.End)
 		}
 	}
-	err = config.Update(func(c *config.Config) error {
+	err = updateConfig(func(c *config.Config) error {
 		c.PortRange = next
 		return nil
 	})
@@ -313,7 +313,7 @@ func allocateBlock(cfg *config.Config, workspace, alias string) (*PortBlock, err
 
 	r := cfg.PortRangeOr()
 	var block *PortBlock
-	err := config.Update(func(c *config.Config) error {
+	err := updateConfig(func(c *config.Config) error {
 		taken := takenBlocks(held, c.ActiveReservations(time.Now()))
 		start, ok := nextFreeBlock(r, taken)
 		if !ok {
@@ -334,7 +334,7 @@ func allocateBlock(cfg *config.Config, workspace, alias string) (*PortBlock, err
 func releaseBlock(workspace string) {
 	// Best-effort: a reservation that outlives its purpose expires on its own, and
 	// failing a creation over a bookkeeping write would be worse than the leak.
-	_ = config.Update(func(c *config.Config) error {
+	_ = updateConfig(func(c *config.Config) error {
 		c.ReleasePortBlock(workspace)
 		return nil
 	})

@@ -29,7 +29,7 @@ type HostPorts struct {
 //
 // Forge does not allocate here; it reports. Allocation is what blocks are for.
 func HostPortUse(alias string) ([]HostPorts, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,6 @@
 package forge
 
-import (
-	"testing"
-
-	"github.com/Marb-AI/forge/config"
-)
+import "testing"
 
 // SetUIPort is what both `forge ui port` and the UI's settings panel go through,
 // so its range check is the only thing standing between a typo and a daemon that
@@ -13,7 +9,7 @@ import (
 // It writes a real config file, under the throwaway HOME this package's TestMain
 // installs — never the developer's.
 func TestSetUIPortRejectsOutOfRange(t *testing.T) {
-	before, err := config.Load()
+	before, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +22,7 @@ func TestSetUIPortRejectsOutOfRange(t *testing.T) {
 
 	// A refused port must not have been written, or the next start would try to
 	// bind it anyway.
-	after, err := config.Load()
+	after, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +36,7 @@ func TestSetUIPortPersists(t *testing.T) {
 		if err := SetUIPort(p); err != nil {
 			t.Fatalf("SetUIPort(%d): %v", p, err)
 		}
-		cfg, err := config.Load()
+		cfg, err := loadConfig()
 		if err != nil {
 			t.Fatal(err)
 		}

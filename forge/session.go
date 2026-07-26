@@ -7,7 +7,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
@@ -69,7 +68,7 @@ func Checkpoint(name string, out io.Writer) error {
 // config records. Same wording as DeleteWorkspace's, because it is the same
 // refusal.
 func workspaceTarget(name string) (sshx.Target, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return sshx.Target{}, err
 	}

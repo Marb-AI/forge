@@ -96,7 +96,7 @@ func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneIm
 	// 4) Register the host now that it is ready. Its own step: preparing a server
 	//    takes minutes, and a config loaded before all that would be stale enough
 	//    to undo anything else written in the meantime.
-	if err := config.Update(func(c *config.Config) error {
+	if err := updateConfig(func(c *config.Config) error {
 		c.Hosts[alias] = &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
 		return nil
 	}); err != nil {

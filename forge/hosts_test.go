@@ -29,7 +29,7 @@ func TestAddHostListAndRemove(t *testing.T) {
 	if _, err := AddHost("root@5.6.7.8", "srv-add-test"); err == nil {
 		t.Error("adding an alias twice should be refused")
 	}
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

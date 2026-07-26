@@ -22,7 +22,7 @@ func AddHost(target, alias string) (*config.Host, error) {
 	// The "already exists" check belongs inside the update, not before it: checked
 	// against a copy loaded earlier, two adds of the same alias would both pass it
 	// and the second would overwrite the first.
-	if err := config.Update(func(c *config.Config) error {
+	if err := updateConfig(func(c *config.Config) error {
 		if _, exists := c.Hosts[alias]; exists {
 			return fmt.Errorf("host %q already exists", alias)
 		}
@@ -38,7 +38,7 @@ func AddHost(target, alias string) (*config.Host, error) {
 // same question with only the names, which is all the browser's wizard needs;
 // this one is for showing where each of them actually is.
 func Hosts() ([]*config.Host, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func Hosts() ([]*config.Host, error) {
 // The login is interactive (a browser code, or a token on stdin), which is why
 // it cannot happen during prepare and why it takes a terminal.
 func GhLogin(alias string, out io.Writer) error {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func GhLogin(alias string, out io.Writer) error {
 // is this package's business. A front end asks whether the workspace exists (see
 // KnowsWorkspace) and then asks for an operation on it by name.
 func hostFor(name string) *config.Host {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil
 	}
@@ -112,7 +112,7 @@ func KnowsWorkspace(name string) bool { return hostFor(name) != nil }
 // ListHosts returns the registered host aliases, sorted — the servers a new
 // workspace can be put on.
 func ListHosts() ([]string, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func ListHosts() ([]string, error) {
 // keeps running, and so do its workspaces — Forge just stops knowing about them,
 // which is why this one is reversible, with `forge host add`.
 func RemoveHost(alias string) error {
-	return config.Update(func(c *config.Config) error {
+	return updateConfig(func(c *config.Config) error {
 		if _, ok := c.Hosts[alias]; !ok {
 			return fmt.Errorf("no such host %q", alias)
 		}

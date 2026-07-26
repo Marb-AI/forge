@@ -109,7 +109,7 @@ type Usage struct {
 // Claude session is running. That answer costs an SSH round trip, which is why the
 // name and host — the parts we already have — are never made to wait for it.
 func ListWorkspaces() ([]WorkspaceInfo, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func ListWorkspaces() ([]WorkspaceInfo, error) {
 // ListWorkspaces — the host's directory may hold workspaces that aren't ours). A
 // host we can't reach simply contributes nothing.
 func WorkspaceActivity() (map[string]Activity, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +188,7 @@ func WorkspaceActivity() (map[string]Activity, error) {
 // at it — and keeps only the ones this client owns. Same host fan-out and ownership
 // filter as WorkspaceActivity; an unreachable host contributes nothing.
 func WorkspaceTrack() (map[string]Track, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ func WorkspaceTrack() (map[string]Track, error) {
 // login that has not reported one, and flattening that to a zeroed struct would show
 // a full allowance where we have no reading at all.
 func WorkspaceUsage() (map[string]Usage, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +320,7 @@ func mergeWorkspaceStatus(mine map[string]string, sessions map[string]map[string
 // a new workspace the caller has to be told: it is what the ports in its repo will
 // have to be.
 func CreateWorkspace(name, alias string) (*PortBlock, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +362,7 @@ func CreateWorkspace(name, alias string) (*PortBlock, error) {
 	// (creating the user on the server is an SSH round trip), so saving that whole
 	// copy back would undo anything else written meanwhile — the UI port, a server
 	// just registered, another workspace created from a second tab.
-	if err := config.Update(func(c *config.Config) error {
+	if err := updateConfig(func(c *config.Config) error {
 		c.AddWorkspace(name, alias)
 		// The workspace now holds the block on its host, which is the real record;
 		// the reservation has done its job. Dropped in the same update that records
@@ -379,7 +379,7 @@ func CreateWorkspace(name, alias string) (*PortBlock, error) {
 // This is irreversible: the agent runs `userdel -r`, so the workspace's Linux
 // user and its entire home — every file in it — are gone.
 func DeleteWorkspace(name string) error {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
@@ -390,7 +390,7 @@ func DeleteWorkspace(name string) error {
 	if err := callAgent(host, nil, "workspace-delete", "--name", name); err != nil {
 		return err
 	}
-	return config.Update(func(c *config.Config) error {
+	return updateConfig(func(c *config.Config) error {
 		c.RemoveWorkspace(name)
 		return nil
 	})
@@ -400,7 +400,7 @@ func DeleteWorkspace(name string) error {
 // the agent on its host. The browser flushes accumulated activity here; a flush that
 // can't reach the host simply doesn't land and the next one carries the arrears.
 func TrackInc(name string, seconds int) error {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
