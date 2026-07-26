@@ -9,10 +9,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/creack/pty"
-
 	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
+	"github.com/Marb-AI/forge/internal/localpty"
 	"github.com/Marb-AI/forge/internal/sshx"
 )
 
@@ -21,8 +20,10 @@ import (
 // The sessions in shell.go hand *this* machine's terminal to something on a
 // server and block; these hand back an object instead — bytes in, bytes out, and
 // a size — so a browser (and, later, a desktop or phone window) can be the far
-// end. Everything about how that terminal is reached is here: the ssh argv, the
-// pty, the login shell. A front end names a kind and a workspace.
+// end. What is here is which account each kind reaches and what it runs there;
+// how a terminal is obtained is the transport's business (sshx), and the answer
+// differs per backend — a pty in front of ssh on this machine, or one asked of
+// the server. The exception is the local shell, which has no server in it.
 
 // The kinds of terminal Forge opens.
 const (
@@ -44,9 +45,10 @@ const (
 	TermLocal = "local"
 )
 
-// Terminal is one live terminal: a process on the far end of a pty. Read and
-// Write carry raw bytes in both directions, escape codes and all, so the caller
-// can hand them straight to a terminal emulator without interpreting anything.
+// Terminal is one live terminal: something running on the far end of a pty. Read
+// and Write carry raw bytes in both directions, escape codes and all, so the
+// caller can hand them straight to a terminal emulator without interpreting
+// anything.
 //
 // Close ends it, and what that means is the kind's business rather than the
 // caller's: for TermClaude the far end is tmux, so closing *detaches* and the
@@ -56,44 +58,41 @@ type Terminal interface {
 	io.Reader
 	io.Writer
 	// Resize tells the far end the window changed. It is what makes a resize in
-	// the browser real: the pty raises SIGWINCH on the child, and ssh forwards it
-	// to the remote end.
+	// the browser real: the program drawing into the terminal gets a SIGWINCH.
 	Resize(cols, rows uint16) error
 	io.Closer
 }
 
 // OpenTerminal opens a terminal of the given kind, sized to cols×rows so the
-// very first draw matches the window it is going to (a 0×0 or default pty makes
-// tmux and Claude render into the wrong rectangle — cursor adrift, mouse tracking
-// off). A zero dimension leaves the pty at its default.
+// very first draw matches the window it is going to: tmux and Claude both keep
+// the cursor and mouse tracking of that first paint, so a terminal that opened
+// into the wrong rectangle stays wrong until something redraws it. A caller with
+// no size gets the conventional 80×24 rather than the pty's own idea of a
+// default, which on Linux is 0×0.
 //
 // workspace names the workspace for the three remote kinds and must be empty for
 // TermLocal, which belongs to no workspace: there is one local machine, so there
 // is one local shell.
 func OpenTerminal(kind, workspace string, cols, rows uint16) (Terminal, error) {
-	cmd, err := termCmd(kind, workspace)
-	if err != nil {
-		return nil, err
-	}
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		return nil, err
-	}
-	t := &ptyTerm{ptmx: ptmx, cmd: cmd}
-	if cols > 0 && rows > 0 {
-		_ = t.Resize(cols, rows)
-	}
-	return t, nil
-}
-
-// termCmd is the process behind a terminal of the given kind: ssh for the three
-// remote ones, your own shell for the local one.
-func termCmd(kind, workspace string) (*exec.Cmd, error) {
 	if kind == TermLocal {
 		if workspace != "" {
 			return nil, fmt.Errorf("the local terminal belongs to no workspace (got %q)", workspace)
 		}
-		return localShell(), nil
+		// Filled in here because the local shell does not go through the transport,
+		// which does the same for the other three (sshx.Shell.size). It sits in the
+		// same rail as them and would otherwise be the one terminal that opens
+		// unusable.
+		if cols == 0 || rows == 0 {
+			cols, rows = sshx.DefaultCols, sshx.DefaultRows
+		}
+		// Unwrapped rather than returned as a pair: a *localpty.Term that is nil
+		// alongside an error would still be a non-nil Terminal to whoever ignored
+		// the error.
+		term, err := localpty.Start(localShell(), cols, rows)
+		if err != nil {
+			return nil, err
+		}
+		return term, nil
 	}
 	if workspace == "" {
 		return nil, fmt.Errorf("terminal kind %q needs a workspace", kind)
@@ -102,29 +101,30 @@ func termCmd(kind, workspace string) (*exec.Cmd, error) {
 	if h == nil {
 		return nil, fmt.Errorf("unknown workspace %q — not created by this client", workspace)
 	}
-	args, err := termArgs(h, workspace, kind)
+	target, shell, err := termShell(h, workspace, kind)
 	if err != nil {
 		return nil, err
 	}
-	return exec.Command("ssh", args...), nil
+	shell.Cols, shell.Rows = cols, rows
+	return target.Open(shell)
 }
 
-// termArgs is the ssh argv for a remote terminal kind. Kept apart from starting
-// it so what each kind connects as — and with what forwarded — can be read, and
-// tested, without a server.
-func termArgs(h *config.Host, workspace, kind string) ([]string, error) {
+// termShell is who a remote terminal kind logs in as and what it runs there.
+// Kept apart from opening it so the difference between the kinds — the whole
+// reason there are three — can be read, and tested, without a server.
+func termShell(h *config.Host, workspace, kind string) (sshx.Target, sshx.Shell, error) {
 	switch kind {
 	case TermClaude:
-		return sshx.WorkspaceTarget(h, workspace).TTYArgs(agentproto.AttachClaude), nil
+		return sshx.WorkspaceTarget(h, workspace), sshx.Shell{Remote: []string{agentproto.AttachClaude}}, nil
 	case TermSSH:
 		// Login shell with the local SSH agent forwarded — identical to
 		// `forge workspace <name> ssh`, so git in the shell uses your keys.
-		return append([]string{"-A"}, sshx.WorkspaceTarget(h, workspace).TTYArgs()...), nil
+		return sshx.WorkspaceTarget(h, workspace), sshx.Shell{ForwardAgent: true}, nil
 	case TermHost:
 		// No agent forwarding — host admin doesn't use your git keys.
-		return sshx.AdminTarget(h).TTYArgs(), nil
+		return sshx.AdminTarget(h), sshx.Shell{}, nil
 	default:
-		return nil, fmt.Errorf("unknown terminal kind %q", kind)
+		return sshx.Target{}, sshx.Shell{}, fmt.Errorf("unknown terminal kind %q", kind)
 	}
 }
 
@@ -164,33 +164,4 @@ func localShell() *exec.Cmd {
 	})
 	cmd.Env = append(env, "TERM=xterm-256color")
 	return cmd
-}
-
-// ptyTerm is a Terminal backed by a local pty. The pty is what makes the far end
-// believe it has a real terminal — and what carries a resize through ssh to the
-// remote tmux client.
-type ptyTerm struct {
-	ptmx *os.File
-	cmd  *exec.Cmd
-}
-
-func (t *ptyTerm) Read(p []byte) (int, error)  { return t.ptmx.Read(p) }
-func (t *ptyTerm) Write(p []byte) (int, error) { return t.ptmx.Write(p) }
-
-func (t *ptyTerm) Resize(cols, rows uint16) error {
-	return pty.Setsize(t.ptmx, &pty.Winsize{Rows: rows, Cols: cols})
-}
-
-// Close drops the pty and kills the process on the near end of it. For an ssh
-// terminal that ends the connection, which is what makes a Claude terminal a
-// detach — tmux keeps the session on the server.
-func (t *ptyTerm) Close() error {
-	if t.ptmx != nil {
-		_ = t.ptmx.Close()
-	}
-	if t.cmd != nil && t.cmd.Process != nil {
-		_ = t.cmd.Process.Kill()
-		_ = t.cmd.Wait()
-	}
-	return nil
 }
