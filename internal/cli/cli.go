@@ -1,11 +1,20 @@
-// Package cli is the laptop-side command surface. It is a small hand-written
-// dispatcher (no external CLI framework); see the README for the command tree.
+// Package cli is the laptop-side command surface: a small hand-written
+// dispatcher (no external CLI framework) over the operations in package forge.
+// See the README for the command tree.
+//
+// It is an adapter and nothing more. Every command here reads argv, calls one
+// operation on the core, and formats what comes back — no command talks to a
+// server, reads the config, or starts a process of its own. The browser UI is
+// the same shape over HTTP and JSON, and that symmetry is the point: whichever
+// front end you use, you get the same Forge, because there is only one.
 package cli
 
 import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/Marb-AI/forge/forge"
 )
 
 const usage = `forge — remote Claude Code workspace manager
@@ -70,10 +79,10 @@ func Main(args []string) int {
 		return spawnCmd(args[1:])
 	case "ui":
 		return uiCmd(args[1:])
-	case runSupervisorArg: // hidden: the detached daemon re-execs itself with this
-		return runSupervisor(args[1:])
-	case runUIArg: // hidden: the detached UI daemon re-execs itself with this
-		return runUI(args[1:])
+	case forge.RunSupervisorArg: // hidden: the detached daemon re-execs itself with this
+		return runSupervisor()
+	case forge.RunUIArg: // hidden: the detached UI daemon re-execs itself with this
+		return runUI()
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return 0

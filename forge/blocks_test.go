@@ -74,3 +74,63 @@ func TestTakenBlocksCountsReservations(t *testing.T) {
 		t.Errorf("next free = %d, %v; want 16200 — the reserved block must be skipped", got, ok)
 	}
 }
+
+// Which workspaces have no block is the question `forge ports` is asked, so a
+// list sorted by a value half of it lacks has to put those somewhere on purpose:
+// last, where they read as the list of what still needs one.
+func TestSortHoldersPutsTheBlocklessLast(t *testing.T) {
+	held := []Holder{
+		{Workspace: "none-a", Block: nil},
+		{Workspace: "high", Block: &PortBlock{Start: 16200, Size: 100}},
+		{Workspace: "none-b", Block: nil},
+		{Workspace: "low", Block: &PortBlock{Start: 16000, Size: 100}},
+	}
+	sortHolders(held)
+
+	if held[0].Workspace != "low" || held[1].Workspace != "high" {
+		t.Errorf("blocks out of order: %+v", held)
+	}
+	for _, h := range held[2:] {
+		if h.Block != nil {
+			t.Errorf("a workspace with a block sorted after one without: %+v", held)
+		}
+	}
+}
+
+// The range and the block size are set by two different flags, either of which
+// may be given alone. Whichever is not named has to survive: a `--block=` that
+// silently reset the span to the default would move where every future block
+// comes from, and blocks never move afterwards.
+func TestSetPortRangeKeepsWhatWasNotAskedAbout(t *testing.T) {
+	if _, err := SetPortRange(20000, 21000, 50); err != nil {
+		t.Fatalf("SetPortRange: %v", err)
+	}
+	got, err := SetPortRange(0, 0, 25)
+	if err != nil {
+		t.Fatalf("block only: %v", err)
+	}
+	if got.Start != 20000 || got.End != 21000 || got.Block != 25 {
+		t.Errorf("block only = %+v, want the span kept and the block 25", got)
+	}
+	got, err = SetPortRange(30000, 31000, 0)
+	if err != nil {
+		t.Fatalf("span only: %v", err)
+	}
+	if got.Start != 30000 || got.End != 31000 || got.Block != 25 {
+		t.Errorf("span only = %+v, want the block size kept", got)
+	}
+	// And what it returns is what was written, not what was asked for.
+	stored, err := PortRange()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != got {
+		t.Errorf("stored %+v, reported %+v", stored, got)
+	}
+
+	// A span that holds no whole block is refused rather than stored, since every
+	// allocation from it would fail.
+	if _, err := SetPortRange(30000, 30010, 100); err == nil {
+		t.Error("a range too small for one block should be refused")
+	}
+}

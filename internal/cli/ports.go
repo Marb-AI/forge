@@ -3,14 +3,10 @@ package cli
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
-	"time"
 
-	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/forge"
 )
 
@@ -32,34 +28,22 @@ func portsCmd(args []string) int {
 // of port state a human ever needs to look at: everything else about a port is
 // derived from what is actually running.
 func portsList() int {
-	cfg, err := config.Load()
+	m, err := forge.PortBlocks()
 	if err != nil {
 		return fail("%v", err)
 	}
-	r := cfg.PortRangeOr()
+	r := m.Range
 	fmt.Printf("range %d-%d, blocks of %d (%d blocks)\n\n", r.Start, r.End, r.Block, len(r.Blocks()))
 
-	held, unreachable, err := forge.HeldBlocks()
-	if err != nil {
-		return fail("%v", err)
-	}
-	reserved := cfg.ActiveReservations(time.Now())
-	if len(held) == 0 && len(unreachable) == 0 && len(reserved) == 0 {
+	if len(m.Held) == 0 && len(m.Unreachable) == 0 && len(m.Reserved) == 0 {
 		fmt.Println("no workspaces")
 		return 0
 	}
 
-	sort.Slice(held, func(i, j int) bool {
-		if held[i].Block == nil || held[j].Block == nil {
-			return held[j].Block != nil // workspaces with no block sort last
-		}
-		return held[i].Block.Start < held[j].Block.Start
-	})
-
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(w, "WORKSPACE\tHOST\tPORTS")
 	missing := 0
-	for _, h := range held {
+	for _, h := range m.Held {
 		ports := "(none — forge ports assign)"
 		if h.Block != nil {
 			ports = fmt.Sprintf("%d-%d", h.Block.Start, h.Block.End())
@@ -68,18 +52,14 @@ func portsList() int {
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\n", h.Workspace, h.Host, ports)
 	}
-	// Reservations hold a block for a workspace that does not exist yet, so nothing
-	// above accounts for them. Shown because one can hold a block for half an hour
-	// after a creation died, and an invisible thing holding a block is the kind of
-	// state you end up reading the source to explain.
-	for _, res := range reserved {
+	for _, res := range m.Reserved {
 		fmt.Fprintf(w, "%s\t%s\t%d-%d (being created)\n",
 			res.Workspace, res.Host, res.Start, res.Start+r.Block-1)
 	}
 	if code := flush(w); code != 0 {
 		return code
 	}
-	for _, alias := range unreachable {
+	for _, alias := range m.Unreachable {
 		fmt.Fprintf(os.Stderr, "\n  %s: unreachable — its blocks are unknown\n", alias)
 	}
 	if missing > 0 {
@@ -92,10 +72,6 @@ func portsList() int {
 // allowed to be — and why an existing block can never move into it — is
 // forge.SetPortRange's business; this only reads the argument and reports.
 func portsRange(args []string) int {
-	cfg, err := config.Load()
-	if err != nil {
-		return fail("%v", err)
-	}
 	block := 0
 	var span string
 	for _, a := range args {
@@ -114,33 +90,32 @@ func portsRange(args []string) int {
 	}
 
 	if span == "" && block == 0 {
-		r := cfg.PortRangeOr()
+		r, err := forge.PortRange()
+		if err != nil {
+			return fail("%v", err)
+		}
 		fmt.Printf("%d-%d, blocks of %d (%d blocks)\n", r.Start, r.End, r.Block, len(r.Blocks()))
 		return 0
 	}
 
-	next := cfg.PortRangeOr()
+	var start, end int
 	if span != "" {
-		start, end, err := parseSpan(span)
-		if err != nil {
+		var err error
+		if start, end, err = parseSpan(span); err != nil {
 			return fail("%v", err)
 		}
-		next.Start, next.End = start, end
 	}
-	if block > 0 {
-		next.Block = block
-	}
-
-	if err := forge.SetPortRange(next); err != nil {
+	r, err := forge.SetPortRange(start, end, block)
+	if err != nil {
 		return fail("%v", err)
 	}
-	fmt.Printf("range %d-%d, blocks of %d (%d blocks)\n", next.Start, next.End, next.Block, len(next.Blocks()))
+	fmt.Printf("range %d-%d, blocks of %d (%d blocks)\n", r.Start, r.End, r.Block, len(r.Blocks()))
 
 	// Advisory, at the one moment the user can still act on it: this is when the
 	// range is chosen, so anything already sitting in it is worth knowing about now
 	// rather than as a failed tunnel weeks later. Never fatal — a busy port is one
 	// tunnel's problem when it comes to it, not a reason to refuse a range.
-	warnRangeBusy(next)
+	warnRangeBusy(r.Start, r.End)
 	return 0
 }
 
@@ -189,12 +164,9 @@ func portsAssign(args []string) int {
 	return 0
 }
 
-// warnRangeBusy reports anything already listening locally inside the range. It is
-// a courtesy at the moment the range is chosen, not a gate: a single busy port is
-// no reason to reject a span of thousands, and when it actually matters the tunnel
-// for that one port says so precisely (see the supervisor's collision state).
-func warnRangeBusy(r config.PortRange) {
-	busy := listeningIn(r.Start, r.End)
+// warnRangeBusy reports anything already listening locally inside the range.
+func warnRangeBusy(start, end int) {
+	busy := forge.BusyLocalPorts(start, end)
 	if len(busy) == 0 {
 		return
 	}
@@ -205,44 +177,4 @@ func warnRangeBusy(r config.PortRange) {
 	fmt.Fprintf(os.Stderr,
 		"\n  note: %s already in use on this machine — a workspace given those ports cannot tunnel them until whatever holds them stops\n",
 		strings.Join(parts, " "))
-}
-
-// listeningIn returns the local ports in [lo,hi] something is listening on. Uses
-// lsof, which is on macOS and Linux both; a missing or unhappy lsof yields nothing,
-// because this only ever feeds a warning.
-func listeningIn(lo, hi int) []int {
-	out, err := exec.Command("lsof", "-nP", "-iTCP", "-sTCP:LISTEN").Output()
-	if err != nil && len(out) == 0 {
-		return nil
-	}
-	return parseLsofPorts(string(out), lo, hi)
-}
-
-// parseLsofPorts pulls the local ports in [lo,hi] out of `lsof -nP -iTCP
-// -sTCP:LISTEN` output, whose 9th field is the address ("*:16000",
-// "127.0.0.1:16001", "[::1]:16002").
-func parseLsofPorts(out string, lo, hi int) []int {
-	seen := map[int]bool{}
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 9 {
-			continue
-		}
-		addr := fields[8]
-		colon := strings.LastIndex(addr, ":")
-		if colon < 0 {
-			continue
-		}
-		p, err := strconv.Atoi(addr[colon+1:])
-		if err != nil || p < lo || p > hi {
-			continue
-		}
-		seen[p] = true
-	}
-	ports := make([]int, 0, len(seen))
-	for p := range seen {
-		ports = append(ports, p)
-	}
-	sort.Ints(ports)
-	return ports
 }

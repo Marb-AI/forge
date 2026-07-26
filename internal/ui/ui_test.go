@@ -490,3 +490,13 @@ func TestMaxAgeIsClamped(t *testing.T) {
 		}
 	}
 }
+
+// CoreDeps is what the daemon actually runs on, and Serve refuses an incomplete
+// one — so an operation added to Deps and forgotten here is a UI that no longer
+// starts. Every other test in this file builds a Deps of fakes and would never
+// notice.
+func TestCoreDepsIsFullyWired(t *testing.T) {
+	if err := CoreDeps().validate(); err != nil {
+		t.Errorf("the real wiring is incomplete: %v", err)
+	}
+}
