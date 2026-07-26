@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
 )
 
 func TestTrackEndpointReturnsMap(t *testing.T) {

@@ -8,8 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/forge"
 	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/config"
 	"github.com/Marb-AI/forge/internal/proc"
 	"github.com/Marb-AI/forge/internal/supervisor"
 )
@@ -59,7 +60,7 @@ func runSupervisor(_ []string) int {
 // imports the supervisor.
 func observePorts(host *config.Host) (map[string]agentproto.WorkspacePorts, error) {
 	var res agentproto.PortsResult
-	if err := callAgent(host, &res, "workspace-ports"); err != nil {
+	if err := forge.CallAgent(host, &res, "workspace-ports"); err != nil {
 		return nil, err
 	}
 	return res.Workspaces, nil

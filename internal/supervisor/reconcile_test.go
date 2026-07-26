@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
-	"github.com/Marb-AI/forge/internal/config"
 )
 
 func block(start, size int) *agentproto.PortBlock {

@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
 )
 
 // connectTimeout bounds how long we wait for a server to answer at all.

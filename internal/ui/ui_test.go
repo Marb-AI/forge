@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
 )
 
 func TestCleanRel(t *testing.T) {

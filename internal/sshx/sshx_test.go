@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
 )
 
 func joined(args []string) string { return strings.Join(args, " ") }

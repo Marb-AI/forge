@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Marb-AI/forge/internal/config"
+	"github.com/Marb-AI/forge/config"
 )
 
 // portsServer wires HostFor to recognise "crm" and nothing else — both handlers

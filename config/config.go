@@ -2,6 +2,10 @@
 // set of ports to keep forwarded. It lives entirely on the laptop as a single
 // JSON file at ~/.forge/config.json. Workspaces themselves live on the server;
 // the client only needs to know which hosts exist and what to tunnel.
+//
+// It sits outside internal/ because the core does: a Host is what several of the
+// core's operations take and return, so anything that can call them has to be able
+// to name the type.
 package config
 
 import (

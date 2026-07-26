@@ -1,4 +1,4 @@
-package cli
+package forge
 
 import (
 	"reflect"
@@ -22,7 +22,7 @@ func TestListShowsOnlyOurOwnWorkspaces(t *testing.T) {
 	}
 
 	got := mergeWorkspaceStatus(mine, onTheHost)
-	want := []WorkspaceStatus{{Name: "mine", Host: "box", Status: agentproto.StatusRunning}}
+	want := []WorkspaceInfo{{Name: "mine", Host: "box", Status: agentproto.StatusRunning}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("listing must be ours alone.\n got: %+v\nwant: %+v", got, want)
 	}
@@ -62,7 +62,7 @@ func TestListIsSortedAndKeepsItsHost(t *testing.T) {
 			"b": {"zeta": agentproto.StatusStopped},
 		},
 	)
-	want := []WorkspaceStatus{
+	want := []WorkspaceInfo{
 		{Name: "alpha", Host: "a", Status: agentproto.StatusRunning},
 		{Name: "zeta", Host: "b", Status: agentproto.StatusStopped},
 	}
