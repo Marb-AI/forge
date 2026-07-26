@@ -6,8 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/Marb-AI/forge/config"
 )
 
 func TestTrackEndpointReturnsMap(t *testing.T) {
@@ -53,7 +51,7 @@ func authorizedPost(h http.Handler, path, body string) *httptest.ResponseRecorde
 
 func TestTrackIncForwardsSeconds(t *testing.T) {
 	s, h := testServer(t)
-	s.deps.HostFor = func(string) *config.Host { return &config.Host{} }
+	s.deps.KnowsWorkspace = func(string) bool { return true }
 	var gotWs string
 	var gotSecs int
 	s.deps.TrackInc = func(ws string, secs int) error { gotWs, gotSecs = ws, secs; return nil }
@@ -69,7 +67,7 @@ func TestTrackIncForwardsSeconds(t *testing.T) {
 
 func TestTrackIncUnknownWorkspace404(t *testing.T) {
 	s, h := testServer(t)
-	s.deps.HostFor = func(string) *config.Host { return nil } // unknown workspace
+	s.deps.KnowsWorkspace = func(string) bool { return false } // unknown workspace
 	called := false
 	s.deps.TrackInc = func(string, int) error { called = true; return nil }
 
@@ -84,7 +82,7 @@ func TestTrackIncUnknownWorkspace404(t *testing.T) {
 
 func TestTrackIncZeroIsNoop(t *testing.T) {
 	s, h := testServer(t)
-	s.deps.HostFor = func(string) *config.Host { return &config.Host{} }
+	s.deps.KnowsWorkspace = func(string) bool { return true }
 	called := false
 	s.deps.TrackInc = func(string, int) error { called = true; return nil }
 

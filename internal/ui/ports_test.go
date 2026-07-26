@@ -8,21 +8,14 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/Marb-AI/forge/config"
 )
 
-// portsServer wires HostFor to recognise "crm" and nothing else — both handlers
-// gate on it, the way every other per-workspace endpoint does.
+// portsServer wires KnowsWorkspace to recognise "crm" and nothing else — both
+// handlers gate on it, the way every other per-workspace endpoint does.
 func portsServer(t *testing.T, d Deps) *server {
 	t.Helper()
-	if d.HostFor == nil {
-		d.HostFor = func(ws string) *config.Host {
-			if ws == "crm" {
-				return &config.Host{Alias: "srv"}
-			}
-			return nil
-		}
+	if d.KnowsWorkspace == nil {
+		d.KnowsWorkspace = func(ws string) bool { return ws == "crm" }
 	}
 	return &server{deps: d}
 }

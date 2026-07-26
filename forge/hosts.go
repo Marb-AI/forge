@@ -86,19 +86,28 @@ func GhLogin(alias string, out io.Writer) error {
 	return interactive(out, sshx.AdminTarget(host).TTYArgs(remote))
 }
 
-// HostFor resolves a workspace name to the host it lives on, or nil if this client
+// hostFor resolves a workspace name to the host it lives on, or nil if this client
 // has no such workspace.
 //
 // The config is read on every call rather than held: the UI daemon runs for days,
 // and a workspace created in one browser tab has to resolve in the next request
 // from another.
-func HostFor(name string) *config.Host {
+//
+// Unexported: which machine a workspace is on, and what it takes to log into it,
+// is this package's business. A front end asks whether the workspace exists (see
+// KnowsWorkspace) and then asks for an operation on it by name.
+func hostFor(name string) *config.Host {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil
 	}
 	return cfg.HostFor(name)
 }
+
+// KnowsWorkspace reports whether this client has a workspace by that name — the
+// question every per-workspace endpoint asks before doing anything, so an
+// unknown name is answered as unknown rather than attempted and failed.
+func KnowsWorkspace(name string) bool { return hostFor(name) != nil }
 
 // ListHosts returns the registered host aliases, sorted — the servers a new
 // workspace can be put on.

@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/Marb-AI/forge/config"
 )
 
 type prepareArgs struct {
@@ -29,7 +27,7 @@ func prepareCapture(t *testing.T) (http.Handler, func() prepareArgs) {
 		jobs:      map[string]*job{},
 		deps: Deps{
 			ListWorkspaces:  func() ([]WorkspaceInfo, error) { return nil, nil },
-			HostFor:         func(string) *config.Host { return nil },
+			KnowsWorkspace:  func(string) bool { return false },
 			Checkpoint:      func(string, io.Writer) error { return nil },
 			ListHosts:       func() ([]string, error) { return nil, nil },
 			CreateWorkspace: func(string, string) error { return nil },
