@@ -35,9 +35,9 @@ func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneIm
 	target := sshx.Target{User: user, Addr: addr, Port: port}
 
 	// Probe: arch, uid, package manager — in one round trip.
-	probe, err := sshx.Capture(target.Args(
+	probe, err := target.Output(
 		"uname -m; id -u; { command -v apt-get || command -v dnf || command -v yum || echo none; }",
-	)...)
+	)
 	if err != nil {
 		return fmt.Errorf("cannot reach %s: %w", target.User+"@"+addr, err)
 	}
@@ -70,7 +70,7 @@ func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneIm
 	// 1) Upload the agent binary to /tmp; the provisioning script (as root)
 	//    installs it into place.
 	fmt.Fprintf(out, "→ uploading forge-agent (%s)\n", agentLabel)
-	if err := sshx.RunWithInputTo(agentSrc, out, target.Args("cat > /tmp/forge-agent")...); err != nil {
+	if err := target.Pipe(agentSrc, out, out, "cat > /tmp/forge-agent"); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 
@@ -81,14 +81,14 @@ func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneIm
 		runner = "sudo bash -s"
 	}
 	fmt.Fprintln(out, "→ provisioning (idempotent) …")
-	if err := sshx.RunWithInputTo(strings.NewReader(script), out, target.Args(runner)...); err != nil {
+	if err := target.Pipe(strings.NewReader(script), out, out, runner); err != nil {
 		return fmt.Errorf("provisioning failed: %w", err)
 	}
 
 	// 3) Read the host's public key back, so a re-run always shows it — whether it
 	//    was just generated or has been there all along. The .pub is world-readable
 	//    (the private key is not), so this needs no sudo.
-	pubkey, err := sshx.Capture(target.Args("cat " + hostKeyPath + ".pub")...)
+	pubkey, err := target.Output("cat " + hostKeyPath + ".pub")
 	if err != nil {
 		return fmt.Errorf("cannot read host key %s.pub: %w", hostKeyPath, err)
 	}

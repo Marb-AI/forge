@@ -3,6 +3,7 @@ package forge
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -31,7 +32,7 @@ func StopSession(name string) error {
 	// Clearing the tracking file in the same round trip ends the session's clocks: a
 	// stop is the end of the session, so its start and time-present are gone (a fresh
 	// session starts them over). A checkpoint, by contrast, keeps them.
-	return runCapture(target.Args(agentproto.KillClaude + "; " + agentproto.ClearSession))
+	return runCapture(target, agentproto.KillClaude+"; "+agentproto.ClearSession)
 }
 
 // RestartSession hard-restarts the session: kill it, then start a fresh detached
@@ -44,7 +45,7 @@ func RestartSession(name string) error {
 	// Kill then relaunch in one round trip; the kill tolerates "no session", so a
 	// restart also works as a start. Clear the tracking file too: a hard restart is a
 	// new session with a new task, so its clocks start over (unlike a checkpoint).
-	return runCapture(target.Args(agentproto.KillClaude + "; " + agentproto.ClearSession + "; " + agentproto.StartClaude))
+	return runCapture(target, agentproto.KillClaude+"; "+agentproto.ClearSession+"; "+agentproto.StartClaude)
 }
 
 // Checkpoint asks the workspace's running Claude session to write a handoff to
@@ -106,7 +107,7 @@ const maxTopicLen = 60
 func checkpoint(target sshx.Target, session string, out io.Writer) error {
 	log := func(m string) { fmt.Fprintln(out, m) }
 
-	if err := runCapture(target.Args("tmux", "has-session", "-t", session)); err != nil {
+	if err := runCapture(target, "tmux", "has-session", "-t", session); err != nil {
 		return fmt.Errorf("no running claude session to checkpoint — start one first (forge workspace <name> claude, or the tab in forge ui)")
 	}
 	// Safe gate: only proceed when the pane is stable (no task streaming output).
@@ -124,7 +125,7 @@ func checkpoint(target sshx.Target, session string, out io.Writer) error {
 	// Clear any topic left by an earlier checkpoint before asking for a new one, so
 	// a Claude that ignores the request leaves us with nothing rather than with a
 	// stale description of work that finished days ago.
-	_ = runCapture(target.Args("mkdir -p \"$HOME/.forge\" && rm -f \"" + topicFile + "\""))
+	_ = runCapture(target, "mkdir -p \"$HOME/.forge\" && rm -f \""+topicFile+"\"")
 
 	// The marker is embedded mid-sentence (words before and after) so its echo in
 	// the typed prompt can't wrap into a standalone marker line and false-positive;
@@ -169,11 +170,11 @@ func checkpoint(target sshx.Target, session string, out io.Writer) error {
 	// Pin the session's start into the tracking file before the kill: a checkpoint is
 	// context compression, not a new session, so its clock must survive the restart
 	// rather than adopting the fresh tmux session's creation time.
-	_ = runCapture(target.Args(agentproto.FreezeSession))
-	_ = runCapture(target.Args("tmux", "kill-session", "-t", session))
+	_ = runCapture(target, agentproto.FreezeSession)
+	_ = runCapture(target, "tmux", "kill-session", "-t", session)
 	// target.User is the workspace name (WorkspaceTarget logs in as it).
 	resume := agentproto.ResumeClaude(target.User, label)
-	if err := runCapture(target.Args(resume)); err != nil {
+	if err := runCapture(target, resume); err != nil {
 		return fmt.Errorf("restart: %w (start it manually with: forge workspace <name> claude)", err)
 	}
 	return nil
@@ -184,7 +185,7 @@ func checkpoint(target sshx.Target, session string, out io.Writer) error {
 // checkpoint that worked must not be reported as failed because the session ended
 // up with a duller name.
 func readTopic(target sshx.Target) string {
-	out, err := sshx.Capture(target.Args("cat \"" + topicFile + "\" 2>/dev/null || true")...)
+	out, err := target.Output("cat \"" + topicFile + "\" 2>/dev/null || true")
 	if err != nil {
 		return ""
 	}
@@ -233,20 +234,20 @@ func sanitizeTopic(s string) string {
 // apostrophes and other metacharacters in the prompt can't break remote parsing.
 func sendText(target sshx.Target, session, text string) error {
 	const buf = "forgecp"
-	if err := sshx.RunWithInput(strings.NewReader(text),
-		target.Args("tmux", "load-buffer", "-b", buf, "-")...); err != nil {
+	if err := target.Pipe(strings.NewReader(text), os.Stdout, os.Stderr,
+		"tmux", "load-buffer", "-b", buf, "-"); err != nil {
 		return err
 	}
-	if _, err := sshx.Capture(target.Args("tmux", "paste-buffer", "-d", "-b", buf, "-t", session)...); err != nil {
+	if _, err := target.Output("tmux", "paste-buffer", "-d", "-b", buf, "-t", session); err != nil {
 		return err
 	}
-	_, err := sshx.Capture(target.Args("tmux", "send-keys", "-t", session, "Enter")...)
+	_, err := target.Output("tmux", "send-keys", "-t", session, "Enter")
 	return err
 }
 
 // capturePane returns the visible pane text of the tmux session.
 func capturePane(target sshx.Target, session string) (string, bool) {
-	out, err := sshx.Capture(target.Args("tmux", "capture-pane", "-t", session, "-p")...)
+	out, err := target.Output("tmux", "capture-pane", "-t", session, "-p")
 	if err != nil {
 		return "", false
 	}
@@ -342,7 +343,7 @@ func stripDecoration(line string) string {
 }
 
 // runCapture runs a remote command and keeps only whether it worked.
-func runCapture(args []string) error {
-	_, err := sshx.Capture(args...)
+func runCapture(target sshx.Target, remote ...string) error {
+	_, err := target.Output(remote...)
 	return err
 }

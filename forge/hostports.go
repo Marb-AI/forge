@@ -78,7 +78,7 @@ func HostPortUse(alias string) ([]HostPorts, error) {
 
 // listeningPorts asks a host what it is listening on.
 func listeningPorts(host *config.Host) ([]int, error) {
-	out, err := sshx.Capture(sshx.AdminTarget(host).Args("ss", "-H", "-tln")...)
+	out, err := sshx.AdminTarget(host).Output("ss", "-H", "-tln")
 	if err != nil {
 		return nil, err
 	}

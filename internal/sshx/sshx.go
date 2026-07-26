@@ -1,6 +1,12 @@
-// Package sshx builds and runs ssh commands. It is the single place that knows
-// how Forge shells out to the system ssh client — so keys, ~/.ssh/config and
-// known_hosts all "just work" and we never reimplement crypto.
+// Package sshx is how Forge reaches a server. It is the single place that knows
+// what "connect to a host" means — every other package names a Target and a
+// command, and never a key, a port or an ssh option.
+//
+// There are two ways to run one, behind the Backend seam in backend.go: the
+// system's ssh binary, which is the default and what Forge has always done, and
+// a client of our own built on golang.org/x/crypto/ssh. This file is the part
+// both share (what a target is) plus the exec'd side of it: the argv, and the
+// sessions that are still attached to a terminal.
 package sshx
 
 import (
@@ -75,6 +81,9 @@ func WorkspaceTarget(h *config.Host, workspace string) Target {
 }
 
 // Args returns the ssh argv for a non-interactive remote command (no TTY).
+//
+// The exec'd backend's own business — an operation asks for Output or Pipe and
+// never sees an argv, because there is no argv when the pure-Go client runs it.
 func (t Target) Args(remote ...string) []string {
 	args := commonOpts(t.Port)
 	args = append(args, t.dest())
@@ -104,15 +113,16 @@ func (t Target) LocalForwardArgs(localPort, remotePort int) []string {
 	return args
 }
 
-// RunInteractive execs ssh wired to the current terminal and blocks until it
-// exits. Used for shells, Claude attach and one-off `expose`.
-func RunInteractive(args ...string) error {
-	return RunInteractiveTo(os.Stdout, args...)
-}
-
-// RunInteractiveTo is RunInteractive with the session's output going through out
-// — so Forge can watch it for the OSC 52 clipboard escape (see internal/clip)
-// rather than leaving the copy to whichever terminal the user happens to run.
+// RunInteractiveTo execs ssh wired to the current terminal and blocks until it
+// exits — a shell, a Claude attach, a one-off `expose`.
+//
+// It is not behind the Backend seam: a session attached to a terminal is a
+// different thing from a command that returns output, and it needs a remote PTY
+// to move. That is its own step; until then this is the exec'd client, always.
+//
+// The session's output goes through out, so Forge can watch it for the OSC 52
+// clipboard escape (see internal/clip) rather than leaving the copy to whichever
+// terminal the user happens to run.
 //
 // stdin stays the real terminal, deliberately. ssh puts *that* fd into raw mode
 // and reads the window size from it, so leaving it alone means we inherit both
@@ -123,36 +133,5 @@ func RunInteractiveTo(out io.Writer, args ...string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-// Capture runs ssh and returns stdout. Stderr is left attached so auth/host-key
-// problems are visible to the user.
-func Capture(args ...string) ([]byte, error) {
-	cmd := exec.Command("ssh", args...)
-	cmd.Stderr = os.Stderr
-	return cmd.Output()
-}
-
-// RunWithInput runs ssh with stdin taken from r and stdout/stderr streamed to
-// the terminal — each to its own stream, so redirecting one doesn't capture the
-// other. Used to pipe a provisioning script (or a binary) to the host.
-func RunWithInput(r io.Reader, args ...string) error {
-	return runWithInput(r, os.Stdout, os.Stderr, args...)
-}
-
-// RunWithInputTo is RunWithInput with the output going wherever the caller wants
-// — an SSE stream for the browser UI — so a long provisioning run can be watched
-// from either front end. stdout and stderr are merged, because a follower reads
-// one stream and wants the errors in it, in order.
-func RunWithInputTo(r io.Reader, out io.Writer, args ...string) error {
-	return runWithInput(r, out, out, args...)
-}
-
-func runWithInput(r io.Reader, stdout, stderr io.Writer, args ...string) error {
-	cmd := exec.Command("ssh", args...)
-	cmd.Stdin = r
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
 	return cmd.Run()
 }

@@ -25,7 +25,7 @@ func callAgent(h *config.Host, out any, op string, opArgs ...string) error {
 		head = append([]string{"sudo"}, head...)
 	}
 	remote := append(head, opArgs...)
-	data, runErr := sshx.Capture(target.Args(remote...)...)
+	data, runErr := target.Output(remote...)
 
 	// The agent prints a JSON error even when it exits non-zero; prefer it.
 	var maybeErr agentproto.ErrorResult

@@ -440,6 +440,15 @@ forge ports assign                # give a block to workspaces made before this 
 own project name automatically, so the same repo cloned into several workspaces
 (for parallel Claude sessions) doesn't collide.
 
+**How Forge reaches a server.** By running your `ssh`. Your keys, your
+`~/.ssh/config`, your agent, your hardware token — all of it applies, and Forge
+knows about none of it. A second client, built on Go's SSH library instead of a
+subprocess, now sits behind the same seam and can be switched on with
+`FORGE_SSH_BACKEND=go`; it is what will let Forge run where there is no `ssh`
+binary to call. It is neither the default nor finished — it borrows identities
+and `known_hosts` from `~/.ssh`, and refuses a host it has never seen instead of
+recording it — so turn it on only to try it.
+
 ---
 
 ## Workflows
