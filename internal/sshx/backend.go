@@ -53,7 +53,7 @@ type Backend interface {
 type Shell struct {
 	Remote []string
 	// Cols and Rows size the terminal before the first byte is drawn. A zero
-	// dimension leaves it at the far end's default.
+	// dimension is filled in — see size.
 	Cols, Rows uint16
 	// ForwardAgent lends this machine's SSH agent to the session, which is what
 	// makes git inside a workspace shell use your keys with nothing stored on the
@@ -63,6 +63,31 @@ type Shell struct {
 }
 
 func (s Shell) line() string { return joinRemote(s.Remote) }
+
+// size is the terminal's size, with a caller who gave none answered rather than
+// left to chance.
+//
+// "The pty's own default" is not an answer worth passing on: a freshly opened pty
+// reports 0×0 on Linux, and a program handed that draws into a rectangle that
+// does not exist — tmux and Claude both keep the cursor and mouse tracking of
+// that first paint. Both backends fill it in here, so a terminal that opened
+// unsized is the same shape whichever client opened it.
+func (s Shell) size() (cols, rows uint16) {
+	cols, rows = s.Cols, s.Rows
+	if cols == 0 || rows == 0 {
+		cols, rows = DefaultCols, DefaultRows
+	}
+	return cols, rows
+}
+
+// The size a terminal opens at when nobody says otherwise — the conventional one,
+// which is also what a terminal emulator opens a window at. Exported because the
+// local shell is sized the same way and does not come through this seam (see
+// forge.OpenTerminal).
+const (
+	DefaultCols = 80
+	DefaultRows = 24
+)
 
 // Terminal is one live terminal: something running on the far end of a pty, with
 // no output to collect and no exit status to read. Read and Write carry raw

@@ -115,10 +115,7 @@ func openTerm(client *ssh.Client, t Target, s Shell) (*remoteTerm, error) {
 		forwardAgent(client, sess)
 	}
 
-	cols, rows := s.Cols, s.Rows
-	if cols == 0 || rows == 0 {
-		cols, rows = defaultCols, defaultRows
-	}
+	cols, rows := s.size()
 	if err := sess.RequestPty(termType(), int(rows), int(cols), ptyModes); err != nil {
 		sess.Close()
 		return nil, fmt.Errorf("ssh %s: the server would not give this session a terminal: %w", t.dest(), err)
@@ -150,14 +147,6 @@ func openTerm(client *ssh.Client, t Target, s Shell) (*remoteTerm, error) {
 	}
 	return &remoteTerm{client: client, sess: sess, in: in, out: out}, nil
 }
-
-// The size a terminal opens at when the caller does not know one yet. It is the
-// classic default rather than a guess: 80×24 is what a pty gives you when nobody
-// says otherwise, so this matches what the exec'd backend's pty would have done.
-const (
-	defaultCols = 80
-	defaultRows = 24
-)
 
 // ptyModes are the terminal modes sent with the request.
 //

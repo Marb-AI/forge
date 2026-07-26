@@ -226,6 +226,28 @@ func TestTheLocalShellRunsWhatYouTypeIntoIt(t *testing.T) {
 	}
 }
 
+// The local shell does not go through the transport, so the size a caller left out
+// has to be filled in here — or it is the one terminal in the rail that opens into
+// a pty its own kernel reports as 0×0.
+func TestTheLocalShellOpensAtTheConventionalSizeWhenNoneWasGiven(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+
+	term, err := OpenTerminal(TermLocal, "", 0, 0)
+	if err != nil {
+		t.Fatalf("open the local shell: %v", err)
+	}
+	defer term.Close()
+
+	// stty reads the size off the terminal it is attached to, so this is the shell's
+	// own view of the window rather than what we asked for.
+	if _, err := term.Write([]byte("stty size\n")); err != nil {
+		t.Fatal(err)
+	}
+	if out, ok := readUntil(term, "24 80", 20*time.Second); !ok {
+		t.Errorf("the shell does not see an 80x24 window; read so far:\n%s", out)
+	}
+}
+
 // envValues returns every value a process environment gives key — every one,
 // because "how many" is half of what the caller is checking.
 func envValues(env []string, key string) []string {

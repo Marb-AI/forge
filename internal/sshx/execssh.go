@@ -37,10 +37,11 @@ func (execBackend) Run(t Target, c Command) error {
 // to the server, and everything the user has configured — ~/.ssh/config, an
 // agent, a hardware token — applies exactly as it does for the commands above.
 func (execBackend) Open(t Target, s Shell) (Terminal, error) {
+	cols, rows := s.size()
 	// Unwrapped rather than returned as a pair: a *localpty.Term that is nil
 	// alongside an error would still be a non-nil Terminal to whoever ignored the
 	// error.
-	term, err := localpty.Start(exec.Command("ssh", t.ttyArgs(s)...), s.Cols, s.Rows)
+	term, err := localpty.Start(exec.Command("ssh", t.ttyArgs(s)...), cols, rows)
 	if err != nil {
 		return nil, err
 	}

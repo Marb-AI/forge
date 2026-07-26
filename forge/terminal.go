@@ -64,9 +64,11 @@ type Terminal interface {
 }
 
 // OpenTerminal opens a terminal of the given kind, sized to cols×rows so the
-// very first draw matches the window it is going to (a 0×0 or default pty makes
-// tmux and Claude render into the wrong rectangle — cursor adrift, mouse tracking
-// off). A zero dimension leaves the pty at its default.
+// very first draw matches the window it is going to: tmux and Claude both keep
+// the cursor and mouse tracking of that first paint, so a terminal that opened
+// into the wrong rectangle stays wrong until something redraws it. A caller with
+// no size gets the conventional 80×24 rather than the pty's own idea of a
+// default, which on Linux is 0×0.
 //
 // workspace names the workspace for the three remote kinds and must be empty for
 // TermLocal, which belongs to no workspace: there is one local machine, so there
@@ -75,6 +77,13 @@ func OpenTerminal(kind, workspace string, cols, rows uint16) (Terminal, error) {
 	if kind == TermLocal {
 		if workspace != "" {
 			return nil, fmt.Errorf("the local terminal belongs to no workspace (got %q)", workspace)
+		}
+		// Filled in here because the local shell does not go through the transport,
+		// which does the same for the other three (sshx.Shell.size). It sits in the
+		// same rail as them and would otherwise be the one terminal that opens
+		// unusable.
+		if cols == 0 || rows == 0 {
+			cols, rows = sshx.DefaultCols, sshx.DefaultRows
 		}
 		// Unwrapped rather than returned as a pair: a *localpty.Term that is nil
 		// alongside an error would still be a non-nil Terminal to whoever ignored

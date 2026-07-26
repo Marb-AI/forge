@@ -308,6 +308,25 @@ func TestOpenHandsTheTargetAndTheShellToTheBackend(t *testing.T) {
 	}
 }
 
+// A caller with no size must not get whatever a pty happens to default to — 0×0
+// on Linux, which is a rectangle nothing can draw into. Both backends answer it
+// from here, so an unsized terminal is the same shape whichever client opened it:
+// the Go one asks for these numbers in its pty-req, the exec'd one puts them on
+// the pty it hands ssh.
+func TestATerminalWithNoSizeOpensAtTheConventionalOne(t *testing.T) {
+	if cols, rows := (Shell{}).size(); cols != 80 || rows != 24 {
+		t.Errorf("an unsized terminal opens at %dx%d, want 80x24", cols, rows)
+	}
+	// Half a size is no size: a 100×0 terminal is as unusable as a 0×0 one.
+	if cols, rows := (Shell{Cols: 100}).size(); cols != 80 || rows != 24 {
+		t.Errorf("a terminal with no rows opens at %dx%d, want 80x24", cols, rows)
+	}
+	// And a size that was given is passed through untouched.
+	if cols, rows := (Shell{Cols: 100, Rows: 30}).size(); cols != 100 || rows != 30 {
+		t.Errorf("size = %dx%d, wanted the 100x30 asked for", cols, rows)
+	}
+}
+
 // The exec'd backend's terminal argv is the one Forge has always run: the UI used
 // to build it itself, and moving it here must not have changed a word of it —
 // same forced TTY, same options, same order, and -A where the workspace shell has

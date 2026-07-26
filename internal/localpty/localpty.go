@@ -31,11 +31,15 @@ type Term struct {
 // Start runs cmd with a pty in front of it, sized to cols×rows.
 //
 // The size is given at start rather than set afterwards because the first thing
-// the child does is draw: a full-screen program that opens onto a default 80×24
-// and is resized a moment later has already painted into the wrong rectangle,
-// and tmux in particular keeps the cursor and mouse tracking of that first
-// rectangle. A zero dimension leaves the pty at its default, for a caller that
-// does not know the size yet.
+// the child does is draw: a full-screen program resized a moment after it opened
+// has already painted into the wrong rectangle, and tmux in particular keeps the
+// cursor and mouse tracking of that first one.
+//
+// A zero dimension leaves the pty at whatever it defaults to, which is 0×0 on
+// Linux and therefore no use to anything drawing into it. Forge's callers do not
+// pass one — they fill it in with a conventional size first (sshx.DefaultCols,
+// forge.OpenTerminal) — and this stays as the honest answer for a caller that
+// really has no size to give.
 func Start(cmd *exec.Cmd, cols, rows uint16) (*Term, error) {
 	var size *pty.Winsize
 	if cols > 0 && rows > 0 {
