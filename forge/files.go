@@ -3,13 +3,10 @@ package forge
 import (
 	"bytes"
 	"errors"
-	"os/exec"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/Marb-AI/forge/internal/sshx"
 )
 
 // The workspace file browser. It is read-only and rooted at the workspace user's
@@ -84,7 +81,7 @@ func ListDir(workspace, dir string) (DirListing, error) {
 	// gives a vanished or replaced directory its own exit code.
 	remote := guardPath(arg, "-d") +
 		`find -- "$p" -mindepth 1 -maxdepth 1 -printf '%y\t%f\n' 2>/dev/null`
-	out, err := sshx.Capture(target.Args(remote)...)
+	out, err := target.Output(remote)
 	if err != nil {
 		return DirListing{}, fsErr(err)
 	}
@@ -125,7 +122,7 @@ func ReadFile(workspace, file string) (FileText, error) {
 	// Every literal here comes from a const, so shell and Go can't drift apart.
 	remote := guardPath(rel, "-f") +
 		`head -c ` + strconv.Itoa(maxFileBytes+1) + ` -- "$p"`
-	out, err := sshx.Capture(target.Args(remote)...)
+	out, err := target.Output(remote)
 	if err != nil {
 		return FileText{}, fsErr(err)
 	}
@@ -173,12 +170,19 @@ func guardPath(rel, want string) string {
 
 // fsErr turns a failed remote command into the sentinel its exit code stands for,
 // leaving anything that wasn't an exit status (ssh itself failing) as it is.
+//
+// It matches on "reports an exit code" rather than on a concrete error type,
+// because the type depends on what ran the command and the codes do not: an
+// exec'd ssh reports the remote status as *exec.ExitError, Forge's own client as
+// *sshx.ExitError, and a local shell in this package's tests as the first of
+// those. The guard snippet's protocol (rcNoHome, rcNotFound, …) is the same
+// under all three.
 func fsErr(err error) error {
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) {
+	var coded interface{ ExitCode() int }
+	if !errors.As(err, &coded) {
 		return err
 	}
-	switch ee.ExitCode() {
+	switch coded.ExitCode() {
 	case rcNoHome:
 		return ErrNoHome
 	case rcNotFound:

@@ -86,7 +86,7 @@ func KillClaude(name string) error {
 	if err != nil {
 		return err
 	}
-	return runCapture(target.Args("tmux", "kill-session", "-t", agentproto.TmuxSession))
+	return runCapture(target, "tmux", "kill-session", "-t", agentproto.TmuxSession)
 }
 
 // ExposePort holds a single tunnel from this machine's port to the same port in
