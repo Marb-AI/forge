@@ -246,9 +246,9 @@ func (e *ExitError) ExitCode() int { return e.Code }
 // An environment variable rather than a setting, because this is not a
 // preference: it is which client we are testing today. The pure-Go one is
 // built, exercised against a real server, and left switched off — flipping the
-// default is its own change, with the device key and a known-hosts store of
-// Forge's own behind it, and until then a Forge that silently stopped using
-// your ~/.ssh config would be a mystery, not a feature.
+// default is its own change, with the device key behind it, and until then a
+// Forge that silently stopped using your ~/.ssh config would be a mystery, not
+// a feature.
 const backendEnv = "FORGE_SSH_BACKEND"
 
 // chosen is the backend a front end wired in explicitly, if any. Nil means "ask

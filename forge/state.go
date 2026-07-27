@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/internal/sshx"
 	"github.com/Marb-AI/forge/keys"
 )
 
@@ -33,8 +34,8 @@ var (
 )
 
 // Open points the core at one directory on this machine: the config, the device
-// key, and the daemons' files all live in it. This is what a desktop shell calls,
-// and what `forge` itself does by default with ~/.forge.
+// key, the servers it trusts and the daemons' files all live in it. This is what
+// a desktop shell calls, and what `forge` itself does by default with ~/.forge.
 func Open(dir string) {
 	// Cannot fail: both stores below are real ones.
 	_ = Use(config.NewFileStore(dir), keys.NewFileStore(dir))
@@ -56,8 +57,21 @@ func Use(cfg config.Store, k keys.Store) error {
 	}
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	cfgStore, keyStore = cfg, k
+	setStores(cfg, k)
 	return nil
+}
+
+// setStores records the pair and points the transport at the same directory, so
+// that the servers this device has accepted are kept with the rest of its state
+// rather than in a place the transport decided on alone. Called under stateMu.
+//
+// The store's own Dir is handed over rather than the path it returns: resolving
+// it can create the directory, and a Forge that never connects to anything
+// should not leave one behind. It is resolved when a connection needs it, which
+// is always after this — reaching a host means asking the config where it is.
+func setStores(cfg config.Store, k keys.Store) {
+	cfgStore, keyStore = cfg, k
+	sshx.KnownHostsIn(cfg.Dir)
 }
 
 // present names which half of the wiring was missing, so the error says what to
@@ -122,7 +136,7 @@ func useDefaults() error {
 	if err != nil {
 		return err
 	}
-	cfgStore, keyStore = config.NewFileStore(dir), keys.NewFileStore(dir)
+	setStores(config.NewFileStore(dir), keys.NewFileStore(dir))
 	return nil
 }
 

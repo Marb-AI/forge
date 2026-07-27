@@ -52,7 +52,9 @@ func commonOpts(port int) []string {
 		"-o", "BatchMode=no",
 		// TOFU: record a new server's host key on first connect instead of
 		// refusing non-interactively (you own the servers Forge connects to).
-		// A *changed* key still fails loudly — that's a real warning.
+		// A *changed* key still fails loudly — that's a real warning. The
+		// pure-Go client follows the same policy in a file of Forge's own,
+		// because this option writes to one that is OpenSSH's — knownhosts.go.
 		"-o", "StrictHostKeyChecking=accept-new",
 	}
 	if port != 0 && port != 22 {
