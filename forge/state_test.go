@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/internal/sshx"
 	"github.com/Marb-AI/forge/keys"
 )
 
@@ -54,6 +55,28 @@ func TestOpenPointsTheCoreAtADirectory(t *testing.T) {
 	}
 }
 
+// The servers this device has accepted are kept with the rest of its state, so a
+// core pointed at a container records them in the container — not in a ~/.forge
+// the transport decided on by itself.
+func TestTheTransportRecordsHostKeysWhereTheCoreWasPointed(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "container", "forge")
+	swapState(t, dir)
+
+	// Pointing the transport at the store does not resolve it: the directory is
+	// still not there, and a Forge that connects to nothing leaves nothing behind.
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("the state directory exists before anything asked for it: %v", err)
+	}
+
+	path, err := sshx.KnownHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "known_hosts"); path != want {
+		t.Errorf("the transport records host keys in %q, want %q", path, want)
+	}
+}
+
 // A store of the caller's own — no filesystem in sight. This is the case the
 // whole seam exists for: iOS has no home directory, and a front end there hands
 // the core its own answer rather than a path.
@@ -84,9 +107,14 @@ func TestUseAcceptsAStoreOfTheCallersOwn(t *testing.T) {
 		t.Errorf("the port went somewhere other than the store it was given: %+v", mem.cfg)
 	}
 	// And a store with nowhere to put runtime files says so, rather than the core
-	// inventing a directory on its behalf.
+	// inventing a directory on its behalf. The transport is handed the same
+	// answer: a device that cannot write down the servers it accepted will not
+	// accept one on sight.
 	if _, err := StateDir(); !errors.Is(err, errNoDir) {
 		t.Errorf("StateDir() on a store with no directory = %v; want it refused", err)
+	}
+	if _, err := sshx.KnownHosts(); !errors.Is(err, errNoDir) {
+		t.Errorf("sshx.KnownHosts() on a store with no directory = %v; want it refused", err)
 	}
 }
 
@@ -169,8 +197,9 @@ func TestHomeIsResolvedOnlyWhereItIsExplained(t *testing.T) {
 		"config/config.go":    "DefaultDir, the one place ~/.forge is spelled out",
 		"forge/terminal.go":   "the local shell's working directory — the user's home, not Forge's",
 		"forge/workspaces.go": "findPublicKey reads ~/.ssh, which the device key replaces in v2",
-		"internal/sshx/gossh.go": "the pure-Go client borrows the identities and known_hosts the ssh " +
-			"binary would have used, until the device key replaces both in v2",
+		"internal/sshx/gossh.go": "the pure-Go client borrows the identities the ssh binary " +
+			"would have used, and reads its known_hosts as a second opinion, until the " +
+			"device key replaces both in v2",
 	}
 	for _, f := range grepRepo(t, "os.UserHomeDir(") {
 		if _, ok := allowed[f]; !ok {

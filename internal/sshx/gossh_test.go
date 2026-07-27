@@ -303,8 +303,11 @@ func writeClientKey(t *testing.T) ssh.PublicKey {
 	return signer.PublicKey()
 }
 
-// trust records the server's host key in ~/.ssh/known_hosts, which is the only
-// way this backend will talk to it.
+// trust records the server's host key in ~/.ssh/known_hosts, where this backend
+// reads what the ssh binary already knows. Recording it there rather than in
+// Forge's own file is deliberate for the tests that only need a server they are
+// allowed to talk to: it leaves first sight — and therefore what gets written —
+// to the tests about trust (see knownhosts_test.go).
 func trust(t *testing.T, srv *testServer) {
 	t.Helper()
 	line := knownhosts.Line([]string{knownhosts.Normalize(srv.addr.String())}, srv.hostKey)
@@ -397,26 +400,6 @@ func TestTheGoClientReportsARemoteExitCode(t *testing.T) {
 	}
 	if exit.ExitCode() != 5 {
 		t.Errorf("ExitCode() = %d, want 5", exit.ExitCode())
-	}
-}
-
-// A server nobody has vouched for is refused, and the error says how to vouch
-// for it — because this backend cannot yet do that itself, and "handshake
-// failed: knownhosts: key is unknown" tells a user nothing they can act on.
-func TestTheGoClientRefusesAServerThatIsNotInKnownHosts(t *testing.T) {
-	pub := writeClientKey(t)
-	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
-		return "", "", 0
-	})
-	knownHostsPath(t) // the file exists; this server is deliberately not in it
-	useGo(t)
-
-	_, err := srv.target("crm").Output("id")
-	if err == nil {
-		t.Fatal("an unknown server was accepted")
-	}
-	if !strings.Contains(err.Error(), "not in") || !strings.Contains(err.Error(), backendEnv) {
-		t.Errorf("error does not say what to do about it: %v", err)
 	}
 }
 

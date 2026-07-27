@@ -15,7 +15,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // goBackend is Forge's own SSH client: golang.org/x/crypto/ssh, no subprocess.
@@ -29,17 +28,16 @@ import (
 // Where it matches the exec'd backend it does so on purpose: the same connect
 // timeout, the same keepalives, the same key-only stance, the same command string
 // on the wire, and — for a terminal — the same terminal type and window size,
-// asked of the server instead of taken from a pty on this machine. Two gaps are
-// known and deliberate, both closing with the device key in v2:
+// asked of the server instead of taken from a pty on this machine. Host keys
+// are its own now: it trusts a server on first sight and writes it down itself,
+// as the exec'd backend's accept-new does, in a file Forge owns — see
+// knownhosts.go.
 //
-//   - Credentials come from the agent and ~/.ssh, the same identities the ssh
-//     binary would have found. Forge does not yet have a key of its own to
-//     offer, and an encrypted key with no agent is skipped rather than
-//     prompted for — this backend has no terminal to ask on.
-//   - Host keys are read from ~/.ssh/known_hosts and never written. The exec'd
-//     backend records a new host on first sight (StrictHostKeyChecking=
-//     accept-new); doing that here means a trust store Forge owns, which is
-//     its own step. Until then an unrecorded host is refused, and said so.
+// One gap is left, and closes with the device key in v2: credentials come from
+// the agent and ~/.ssh, the same identities the ssh binary would have found.
+// Forge does not yet have a key of its own to offer, and an encrypted key with
+// no agent is skipped rather than prompted for — this backend has no terminal
+// to ask on.
 type goBackend struct{}
 
 func (goBackend) Name() string { return "go" }
@@ -577,35 +575,6 @@ func defaultIdentities() []ssh.Signer {
 		signers = append(signers, signer)
 	}
 	return signers
-}
-
-// hostKeyCallback verifies servers against ~/.ssh/known_hosts, and explains
-// itself when the answer is "I have never seen this host".
-//
-// Read-only, and that is the difference from the exec'd backend worth knowing
-// about: `ssh` would record an unknown host and carry on (accept-new), so a
-// host prepared before this backend existed is trusted and a brand-new one is
-// not. Writing the record needs a trust store Forge owns rather than one it
-// borrows from OpenSSH, which is a step of its own.
-func hostKeyCallback() (ssh.HostKeyCallback, error) {
-	dir, err := sshDir()
-	if err != nil {
-		return nil, err
-	}
-	path := filepath.Join(dir, "known_hosts")
-	check, err := knownhosts.New(path)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read %s, so no server can be verified: %w", path, err)
-	}
-	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-		err := check(hostname, remote, key)
-		var unknown *knownhosts.KeyError
-		if errors.As(err, &unknown) && len(unknown.Want) == 0 {
-			return fmt.Errorf("host %s is not in %s: connect to it once with the default backend "+
-				"(unset %s) to record its key", hostname, path, backendEnv)
-		}
-		return err
-	}, nil
 }
 
 // sshDir is ~/.ssh, where this backend borrows its credentials from until the
