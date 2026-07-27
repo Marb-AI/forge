@@ -39,9 +39,12 @@ func (s *stubTunnel) Close() error {
 type stubBackend struct {
 	mu sync.Mutex
 	// err is what every Forward fails with; nil means hand out a live tunnel.
-	err    error
-	asked  int
-	opened []*stubTunnel
+	err error
+	// stillborn makes every tunnel stop the moment it is handed over, which is a
+	// server that accepts the connection and drops it.
+	stillborn bool
+	asked     int
+	opened    []*stubTunnel
 }
 
 func (b *stubBackend) Name() string                        { return "stub" }
@@ -59,6 +62,9 @@ func (b *stubBackend) Forward(_ sshx.Target, _, _ int) (sshx.Tunnel, error) {
 		return nil, b.err
 	}
 	tun := &stubTunnel{stopped: make(chan struct{})}
+	if b.stillborn {
+		tun.Close()
+	}
 	b.opened = append(b.opened, tun)
 	return tun, nil
 }
@@ -189,6 +195,35 @@ func TestATunnelThatDropsIsPutBackUp(t *testing.T) {
 	case <-returned:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the loop did not stop when its context was cancelled")
+	}
+}
+
+// "Up" is the one thing in the status file a user acts on — it is what says the
+// link in the ports panel will work — so it must never be written for a tunnel
+// that has already stopped. It says nothing at all about a tunnel that keeps
+// falling over, however long that goes on for.
+func TestATunnelThatKeepsFallingOverIsNeverReportedUp(t *testing.T) {
+	b := useStub(t, &stubBackend{stillborn: true})
+	k := key{"srv", "crm", 16000}
+
+	_, cancel, s := supervising(t, k)
+	defer cancel()
+
+	// Watched across the whole window in which a tunnel that had survived would
+	// have been reported up, since that is the moment the two could collide.
+	deadline := time.Now().Add(establishedAfter + retryInterval)
+	for time.Now().Before(deadline) {
+		if st := s.status(k); st != nil && st.State == StateUp {
+			t.Fatalf("a tunnel that never stayed up was reported %s", StateUp)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if n := b.attempts(); n < 2 {
+		t.Errorf("the tunnel was attempted %d times — it should have been retried", n)
+	}
+	if st := s.status(k); st == nil || st.State != StateRetrying {
+		t.Errorf("state = %+v, want %s", st, StateRetrying)
 	}
 }
 

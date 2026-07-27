@@ -53,6 +53,11 @@ const (
 
 const retryInterval = 1 * time.Second
 
+// establishedAfter is how long a tunnel has to stay up before it is reported as
+// up. Neither client says when a forward is actually carrying traffic, so this is
+// the whole of what "up" means: it did not fall over immediately.
+const establishedAfter = 2 * time.Second
+
 // pollInterval is how often the hosts are asked what they publish. Matched to the
 // UI's own server poll: a container coming up is not something anyone is watching
 // to the second, and each round is one SSH round trip per host.
@@ -482,23 +487,37 @@ func (s *Supervisor) hold(ctx context.Context, target sshx.Target, k key) error 
 	}
 	defer tun.Close()
 
-	stopped := make(chan struct{})
-	defer close(stopped)
+	stopped := make(chan error, 1)
+	go func() { stopped <- tun.Wait() }()
+
+	watching := make(chan struct{})
+	defer close(watching)
 	go func() {
 		select {
 		case <-ctx.Done():
 			tun.Close()
-		case <-stopped:
+		case <-watching:
 		}
 	}()
 
-	// If it stays up briefly, consider it established. Still a guess rather than a
-	// fact: the exec'd client's tunnel is a process that has started, which is not
-	// the same as a port it has managed to bind.
-	established := time.AfterFunc(2*time.Second, func() { s.set(k, StateUp, "") })
-	defer established.Stop()
-
-	return tun.Wait()
+	// If it stays up that long, consider it established. Still a guess rather than
+	// a fact: the exec'd client's tunnel is a process that has started, which is
+	// not the same as a port it has managed to bind.
+	//
+	// Reported from here rather than from a timer's own goroutine, which is what a
+	// tunnel that stops at almost exactly this moment turns into a wrong answer:
+	// Stop() on a timer that has already begun running does not wait for it, so
+	// the "up" could land after the caller had recorded what the tunnel died of,
+	// and the row would say up until the next retry a second later. One goroutine
+	// deciding both leaves no such gap — this can only be reached by a tunnel that
+	// had not stopped.
+	select {
+	case err := <-stopped:
+		return err
+	case <-time.After(establishedAfter):
+	}
+	s.set(k, StateUp, "")
+	return <-stopped
 }
 
 // detail is what to show for a tunnel that stopped for none of the named reasons
