@@ -2,6 +2,7 @@ package sshx
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -18,20 +19,23 @@ import (
 // — one interface, chosen per process, with the core's operations and the front
 // ends' terminals going through it.
 //
-// The forwarding supervisor's tunnels are the last thing still exec'ing ssh
-// directly, and they move behind this same seam in their own step: doing them
-// together would mean a rewrite nobody could review against the behaviour it
-// replaces. So is the CLI's own interactive session, for a different reason —
-// see RunInteractiveTo.
+// What is left outside it is the CLI's own interactive session, for a reason of
+// its own — see RunInteractiveTo.
 
-// Backend reaches a server, in the two shapes anything Forge does to one takes.
+// Backend reaches a server, in the three shapes anything Forge does to one takes.
 //
-// Two methods, and there is no third. Everything the operations do to a host —
-// the agent, tmux, the file browser, provisioning — is "run this, feed it that,
-// give me what it printed", and finishes. Everything a front end opens is a
-// terminal: no output to collect, a window size, and it is held until somebody
-// closes it. A seam that admits nothing else cannot grow a dialect between the
-// two implementations.
+// Something runs and finishes: everything the operations do to a host — the
+// agent, tmux, the file browser, provisioning — is "run this, feed it that, give
+// me what it printed". Something is held open with a terminal on it: what a front
+// end opens has no output to collect, has a window size, and lives until somebody
+// closes it. And something is held open with a local port on it: a tunnel carries
+// whatever connects to it, for as long as it is left alone.
+//
+// Three, and the third arrived a step later than the first two — the supervisor's
+// tunnels were the last thing still exec'ing ssh on their own. It is a genuinely
+// separate shape rather than one of the others worn loosely: the backends have
+// nothing in common across them (a process, a pty, a listener), and a method wide
+// enough to cover all three is exactly where a dialect between two clients starts.
 type Backend interface {
 	// Run executes cmd on the target and waits for it to finish. A remote command
 	// that exits non-zero is reported as *ExitError, and so is a failure the
@@ -40,6 +44,8 @@ type Backend interface {
 	Run(t Target, cmd Command) error
 	// Open starts an interactive session on a terminal and hands it back live.
 	Open(t Target, s Shell) (Terminal, error)
+	// Forward carries local, on this machine's loopback, to remote on the far end.
+	Forward(t Target, local, remote int) (Tunnel, error)
 	// Name identifies the backend in errors and diagnostics.
 	Name() string
 }
@@ -105,6 +111,84 @@ type Terminal interface {
 	// SIGWINCH on the program drawing into it.
 	Resize(cols, rows uint16) error
 	io.Closer
+}
+
+// Tunnel is one live local port forward: a port on this machine's loopback whose
+// connections come out on the far end of the link.
+//
+// It has no streams of its own, because nothing here reads it — whatever connects
+// to the local port is the traffic. What the holder needs is the other two things:
+// when it stopped, and how to stop it.
+//
+// Lazy, as `ssh -L` is: a tunnel to a service that is not listening is a tunnel,
+// not a failure. Nothing dials the far end until something dials the near one, so
+// a container that is down costs the tunnel nothing and it is there when the
+// container comes back.
+type Tunnel interface {
+	// Wait blocks until the tunnel stops carrying anything and reports why. It
+	// returns nil when the tunnel was closed by whoever held it, and an error —
+	// possibly ErrAuth or ErrPortBusy — when it stopped by itself.
+	Wait() error
+	// Close takes the tunnel down and releases the local port. It returns only
+	// once that port is free, so the holder can rebind it immediately, and it is
+	// safe to call more than once and alongside Wait.
+	io.Closer
+}
+
+// The two failures a tunnel has that a caller acts on differently, named here so
+// that acting on them does not mean reading a particular client's diagnostics.
+//
+// Everything else is "it stopped, try again in a second": a refused connection, a
+// server rebooting, a link that dropped. These two are not that. An authentication
+// failure never fixes itself, so retrying it is a loop that runs forever and
+// achieves nothing; a local port held by another program is not the server's fault
+// at all, and clears the moment that program goes.
+var (
+	// ErrAuth is the server refusing this client's credentials.
+	ErrAuth = errors.New("authentication failed")
+	// ErrPortBusy is the local port already being held on this machine.
+	ErrPortBusy = errors.New("the local port is already in use")
+)
+
+// Forward carries this machine's local port to the same port's worth of the far
+// end, and hands back the tunnel to hold. The caller owns it and must Close it.
+func (t Target) Forward(local, remote int) (Tunnel, error) {
+	return backend().Forward(t, local, remote)
+}
+
+// authFailed and portBusy read a failure that arrived as prose.
+//
+// Neither client offers anything better: OpenSSH says why it gave up on its
+// stderr and exits 255 like it does for everything else, and x/crypto's handshake
+// error is a formatted string. So the transport reads the prose — once, here, in
+// the place that knows which clients produce it — and the supervisor above it
+// switches on ErrAuth and ErrPortBusy instead of on either client's wording.
+func authFailed(text string) bool {
+	s := strings.ToLower(text)
+	return strings.Contains(s, "permission denied") ||
+		strings.Contains(s, "publickey") ||
+		strings.Contains(s, "too many authentication failures") ||
+		// x/crypto's own phrasing, which shares none of OpenSSH's words.
+		strings.Contains(s, "unable to authenticate")
+}
+
+// portBusy reports whether a failure is the LOCAL port being taken. OpenSSH is
+// told to give up immediately when a forward cannot be set up
+// (ExitOnForwardFailure=yes) and says which of these it was.
+func portBusy(text string) bool {
+	s := strings.ToLower(text)
+	return strings.Contains(s, "address already in use") ||
+		strings.Contains(s, "cannot listen to port")
+}
+
+// firstLine is the first line of a diagnostic, which is the part worth repeating:
+// ssh follows a failure with advice about known_hosts and key permissions that
+// says nothing about this tunnel.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // Command is one non-interactive remote command.

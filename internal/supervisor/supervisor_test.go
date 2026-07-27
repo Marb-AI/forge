@@ -2,25 +2,6 @@ package supervisor
 
 import "testing"
 
-func TestIsAuthFailure(t *testing.T) {
-	yes := []string{
-		"Permission denied (publickey).",
-		"ssh: Too many authentication failures",
-		"PUBLICKEY denied",
-	}
-	for _, s := range yes {
-		if !isAuthFailure(s) {
-			t.Errorf("expected auth failure: %q", s)
-		}
-	}
-	no := []string{"Connection refused", "no route to host", ""}
-	for _, s := range no {
-		if isAuthFailure(s) {
-			t.Errorf("did not expect auth failure: %q", s)
-		}
-	}
-}
-
 func TestFirstLine(t *testing.T) {
 	if got := firstLine("a\nb\nc"); got != "a" {
 		t.Errorf("firstLine = %q", got)
