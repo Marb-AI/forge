@@ -101,8 +101,11 @@ func TestTheGoClientReadsOpenSSHsKnownHostsAndWritesNothingToIt(t *testing.T) {
 		t.Fatalf("a host ssh already trusts was refused: %v", err)
 	}
 
-	if got := lines(t, filepath.Join(dir, "known_hosts")); len(got) != 0 {
-		t.Errorf("copied %q into Forge's own file; a host that is already known is not a first sight", got)
+	// Not copied — and not even a file: a connection that had nothing to record
+	// leaves no record behind.
+	if _, err := os.Stat(filepath.Join(dir, "known_hosts")); !os.IsNotExist(err) {
+		t.Errorf("Forge's own file exists after a connection to a host ssh already trusts (%v): %q",
+			err, lines(t, filepath.Join(dir, "known_hosts")))
 	}
 	after, err := os.ReadFile(knownHostsPath(t))
 	if err != nil {
@@ -134,8 +137,10 @@ func TestTheGoClientRefusesAnUnknownServerWithNowhereToRecordIt(t *testing.T) {
 	}
 }
 
-// KnownHosts is a path, not a directory that springs into existence because
-// something asked where it would be.
+// KnownHosts is a path, and the transport makes nothing by working it out. What
+// the store does when it is asked where this device's state lives is the store's
+// business — the file store makes that directory, which is why the transport
+// asks when a connection needs it and not before.
 func TestAskingWhereTheHostKeysGoCreatesNothing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	prev := stateDir

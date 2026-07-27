@@ -84,8 +84,14 @@ func KnownHostsIn(dir func() (string, error)) {
 	stateDir = dir
 }
 
-// KnownHosts is the file those servers are recorded in. It creates nothing —
-// the answer is a path, whether or not anything has been written there yet.
+// KnownHosts is the file those servers are recorded in.
+//
+// Asking does not create the file: the answer is a path, whether or not
+// anything has ever been written there. The directory around it is another
+// matter — where this device's state lives is the store's own question, and the
+// file store makes the directory when it is asked. That is why the transport is
+// handed the question rather than an answer (see KnownHostsIn), and why it asks
+// when a connection needs it rather than at startup.
 func KnownHosts() (string, error) {
 	stateDirMu.Lock()
 	dir := stateDir
@@ -110,22 +116,18 @@ var recordMu sync.Mutex
 // records the ones it has never seen.
 func hostKeyCallback() (ssh.HostKeyCallback, error) {
 	ours, ourErr := KnownHosts()
+	// Only the files that are there. knownhosts.New refuses one that is not, and
+	// a device that has accepted nothing yet has no file — writing an empty one
+	// to read it back would leave a record of nothing behind on every machine
+	// whose hosts all came from ~/.ssh. No files at all is not an error either:
+	// it says nothing is known, which makes the next server a first sight, which
+	// is exactly what it is.
 	var files []string
-	if ourErr == nil {
-		// knownhosts.New refuses a file that is not there, and a device that has
-		// trusted nothing yet has no file. Empty is the honest starting point: it
-		// says "nothing is known", where a missing file says "nothing can be
-		// checked".
-		if err := touch(ours); err != nil {
-			return nil, fmt.Errorf("cannot record host keys in %s: %w", ours, err)
-		}
+	if ourErr == nil && exists(ours) {
 		files = append(files, ours)
 	}
 	if legacy, ok := opensshKnownHosts(); ok {
 		files = append(files, legacy)
-	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no host keys to check servers against: %w", ourErr)
 	}
 
 	check, err := knownhosts.New(files...)
@@ -219,15 +221,6 @@ func record(path, hostname string, key ssh.PublicKey) error {
 	return nil
 }
 
-// touch makes sure the file exists, without changing one that already does.
-func touch(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE, 0o600)
-	if err != nil {
-		return err
-	}
-	return f.Close()
-}
-
 // opensshKnownHosts is ~/.ssh/known_hosts if this machine has one — the second
 // opinion, read and never written. A machine without one (a phone, a container)
 // simply has no second opinion.
@@ -237,8 +230,10 @@ func opensshKnownHosts() (string, bool) {
 		return "", false
 	}
 	path := filepath.Join(dir, knownHostsFile)
-	if _, err := os.Stat(path); err != nil {
-		return "", false
-	}
-	return path, true
+	return path, exists(path)
+}
+
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
