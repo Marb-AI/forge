@@ -82,6 +82,10 @@ func TestAJumpDoesNotStandInForTheServerBehindIt(t *testing.T) {
 // bytes go both ways. This is the path the UI's panels take, so it is the one
 // that says "streaming still works".
 func TestATerminalWorksThroughAJump(t *testing.T) {
+	// The terminal type is this process's own, so it has to be this test's own
+	// too — a machine with no TERM (every CI runner) sends the empty string, and
+	// what is being checked here is the route, not the environment.
+	t.Setenv("TERM", "xterm-256color")
 	pub := writeClientKey(t)
 	target := startTTYServer(t, pub, func(_ string, tty io.ReadWriter) {
 		io.WriteString(tty, "claude> ")
