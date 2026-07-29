@@ -195,6 +195,7 @@ Hosts
   forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune]
                                                   provision a bare server + register it
   forge host add <ssh-target> --alias=<alias>     register an already-prepared server
+       [--jump=<[user@]host[:port],...>]          reach it through these servers (both commands)
   forge host list
   forge host remove <alias>
 
@@ -439,6 +440,17 @@ forge ports assign                # give a block to workspaces made before this 
 **Parallel work stays isolated.** Each workspace scopes `docker compose` to its
 own project name automatically, so the same repo cloned into several workspaces
 (for parallel Claude sessions) doesn't collide.
+
+**Servers you cannot reach directly.** A host behind a bastion is registered
+with the route to it: `forge host add root@10.0.0.5 --alias=box --jump=bastion`,
+which is `ssh -J` and means the same thing — the jump host opens a plain stream
+to the server and the SSH session happens over it, end to end, so the bastion
+carries your bytes and never reads them. A hop that names no login uses the
+host's own; several are comma-separated, nearest first. `host prepare` takes the
+same flag, because a server on a private network has to be reachable before it
+can be provisioned. It is kept in Forge's config rather than left to
+`~/.ssh/config` so that both clients — and a phone, which has neither file nor
+`ssh` — follow the same route.
 
 **How Forge reaches a server.** By running your `ssh`. Your keys, your
 `~/.ssh/config`, your agent, your hardware token — all of it applies, and Forge

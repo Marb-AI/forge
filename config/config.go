@@ -35,6 +35,15 @@ type Host struct {
 	User  string `json:"user"`
 	Addr  string `json:"addr"`
 	Port  int    `json:"port"`
+	// Jump is the servers to reach this one through, nearest first, in ssh's own
+	// -J syntax: "[user@]host[:port]", comma-separated. Empty for a host that is
+	// reachable directly, which is nearly all of them.
+	//
+	// It is kept here rather than left to ~/.ssh/config, where a laptop would
+	// have it, because a client of Forge's own has no ~/.ssh to read and a phone
+	// has no ssh at all — see sshx. A hop with no login named takes this host's,
+	// which is what someone typing `--jump bastion` means.
+	Jump string `json:"jump,omitempty"`
 }
 
 // Config is the whole client state. Forwards maps host alias -> workspace name

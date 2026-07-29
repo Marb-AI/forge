@@ -309,6 +309,9 @@
           <label for="wiz-alias">Alias</label>
           <input id="wiz-alias" type="text" autocomplete="off" spellcheck="false"
                  placeholder="e.g. remote-dev-02">
+          <label for="wiz-jump">Jump host <span class="muted">(optional)</span></label>
+          <input id="wiz-jump" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="bastion.example.com — leave empty if reachable directly">
           <label class="cb"><input type="checkbox" id="wiz-firewall" checked> Lock firewall to SSH-only</label>
           <label class="cb"><input type="checkbox" id="wiz-harden" checked> Disable SSH password auth</label>
           <label class="cb"><input type="checkbox" id="wiz-prune" checked> Clean up Docker nightly (03:00)</label>

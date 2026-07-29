@@ -13,12 +13,20 @@ import (
 // prepared from another machine), under alias. It only records it: nothing is
 // installed and nothing on the server is touched — that is what `host prepare`
 // is for.
-func AddHost(target, alias string) (*config.Host, error) {
+//
+// jump is the route to it, empty for a server this machine can reach directly.
+// It is checked here rather than trusted: a route that cannot be read is a host
+// that cannot be reached, and finding that out at the first connection means
+// finding it out from a failure that mentions none of this.
+func AddHost(target, alias, jump string) (*config.Host, error) {
 	user, addr, port, err := config.ParseSSHTarget(target)
 	if err != nil {
 		return nil, err
 	}
-	host := &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
+	if _, err := sshx.ParseJump(jump); err != nil {
+		return nil, err
+	}
+	host := &config.Host{Alias: alias, User: user, Addr: addr, Port: port, Jump: jump}
 	// The "already exists" check belongs inside the update, not before it: checked
 	// against a copy loaded earlier, two adds of the same alias would both pass it
 	// and the second would overwrite the first.

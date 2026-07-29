@@ -33,6 +33,7 @@ func hostCmd(args []string) int {
 // itself to the core, which streams its progress to stdout.
 func hostPrepare(args []string) int {
 	alias, rest := extractFlag(args, "alias")
+	jump, rest := extractFlag(rest, "jump")
 	noFirewall := hasBoolFlag(rest, "--no-firewall")
 	noHarden := hasBoolFlag(rest, "--no-ssh-harden")
 	noPrune := hasBoolFlag(rest, "--no-docker-prune")
@@ -52,9 +53,9 @@ func hostPrepare(args []string) int {
 	}
 
 	if len(rest) < 1 || alias == "" {
-		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images] [--docker-prune-volumes]")
+		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--jump=<[user@]host[:port],...>] [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images] [--docker-prune-volumes]")
 	}
-	if err := forge.PrepareHost(rest[0], alias, !noFirewall, !noHarden, !noPrune, pruneImages, pruneVolumes, os.Stdout); err != nil {
+	if err := forge.PrepareHost(rest[0], alias, jump, !noFirewall, !noHarden, !noPrune, pruneImages, pruneVolumes, os.Stdout); err != nil {
 		return fail("%v", err)
 	}
 	return 0
@@ -77,14 +78,15 @@ func hostAdd(args []string) int {
 	// Manual flag extraction so --alias may appear before or after the target
 	// (Go's flag package stops at the first positional argument).
 	alias, rest := extractFlag(args, "alias")
+	jump, rest := extractFlag(rest, "jump")
 	if len(rest) < 1 || alias == "" {
-		return fail("usage: forge host add <ssh-target> --alias=<alias>")
+		return fail("usage: forge host add <ssh-target> --alias=<alias> [--jump=<[user@]host[:port],...>]")
 	}
-	host, err := forge.AddHost(rest[0], alias)
+	host, err := forge.AddHost(rest[0], alias, jump)
 	if err != nil {
 		return fail("%v", err)
 	}
-	fmt.Printf("added host %q -> %s@%s:%d\n", host.Alias, host.User, host.Addr, host.Port)
+	fmt.Printf("added host %q -> %s\n", host.Alias, hostRoute(host.User, host.Addr, host.Port, host.Jump))
 	return 0
 }
 
@@ -100,9 +102,21 @@ func hostList() int {
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(w, "ALIAS\tTARGET")
 	for _, h := range hosts {
-		fmt.Fprintf(w, "%s\t%s@%s:%d\n", h.Alias, h.User, h.Addr, h.Port)
+		fmt.Fprintf(w, "%s\t%s\n", h.Alias, hostRoute(h.User, h.Addr, h.Port, h.Jump))
 	}
 	return flush(w)
+}
+
+// hostRoute is where a host is and how it is reached, for the two places that
+// print it. The jump is shown as it was typed: it is what would have to be
+// corrected. Taken apart rather than as a host, because naming that type is
+// reaching past the core — see adapter_test.go.
+func hostRoute(user, addr string, port int, jump string) string {
+	route := fmt.Sprintf("%s@%s:%d", user, addr, port)
+	if jump != "" {
+		route += " via " + jump
+	}
+	return route
 }
 
 func hostRemove(args []string) int {

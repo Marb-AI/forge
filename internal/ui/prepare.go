@@ -21,6 +21,7 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Target      string `json:"target"`
 		Alias       string `json:"alias"`
+		Jump        string `json:"jump"`
 		Firewall    *bool  `json:"firewall"`
 		Harden      *bool  `json:"harden"`
 		DockerPrune *bool  `json:"dockerPrune"`
@@ -34,6 +35,7 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Target, req.Alias = strings.TrimSpace(req.Target), strings.TrimSpace(req.Alias)
+	req.Jump = strings.TrimSpace(req.Jump)
 	if req.Target == "" {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("ssh target required, e.g. root@1.2.3.4"))
 		return
@@ -65,7 +67,7 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, err := s.startJob(func(out io.Writer) error {
-		return s.deps.PrepareHost(req.Target, req.Alias, firewall, harden, prune, pruneImages, pruneVolumes, out)
+		return s.deps.PrepareHost(req.Target, req.Alias, req.Jump, firewall, harden, prune, pruneImages, pruneVolumes, out)
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)

@@ -2711,7 +2711,7 @@ function setWizBusy(busy, label) {
   wiz.create().disabled = busy;
   wiz.create().textContent = busy ? (label || "Working…") : "Create";
   for (const id of ["wiz-name", "wiz-host", "wiz-addhost", "wiz-target", "wiz-alias",
-                    "wiz-firewall", "wiz-harden", "wiz-prune", "wiz-prune-images",
+                    "wiz-jump", "wiz-firewall", "wiz-harden", "wiz-prune", "wiz-prune-images",
                     "wiz-prune-volumes", "wiz-cancel"]) {
     document.getElementById(id).disabled = busy;
   }
@@ -2738,6 +2738,7 @@ async function submitWizard() {
       }
       setWizBusy(true, "Preparing server…");
       await prepareHost(target, alias,
+        document.getElementById("wiz-jump").value.trim(),
         document.getElementById("wiz-firewall").checked,
         document.getElementById("wiz-harden").checked,
         document.getElementById("wiz-prune").checked,
@@ -2775,7 +2776,9 @@ async function submitWizard() {
 
 // prepareHost runs `host prepare` server-side and streams its output into the
 // wizard's log, resolving when it finishes. Same run you'd watch in a terminal.
-async function prepareHost(target, alias, firewall, harden, dockerPrune, pruneImages, pruneVolumes) {
+// jump is the route to a server this machine cannot reach directly — ssh's -J,
+// empty for the usual case. It is sent as typed; the core reads it.
+async function prepareHost(target, alias, jump, firewall, harden, dockerPrune, pruneImages, pruneVolumes) {
   const log = document.getElementById("wiz-log");
   log.hidden = false;
   log.textContent = "";
@@ -2783,7 +2786,7 @@ async function prepareHost(target, alias, firewall, harden, dockerPrune, pruneIm
   const res = await fetch("/api/hosts/prepare", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target, alias, firewall, harden, dockerPrune, pruneImages, pruneVolumes }),
+    body: JSON.stringify({ target, alias, jump, firewall, harden, dockerPrune, pruneImages, pruneVolumes }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok && res.status !== 202) throw new Error(data.error || "HTTP " + res.status);

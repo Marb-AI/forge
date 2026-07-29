@@ -10,10 +10,13 @@
 package sshx
 
 import (
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"github.com/Marb-AI/forge/config"
 )
@@ -33,7 +36,7 @@ const connectTimeout = 10
 // ConnectTimeout is what makes the first half of that true. ServerAlive* only
 // notices a peer that dies *after* the connection is up; a host that never answers
 // at all is the connect timeout's problem, and for a long time nothing set one.
-func commonOpts(port int) []string {
+func commonOpts(t Target) []string {
 	opts := []string{
 		"-o", "ConnectTimeout=" + strconv.Itoa(connectTimeout),
 		"-o", "ServerAliveInterval=5",
@@ -57,8 +60,14 @@ func commonOpts(port int) []string {
 		// because this option writes to one that is OpenSSH's — knownhosts.go.
 		"-o", "StrictHostKeyChecking=accept-new",
 	}
-	if port != 0 && port != 22 {
-		opts = append(opts, "-p", strconv.Itoa(port))
+	// -J, and the same string the pure-Go client parses: the login of every hop
+	// is already spelled out in it (see jumpChain), so ssh cannot fall back to
+	// this machine's username on one client while the other uses the host's.
+	if t.Jump != "" {
+		opts = append(opts, "-J", t.Jump)
+	}
+	if t.Port != 0 && t.Port != 22 {
+		opts = append(opts, "-p", strconv.Itoa(t.Port))
 	}
 	return opts
 }
@@ -68,18 +77,87 @@ type Target struct {
 	User string // login user (admin for agent ops, or the workspace name)
 	Addr string
 	Port int
+	// Jump is the servers this one is reached through, nearest first, in ssh's -J
+	// syntax — see config.Host.Jump. Every hop in it names its login: what the
+	// user typed is completed when the target is built, so both clients read the
+	// same route.
+	Jump string
 }
 
 func (t Target) dest() string { return t.User + "@" + t.Addr }
 
+// via is how a hop is named when something goes wrong on the way: the login and
+// the address, port and all. A jump is often on a port that is not 22, and
+// "permission denied" against the wrong end of a route is an hour spent looking
+// in the wrong place.
+func (t Target) via() string { return t.User + "@" + t.addr() }
+
+// addr is the destination as a dialler wants it, with ssh's default port filled
+// in.
+func (t Target) addr() string {
+	port := t.Port
+	if port == 0 {
+		port = 22
+	}
+	return net.JoinHostPort(t.Addr, strconv.Itoa(port))
+}
+
 // AdminTarget is the host's admin account (used to invoke forge-agent).
 func AdminTarget(h *config.Host) Target {
-	return Target{User: h.User, Addr: h.Addr, Port: h.Port}
+	return Target{User: h.User, Addr: h.Addr, Port: h.Port, Jump: jumpChain(h)}
 }
 
 // WorkspaceTarget reaches a workspace as its own Linux user at the host address.
 func WorkspaceTarget(h *config.Host, workspace string) Target {
-	return Target{User: workspace, Addr: h.Addr, Port: h.Port}
+	return Target{User: workspace, Addr: h.Addr, Port: h.Port, Jump: jumpChain(h)}
+}
+
+// jumpChain is the host's route with every hop's login filled in.
+//
+// A hop written without one takes the host's own login rather than this
+// machine's username, which is what `ssh -J bastion` would have used. Two
+// reasons, and the second is the one that matters: a workspace target logs in as
+// the workspace, a name no bastion has ever heard of, so the target's own user
+// is no answer either; and a login left implicit is a login the two clients
+// would fill in differently — ssh from the local username, the Go client from
+// its own default — which is the one thing a second transport must never do.
+func jumpChain(h *config.Host) string {
+	spec := strings.TrimSpace(h.Jump)
+	if spec == "" {
+		return ""
+	}
+	hops := strings.Split(spec, ",")
+	for i, hop := range hops {
+		hop = strings.TrimSpace(hop)
+		if hop != "" && !strings.Contains(hop, "@") {
+			hop = h.User + "@" + hop
+		}
+		hops[i] = hop
+	}
+	return strings.Join(hops, ",")
+}
+
+// ParseJump splits a route into the hops it names, nearest first. It is what
+// makes a jump written by hand an error at the moment it is written rather than
+// the first time something tries to connect — see forge.AddHost.
+func ParseJump(spec string) ([]Target, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	var hops []Target
+	for _, s := range strings.Split(spec, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil, fmt.Errorf("jump %q: empty hop", spec)
+		}
+		user, addr, port, err := config.ParseSSHTarget(s)
+		if err != nil {
+			return nil, fmt.Errorf("jump %q: %w", spec, err)
+		}
+		hops = append(hops, Target{User: user, Addr: addr, Port: port})
+	}
+	return hops, nil
 }
 
 // Args returns the ssh argv for a non-interactive remote command (no TTY).
@@ -87,7 +165,7 @@ func WorkspaceTarget(h *config.Host, workspace string) Target {
 // The exec'd backend's own business — an operation asks for Output or Pipe and
 // never sees an argv, because there is no argv when the pure-Go client runs it.
 func (t Target) Args(remote ...string) []string {
-	args := commonOpts(t.Port)
+	args := commonOpts(t)
 	args = append(args, t.dest())
 	args = append(args, remote...)
 	return args
@@ -102,7 +180,7 @@ func (t Target) Args(remote ...string) []string {
 // end does not come through here any more: it asks the target to Open a Shell,
 // and only the exec'd backend turns that into an argv.
 func (t Target) TTYArgs(remote ...string) []string {
-	args := append([]string{"-t"}, commonOpts(t.Port)...)
+	args := append([]string{"-t"}, commonOpts(t)...)
 	args = append(args, t.dest())
 	args = append(args, remote...)
 	return args
@@ -130,7 +208,7 @@ func (t Target) ttyArgs(s Shell) []string {
 // left is `forge expose`, the one tunnel held in the CLI's own foreground, for
 // the same reason its interactive sessions are (see RunInteractiveTo).
 func (t Target) LocalForwardArgs(localPort, remotePort int) []string {
-	args := commonOpts(t.Port)
+	args := commonOpts(t)
 	args = append(args,
 		"-N",
 		"-o", "ExitOnForwardFailure=yes",
