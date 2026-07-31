@@ -37,19 +37,24 @@ func hostPrepare(args []string) int {
 	noHarden := hasBoolFlag(rest, "--no-ssh-harden")
 	noPrune := hasBoolFlag(rest, "--no-docker-prune")
 	pruneImages := hasBoolFlag(rest, "--docker-prune-images")
-	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune", "--docker-prune-images")
+	pruneVolumes := hasBoolFlag(rest, "--docker-prune-volumes")
+	rest = dropFlags(rest, "--no-firewall", "--no-ssh-harden", "--no-docker-prune", "--docker-prune-images", "--docker-prune-volumes")
 
-	// The image sweep is a tier of the nightly clean-up, not a standalone job — it's
-	// injected into that script. Asking for it while declining the clean-up would
-	// silently install nothing, so reject the contradiction rather than no-op.
+	// The image and volume sweeps are tiers of the nightly clean-up, not standalone
+	// jobs — they're injected into that script. Asking for one while declining the
+	// clean-up would silently install nothing, so reject the contradiction rather
+	// than no-op.
 	if noPrune && pruneImages {
 		return fail("--docker-prune-images is part of the nightly clean-up; drop --no-docker-prune to use it")
 	}
+	if noPrune && pruneVolumes {
+		return fail("--docker-prune-volumes is part of the nightly clean-up; drop --no-docker-prune to use it")
+	}
 
 	if len(rest) < 1 || alias == "" {
-		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images]")
+		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images] [--docker-prune-volumes]")
 	}
-	if err := forge.PrepareHost(rest[0], alias, !noFirewall, !noHarden, !noPrune, pruneImages, os.Stdout); err != nil {
+	if err := forge.PrepareHost(rest[0], alias, !noFirewall, !noHarden, !noPrune, pruneImages, pruneVolumes, os.Stdout); err != nil {
 		return fail("%v", err)
 	}
 	return 0

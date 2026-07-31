@@ -2615,14 +2615,17 @@ document.getElementById("wiz-addhost").addEventListener("click", () => {
 });
 wiz.name().addEventListener("keydown", (e) => { if (e.key === "Enter") submitWizard(); });
 
-// The image sweep is a tier of the nightly clean-up, so it can't be on without it:
-// untick and disable it whenever the clean-up is off. The server rejects the combo
-// too — this just keeps the contradiction unbuildable in the UI.
+// The image and named-volume sweeps are tiers of the nightly clean-up, so neither
+// can be on without it: untick and disable them whenever the clean-up is off. The
+// server rejects the combo too — this just keeps the contradiction unbuildable in
+// the UI.
 function syncPruneImages() {
   const prune = document.getElementById("wiz-prune");
-  const images = document.getElementById("wiz-prune-images");
-  images.disabled = !prune.checked;
-  if (!prune.checked) images.checked = false;
+  for (const id of ["wiz-prune-images", "wiz-prune-volumes"]) {
+    const tier = document.getElementById(id);
+    tier.disabled = !prune.checked;
+    if (!prune.checked) tier.checked = false;
+  }
 }
 document.getElementById("wiz-prune").addEventListener("change", syncPruneImages);
 
@@ -2647,6 +2650,7 @@ async function openWizard() {
   }
   // Opt-in, so it resets to off — the aggressive image sweep is never a default.
   document.getElementById("wiz-prune-images").checked = false;
+  document.getElementById("wiz-prune-volumes").checked = false;
   syncPruneImages();
   const log = document.getElementById("wiz-log");
   log.hidden = true;
@@ -2707,7 +2711,8 @@ function setWizBusy(busy, label) {
   wiz.create().disabled = busy;
   wiz.create().textContent = busy ? (label || "Working…") : "Create";
   for (const id of ["wiz-name", "wiz-host", "wiz-addhost", "wiz-target", "wiz-alias",
-                    "wiz-firewall", "wiz-harden", "wiz-prune", "wiz-prune-images", "wiz-cancel"]) {
+                    "wiz-firewall", "wiz-harden", "wiz-prune", "wiz-prune-images",
+                    "wiz-prune-volumes", "wiz-cancel"]) {
     document.getElementById(id).disabled = busy;
   }
 }
@@ -2736,7 +2741,8 @@ async function submitWizard() {
         document.getElementById("wiz-firewall").checked,
         document.getElementById("wiz-harden").checked,
         document.getElementById("wiz-prune").checked,
-        document.getElementById("wiz-prune-images").checked);
+        document.getElementById("wiz-prune-images").checked,
+        document.getElementById("wiz-prune-volumes").checked);
       host = alias;
       refreshServers({ force: true }); // a machine we've never measured just joined
       // The server is registered now. Fold it into the dropdown and select it,
@@ -2769,7 +2775,7 @@ async function submitWizard() {
 
 // prepareHost runs `host prepare` server-side and streams its output into the
 // wizard's log, resolving when it finishes. Same run you'd watch in a terminal.
-async function prepareHost(target, alias, firewall, harden, dockerPrune, pruneImages) {
+async function prepareHost(target, alias, firewall, harden, dockerPrune, pruneImages, pruneVolumes) {
   const log = document.getElementById("wiz-log");
   log.hidden = false;
   log.textContent = "";
@@ -2777,7 +2783,7 @@ async function prepareHost(target, alias, firewall, harden, dockerPrune, pruneIm
   const res = await fetch("/api/hosts/prepare", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target, alias, firewall, harden, dockerPrune, pruneImages }),
+    body: JSON.stringify({ target, alias, firewall, harden, dockerPrune, pruneImages, pruneVolumes }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok && res.status !== 202) throw new Error(data.error || "HTTP " + res.status);

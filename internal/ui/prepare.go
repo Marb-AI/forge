@@ -25,6 +25,9 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 		Harden      *bool  `json:"harden"`
 		DockerPrune *bool  `json:"dockerPrune"`
 		PruneImages *bool  `json:"pruneImages"`
+		// Opt-in like PruneImages, and for a stronger reason: it widens the volume
+		// pass to NAMED volumes, which is where a `compose down`-ed stack's data is.
+		PruneVolumes *bool `json:"pruneVolumes"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("bad request"))
@@ -45,17 +48,24 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	// Unlike the three above, the aggressive image sweep is opt-in: absent (or
 	// false) means off, so a forgotten field never deletes a workspace's images.
 	pruneImages := req.PruneImages != nil && *req.PruneImages
-	// It's a tier of the nightly clean-up, injected into that script — so asking for
-	// it while declining the clean-up would install nothing. Reject the combination
-	// instead of silently doing nothing (the wizard also disables it in that case).
+	pruneVolumes := req.PruneVolumes != nil && *req.PruneVolumes
+	// They're tiers of the nightly clean-up, injected into that script — so asking
+	// for one while declining the clean-up would install nothing. Reject the
+	// combination instead of silently doing nothing (the wizard also disables them
+	// in that case).
 	if pruneImages && !prune {
 		writeJSONError(w, http.StatusBadRequest,
 			fmt.Errorf("pruneImages needs the nightly clean-up: don't combine it with dockerPrune:false"))
 		return
 	}
+	if pruneVolumes && !prune {
+		writeJSONError(w, http.StatusBadRequest,
+			fmt.Errorf("pruneVolumes needs the nightly clean-up: don't combine it with dockerPrune:false"))
+		return
+	}
 
 	id, err := s.startJob(func(out io.Writer) error {
-		return s.deps.PrepareHost(req.Target, req.Alias, firewall, harden, prune, pruneImages, out)
+		return s.deps.PrepareHost(req.Target, req.Alias, firewall, harden, prune, pruneImages, pruneVolumes, out)
 	})
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err)

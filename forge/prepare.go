@@ -27,7 +27,7 @@ import (
 // It takes minutes and the progress is the point, so every line goes to out as it
 // happens. The CLI passes os.Stdout; the browser UI passes an SSE stream, so the
 // wizard shows the same long provisioning run live instead of a spinner.
-func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneImages bool, out io.Writer) error {
+func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool, out io.Writer) error {
 	user, addr, port, err := config.ParseSSHTarget(sshTarget)
 	if err != nil {
 		return err
@@ -75,7 +75,7 @@ func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneIm
 	}
 
 	// 2) Run the provisioning script as root.
-	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, firewall, harden, dockerPrune, pruneImages)
+	script := buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch, port, user, isRoot, firewall, harden, dockerPrune, pruneImages, pruneVolumes)
 	runner := "bash -s"
 	if !isRoot {
 		runner = "sudo bash -s"
@@ -213,7 +213,7 @@ func locateAgentBinary(goarch string) (string, error) {
 
 // buildPrepareScript assembles the idempotent remote provisioning script. It
 // assumes it runs as root (the caller wraps it in `sudo bash -s` when needed).
-func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort int, user string, isRoot, firewall, harden, dockerPrune, pruneImages bool) string {
+func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort int, user string, isRoot, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool) string {
 	var b strings.Builder
 	b.WriteString(prepareBase)
 	b.WriteString(ghSection)
@@ -242,6 +242,8 @@ func buildPrepareScript(pkgMgr, iproutePkg, sshClientPkg, goarch string, sshPort
 		"__SSHPORT__", strconv.Itoa(sshPort),
 		"__USER__", user,
 		"__IMAGE_PRUNE__", imagePruneLine(pruneImages),
+		"__VOLUME_PRUNE__", volumePruneLine(pruneVolumes),
+		"__FULL_PCT__", pruneFullPct,
 	)
 	return r.Replace(b.String())
 }
@@ -269,6 +271,42 @@ func imagePruneLine(on bool) string {
 # running or merely stopped — is never a candidate.
 echo "[prune] unreferenced images older than ` + pruneImagesGrace + `:"
 docker image prune -a -f --filter until=` + pruneImagesGrace + ` || true`
+}
+
+// pruneFullPct is the disk-usage percentage at or above which the nightly
+// clean-up reports failure instead of success. A host that is still this full
+// after a reclaim has a problem the clean-up cannot solve on its own, and the
+// only thing worse than that is not being told.
+const pruneFullPct = "90"
+
+// volumePruneLine is the volume pass. Anonymous-only by default; the opt-in
+// `--docker-prune-volumes` tier widens it to every unused volume.
+//
+// The default is safe in a way "prune volumes" generally is not: without `-a`,
+// Docker removes only volumes nobody NAMED, which is what an image's `VOLUME`
+// directive leaves behind when a container dies on a signal before `--rm` can
+// fire. A compose stack's data is always in a named volume, so it is never in
+// scope here.
+//
+// The opt-in tier drops that distinction and takes every unused volume with it,
+// which is what a busy build host needs — named scratch volumes (Go caches,
+// node_modules trees) were 65 of the 75 GB on the host measured. It is opt-in
+// because the same sweep takes the data of a stack stopped with `compose down`,
+// which removes the containers but deliberately KEEPS the named volumes.
+// `compose stop`, or leaving it running, is unaffected: the containers still
+// exist, so their volumes are never unused.
+func volumePruneLine(all bool) string {
+	if !all {
+		return `# Volumes nobody named — an image VOLUME whose container died on a signal, so
+# ` + "`--rm`" + ` never reclaimed it. A named volume (any compose stack's data) is out
+# of scope without -a. Widen with --docker-prune-volumes.
+docker volume prune -f || failed=1`
+	}
+	return `# Every unused volume, named ones included: the Go caches and node_modules
+# trees a build host accumulates. This also takes a ` + "`compose down`" + `-ed stack's
+# data, which is why it is opt-in — see volumePruneLine in prepare.go.
+echo "[prune] all unused volumes, including named:"
+docker volume prune -af || failed=1`
 }
 
 // prepareBase installs base tools + docker + the agent, idempotently.
@@ -478,41 +516,147 @@ fi
 //     sweep for exactly that case (see imagePruneLine). It stays opt-in because a
 //     stack brought fully down — no container left, running or stopped — would lose
 //     its image too once past the grace window.
-//   - Build cache, which on a real host is where the growth actually is.
-//   - Never volumes. That is where data lives.
+//   - Build cache, which on a real host is where the growth actually is — ALL of
+//     it, see the `until` note below for why no filter survives here.
+//   - ANONYMOUS volumes, and by default only those. See the volume note below.
 //
 // Stopped containers are deliberately NOT pruned either. On the host I measured
 // they were 23MB against 3.9GB of build cache — nothing — and removing one takes
 // its writable layer with it, so a stack you `compose stop`-ed for the night is
 // gone in the morning and has to be `up`-ed rather than `start`-ed. Not worth it.
 //
-// Everything is filtered to 24h, so nothing you built today is touched, and an
-// image an actually-running container uses is never a candidate in the first place.
-//
 // A systemd timer rather than cron: no extra package, it logs to the journal, and
 // Persistent=true means a server that was off at 03:00 still runs the clean-up
 // when it comes back.
+//
+// # Why `--filter until=` is gone from the build-cache pass
+//
+// It never did what its name suggests. BuildKit's `until` filters on LAST USED,
+// not on age, so `until=24h` means "cache nothing has touched in a day" — and on
+// a build server, which is the only kind of host this clean-up is for, nearly
+// every record is touched daily. The filter therefore spares almost the entire
+// cache, which is the opposite of the intent ("nothing you built today is
+// touched").
+//
+// Measured, not assumed. On a build host, with a cache whose records were all
+// CREATED more than 30s earlier but LAST USED under a second earlier:
+//
+//	docker buildx prune --filter until=30s   ->  reclaimed 0 B, every record survived
+//	docker buildx prune --filter until=1s    ->  reclaimed the lot
+//
+// Creation-time semantics would have emptied it in the first call. The same host
+// showed what that costs in practice: 95 GB of build cache and a 98%-full disk,
+// after this timer had been running nightly and exiting 0 for weeks. An
+// unfiltered `-af` on that cache reclaimed 93 GB.
+//
+// So the build-cache pass is now `-af`: all of it, every night. That is a real
+// trade and worth stating plainly — the morning's first build is cold. It is the
+// right side of the trade because build cache is the one thing here that is
+// purely derived: losing it costs time and nothing else, while the alternative
+// this host demonstrated is every workspace down at once on a full disk. A host
+// that wants the cache kept declines the whole clean-up with --no-docker-prune.
+//
+// # Why volumes are no longer "never"
+//
+// The old rule was "never volumes, that is where data lives", and the reasoning
+// behind it is sound — `docker system df` reports volumes as 100% reclaimable
+// whenever no container holds them, which is how a copy-pasted prune cron job
+// ends up eating a database. But it drew the line one notch too conservatively,
+// because Docker already draws a precise one: `docker volume prune` without `-a`
+// removes ONLY ANONYMOUS volumes.
+//
+// An anonymous volume is one nobody named. It cannot be the `compose down`-ed
+// stack whose data someone is coming back for, because compose volumes are
+// always named; it is what an image's `VOLUME` directive creates when a
+// container runs without an explicit mount. `docker run --rm` normally takes it
+// away again — but `--rm` is exactly what a SIGNALLED death skips (Ctrl-C, a CI
+// timeout, an OOM kill), and what is left then has no name, no label, and once
+// its container is gone, nothing to attribute it to.
+//
+// That is not a corner case; it was the single largest class on the host
+// measured. Of 204 dangling volumes holding 75 GB, 138 were anonymous ~40 MB
+// postgres data dirs from test runs that died on a signal.
+//
+// Named dangling volumes — build caches, node_modules trees, a `compose down`-ed
+// stack's data — stay untouched by default and move to the opt-in
+// `--docker-prune-volumes` tier, because that set genuinely can contain data
+// somebody wants back.
+//
+// # Why it now reports failure
+//
+// Every pass used to end in `|| true`, so the unit reported success whether it
+// had reclaimed 168 GB or nothing at all — which is how a clean-up that had
+// stopped working went unnoticed while the disk filled. A safeguard whose
+// success path is indistinguishable from its no-op path is not a safeguard, it
+// is a report. The script now measures the filesystem before and after, says
+// what it reclaimed, and exits non-zero when a pass failed or when the host is
+// still over pruneFullPct — the state where somebody needs to know.
 const dockerPruneSection = `echo "[forge] installing nightly docker clean-up (03:00) ..."
 cat > /usr/local/bin/forge-docker-prune <<'PRUNE'
 #!/bin/sh
-# Reclaim disk from Docker. Conservative on purpose — see prepare.go.
+# Reclaim disk from Docker. See prepare.go for why each pass is the shape it is.
 set -e
-echo "docker disk usage before:"
-docker system df 2>/dev/null || exit 0
+
+# Fail the run when the filesystem is still this full afterwards. The number is
+# not the point; making "there was nothing left to reclaim and we are nearly
+# full" a visible failure rather than a silent success is.
+FULL_PCT=__FULL_PCT__
+
+# A summary for humans, deliberately world-READABLE: the journal is root/adm-only
+# on a stock host, so without this a workspace user cannot check whether the
+# nightly clean-up is still working — which is how the broken one went unnoticed.
+LOG=/var/log/forge-docker-prune.log
+
+docker info >/dev/null 2>&1 || { echo "docker not available; nothing to clean"; exit 0; }
+
+root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)
+used_pct() { df --output=pcent "$root" | tail -1 | tr -dc '0-9'; }
+used_kb()  { df --output=used  "$root" | tail -1 | tr -dc '0-9'; }
+
+before_pct=$(used_pct)
+before_kb=$(used_kb)
+echo "docker disk usage before: ${before_pct}% on ${root}"
+docker system df
+
+# "|| failed=1" rather than "|| true": one pass failing must not abort the rest
+# under "set -e", but it must not be swallowed either.
+failed=0
 
 # Layer sets orphaned by a rebuild. NOT -a: that would delete tagged images no
 # container happens to be running, i.e. every idle workspace's images.
-docker image prune -f --filter until=24h || true
+docker image prune -f --filter until=24h || failed=1
 __IMAGE_PRUNE__
-# BuildKit cache. Usually the biggest win.
-docker builder prune -f --filter until=24h || true
+# BuildKit cache, all of it. No "until" filter: it measures LAST USED, so on a
+# build server it spares almost everything. See prepare.go.
+docker builder prune -af || failed=1
+__VOLUME_PRUNE__
 # Containers are NOT pruned: worth ~nothing next to the cache, and removing one
 # takes its writable layer with it, so a stack stopped for the night would have to
 # be re-created in the morning rather than just started.
-# Volumes are NOT pruned either. That is where data lives.
 
-echo "docker disk usage after:"
-docker system df 2>/dev/null || true
+after_pct=$(used_pct)
+after_kb=$(used_kb)
+echo "docker disk usage after: ${after_pct}% on ${root}"
+docker system df
+
+freed_mb=$(( (before_kb - after_kb) / 1024 ))
+summary="reclaimed ${freed_mb} MiB (${before_pct}% -> ${after_pct}% on ${root})"
+echo "$summary"
+
+# Best effort: a log we cannot write is not worth failing a reclaim over.
+{ printf '%s %s\n' "$(date -Is)" "$summary" >> "$LOG" && chmod 644 "$LOG"; } 2>/dev/null || true
+
+if [ "$failed" -ne 0 ]; then
+  echo "FAIL: a prune pass failed — see the output above." >&2
+  exit 1
+fi
+if [ "$after_pct" -ge "$FULL_PCT" ]; then
+  echo "FAIL: still ${after_pct}% used after reclaiming ${freed_mb} MiB." >&2
+  echo "Docker has no more to give: the space is either outside Docker, or in the" >&2
+  echo "images, containers and named volumes this clean-up does not touch." >&2
+  echo "Start with: docker system df -v" >&2
+  exit 1
+fi
 PRUNE
 chmod 0755 /usr/local/bin/forge-docker-prune
 
