@@ -270,7 +270,7 @@ func imagePruneLine(on bool) string {
 # only pass that reaps it. -a is safe here because an image any container holds —
 # running or merely stopped — is never a candidate.
 echo "[prune] unreferenced images older than ` + pruneImagesGrace + `:"
-docker image prune -a -f --filter until=` + pruneImagesGrace + ` || true`
+docker image prune -a -f --filter until=` + pruneImagesGrace + ` || failed=1`
 }
 
 // pruneFullPct is the disk-usage percentage at or above which the nightly
@@ -639,8 +639,18 @@ after_kb=$(used_kb)
 echo "docker disk usage after: ${after_pct}% on ${root}"
 docker system df
 
-freed_mb=$(( (before_kb - after_kb) / 1024 ))
-summary="reclaimed ${freed_mb} MiB (${before_pct}% -> ${after_pct}% on ${root})"
+# The delta can be NEGATIVE: this runs at 03:30 on a host where something else
+# may well be building, and that build can write more than the prune freed. That
+# is worth seeing rather than clamping to zero — "reclaimed 0 MiB" and "the disk
+# grew while we cleaned" are different situations and only one of them means the
+# clean-up has nothing left to give. So report it, in words that read correctly.
+delta_mb=$(( (before_kb - after_kb) / 1024 ))
+if [ "$delta_mb" -lt 0 ]; then
+  grew_mb=$(( -delta_mb ))
+  summary="grew ${grew_mb} MiB during the run, something else is writing (${before_pct}% -> ${after_pct}% on ${root})"
+else
+  summary="reclaimed ${delta_mb} MiB (${before_pct}% -> ${after_pct}% on ${root})"
+fi
 echo "$summary"
 
 # Best effort: a log we cannot write is not worth failing a reclaim over.
@@ -651,7 +661,7 @@ if [ "$failed" -ne 0 ]; then
   exit 1
 fi
 if [ "$after_pct" -ge "$FULL_PCT" ]; then
-  echo "FAIL: still ${after_pct}% used after reclaiming ${freed_mb} MiB." >&2
+  echo "FAIL: still ${after_pct}% used — ${summary}." >&2
   echo "Docker has no more to give: the space is either outside Docker, or in the" >&2
   echo "images, containers and named volumes this clean-up does not touch." >&2
   echo "Start with: docker system df -v" >&2

@@ -222,12 +222,25 @@ func TestBuildCachePruneIsUnfilteredAndComplete(t *testing.T) {
 //
 // So: no pass may swallow its own failure, and the script has to end by checking
 // what actually happened to the disk.
+// Every variant, not just the default one: the opt-in tiers inject their own
+// prune lines, and the first version of this gate checked only the default
+// script — which is exactly how the image sweep kept its `|| true` through a
+// change whose whole point was removing them.
 func TestDockerPruneReportsFailure(t *testing.T) {
 	script := prepareScriptWith(true)
 
-	for _, cmd := range dockerPruneCmds(script) {
-		if strings.Contains(cmd, "|| true") {
-			t.Errorf("a prune pass must not swallow its failure with `|| true`: %s", cmd)
+	for name, variant := range map[string]string{
+		"default":    script,
+		"images":     prepareScriptAggressive(),
+		"allvolumes": prepareScriptAllVolumes(),
+	} {
+		for _, cmd := range dockerPruneCmds(variant) {
+			if strings.Contains(cmd, "|| true") {
+				t.Errorf("[%s] a prune pass must not swallow its failure with `|| true`: %s", name, cmd)
+			}
+			if !strings.Contains(cmd, "|| failed=1") {
+				t.Errorf("[%s] a prune pass must record its failure with `|| failed=1`: %s", name, cmd)
+			}
 		}
 	}
 	// It measures the filesystem rather than trusting the commands, and turns

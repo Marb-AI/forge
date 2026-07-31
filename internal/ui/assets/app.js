@@ -2619,7 +2619,7 @@ wiz.name().addEventListener("keydown", (e) => { if (e.key === "Enter") submitWiz
 // can be on without it: untick and disable them whenever the clean-up is off. The
 // server rejects the combo too — this just keeps the contradiction unbuildable in
 // the UI.
-function syncPruneImages() {
+function syncPruneTiers() {
   const prune = document.getElementById("wiz-prune");
   for (const id of ["wiz-prune-images", "wiz-prune-volumes"]) {
     const tier = document.getElementById(id);
@@ -2627,7 +2627,7 @@ function syncPruneImages() {
     if (!prune.checked) tier.checked = false;
   }
 }
-document.getElementById("wiz-prune").addEventListener("change", syncPruneImages);
+document.getElementById("wiz-prune").addEventListener("change", syncPruneTiers);
 
 function isNewHost() { return wiz.host().value === NEW_HOST; }
 
@@ -2651,7 +2651,7 @@ async function openWizard() {
   // Opt-in, so it resets to off — the aggressive image sweep is never a default.
   document.getElementById("wiz-prune-images").checked = false;
   document.getElementById("wiz-prune-volumes").checked = false;
-  syncPruneImages();
+  syncPruneTiers();
   const log = document.getElementById("wiz-log");
   log.hidden = true;
   log.textContent = "";
