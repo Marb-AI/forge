@@ -14,9 +14,11 @@ func TestPrepareScriptSyntax(t *testing.T) {
 		name   string
 		script string
 	}{
-		{"apt-root-all", buildPrepareScript("apt-get", "iproute2", "openssh-client", "amd64", 22, "root", true, true, true, true, true)},
-		{"dnf-nonroot", buildPrepareScript("dnf", "iproute", "openssh-clients", "arm64", 2222, "deploy", false, true, true, true, false)},
-		{"yum-minimal", buildPrepareScript("yum", "iproute", "openssh-clients", "amd64", 22, "root", true, false, false, false, false)},
+		{"apt-root-all", buildPrepareScript("apt-get", "iproute2", "openssh-client", "amd64", 22, "root", true, true, true, true, true, true)},
+		// Clean-up on with neither opt-in tier: the default anonymous-only volume
+		// pass, which is the branch every prepared host actually gets.
+		{"dnf-nonroot", buildPrepareScript("dnf", "iproute", "openssh-clients", "arm64", 2222, "deploy", false, true, true, true, false, false)},
+		{"yum-minimal", buildPrepareScript("yum", "iproute", "openssh-clients", "amd64", 22, "root", true, false, false, false, false, false)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -52,7 +54,7 @@ func TestPrepareScriptSyntax(t *testing.T) {
 // break every repo and host the old public key is already registered on, and the
 // failure would surface much later as a permission-denied from GitHub.
 func TestPrepareKeyGenIsGuarded(t *testing.T) {
-	script := buildPrepareScript("apt-get", "iproute2", "openssh-client", "amd64", 22, "root", true, true, true, true, false)
+	script := buildPrepareScript("apt-get", "iproute2", "openssh-client", "amd64", 22, "root", true, true, true, true, false, false)
 
 	// The generating call must sit inside the `[ -f "$KEY" ]` else-branch.
 	idx := strings.Index(script, "ssh-keygen -q -t ed25519")

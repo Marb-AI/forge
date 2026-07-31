@@ -11,7 +11,7 @@ import (
 )
 
 type prepareArgs struct {
-	firewall, harden, prune, pruneImages, called bool
+	firewall, harden, prune, pruneImages, pruneVolumes, called bool
 }
 
 // prepareCapture builds a server whose PrepareHost records what it was asked for.
@@ -34,9 +34,9 @@ func prepareCapture(t *testing.T) (http.Handler, func() prepareArgs) {
 			DeleteWorkspace: func(string) error { return nil },
 			RemoveHost:      func(string) error { return nil },
 			SetUIPort:       func(int) error { return nil },
-			PrepareHost: func(_, _ string, firewall, harden, prune, pruneImages bool, _ io.Writer) error {
+			PrepareHost: func(_, _ string, firewall, harden, prune, pruneImages, pruneVolumes bool, _ io.Writer) error {
 				mu.Lock()
-				got = prepareArgs{firewall, harden, prune, pruneImages, true}
+				got = prepareArgs{firewall, harden, prune, pruneImages, pruneVolumes, true}
 				mu.Unlock()
 				return nil
 			},
@@ -87,6 +87,11 @@ func TestPrepareDefaultsToHardenedWhenFlagsAbsent(t *testing.T) {
 	if a.pruneImages {
 		t.Error("a request with no pruneImages field must NOT run the aggressive image sweep — it is opt-in")
 	}
+	// Same rule, higher stakes: the named-volume sweep takes a `compose down`-ed
+	// stack's data. A forgotten field must never be able to ask for it.
+	if a.pruneVolumes {
+		t.Error("a request with no pruneVolumes field must NOT sweep named volumes — it is opt-in")
+	}
 }
 
 // …and an explicit false must still be honoured, or the checkboxes are decoration.
@@ -115,6 +120,21 @@ func TestPrepareHonoursExplicitPruneImages(t *testing.T) {
 	}
 	if !a.pruneImages {
 		t.Error("pruneImages:true must be passed through to the provisioner")
+	}
+}
+
+// The named-volume sweep is opt-in too, and must reach the provisioner when asked
+// for — the checkbox that loses a database has to be the one the user ticked.
+func TestPrepareHonoursExplicitPruneVolumes(t *testing.T) {
+	h, got := prepareCapture(t)
+	postPrepare(t, h, `{"target":"root@1.2.3.4","alias":"box","pruneVolumes":true}`)
+
+	a := waitCalled(t, got)
+	if !a.called {
+		t.Fatal("PrepareHost was never called")
+	}
+	if !a.pruneVolumes {
+		t.Error("pruneVolumes:true must be passed through to the provisioner")
 	}
 }
 
