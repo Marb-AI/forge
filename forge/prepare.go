@@ -27,12 +27,24 @@ import (
 // It takes minutes and the progress is the point, so every line goes to out as it
 // happens. The CLI passes os.Stdout; the browser UI passes an SSE stream, so the
 // wizard shows the same long provisioning run live instead of a spinner.
-func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool, out io.Writer) error {
+//
+// jump is the route to the server, empty for one this machine can reach
+// directly. A server behind a bastion has to be reachable before it can be
+// provisioned, so the route is given here and kept with the host — the same
+// value `host add` takes, and the only way onto a private network.
+func PrepareHost(sshTarget, alias, jump string, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool, out io.Writer) error {
 	user, addr, port, err := config.ParseSSHTarget(sshTarget)
 	if err != nil {
 		return err
 	}
-	target := sshx.Target{User: user, Addr: addr, Port: port}
+	if _, err := sshx.ParseJump(jump); err != nil {
+		return err
+	}
+	// Built from the host as it will be recorded, rather than assembled here, so
+	// the route is read the one way the transport reads every route — a hop with
+	// no login named takes this server's.
+	host := &config.Host{Alias: alias, User: user, Addr: addr, Port: port, Jump: jump}
+	target := sshx.AdminTarget(host)
 
 	// Probe: arch, uid, package manager — in one round trip.
 	probe, err := target.Output(
@@ -97,7 +109,7 @@ func PrepareHost(sshTarget, alias string, firewall, harden, dockerPrune, pruneIm
 	//    takes minutes, and a config loaded before all that would be stale enough
 	//    to undo anything else written in the meantime.
 	if err := updateConfig(func(c *config.Config) error {
-		c.Hosts[alias] = &config.Host{Alias: alias, User: user, Addr: addr, Port: port}
+		c.Hosts[alias] = host
 		return nil
 	}); err != nil {
 		return err

@@ -34,7 +34,7 @@ func prepareCapture(t *testing.T) (http.Handler, func() prepareArgs) {
 			DeleteWorkspace: func(string) error { return nil },
 			RemoveHost:      func(string) error { return nil },
 			SetUIPort:       func(int) error { return nil },
-			PrepareHost: func(_, _ string, firewall, harden, prune, pruneImages, pruneVolumes bool, _ io.Writer) error {
+			PrepareHost: func(_, _, _ string, firewall, harden, prune, pruneImages, pruneVolumes bool, _ io.Writer) error {
 				mu.Lock()
 				got = prepareArgs{firewall, harden, prune, pruneImages, pruneVolumes, true}
 				mu.Unlock()

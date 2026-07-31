@@ -400,22 +400,67 @@ func dial(t Target) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The agent is only consulted while the handshake runs, and ssh.Dial does not
-	// return until that is over — so this is the moment its socket stops being
-	// needed. Leaving it open would cost one file descriptor per command, which a
-	// daemon polling every workspace notices within the day.
+	// The agent is only consulted while the handshakes run, and none of the dials
+	// below return until they are over — so this is the moment its socket stops
+	// being needed. Leaving it open would cost one file descriptor per command,
+	// which a daemon polling every workspace notices within the day.
 	defer closeAuth()
 	hostKeys, err := hostKeyCallback()
 	if err != nil {
 		return nil, err
 	}
-	port := t.Port
-	if port == 0 {
-		port = 22
+	hops, err := ParseJump(t.Jump)
+	if err != nil {
+		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
 	}
-	addr := net.JoinHostPort(t.Addr, strconv.Itoa(port))
 
-	client, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+	// The route, nearest hop first. Each is reached through the one before it, and
+	// the target through the last — which is all `ssh -J` is: a jump host opens a
+	// plain TCP stream to the next address and the handshake happens over it, so
+	// the server at the end sees an ordinary connection and its key is checked
+	// end to end. A jump host carries the bytes; it never reads them.
+	var chain []*ssh.Client
+	for _, hop := range hops {
+		client, err := connect(last(chain), hop, auth, hostKeys)
+		if err != nil {
+			closeChain(chain)
+			return nil, fmt.Errorf("ssh %s: via %s: %w", t.dest(), hop.via(), err)
+		}
+		// Keepalives on every hop, not only on the connection the caller holds. A
+		// hop that stops answering without dying would otherwise be noticed by
+		// nothing until something opened a channel on it — and opening that channel
+		// is exactly what the next dial does.
+		go keepalive(client)
+		chain = append(chain, client)
+	}
+
+	client, err := connect(last(chain), t, auth, hostKeys)
+	if err != nil {
+		closeChain(chain)
+		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
+	}
+	if len(chain) > 0 {
+		// The route has no life of its own: it exists to carry this connection, so
+		// it goes when the connection does, however it goes. That keeps one
+		// connection per command true — the caller closes what it was given and
+		// nothing is left behind it.
+		go func() {
+			client.Wait()
+			closeChain(chain)
+		}()
+	}
+	go keepalive(client)
+	return client, nil
+}
+
+// connect opens one connection: from this machine when through is nil, and
+// otherwise over a stream the connection already established carries.
+//
+// Both halves end in the same handshake against the same host-key check, which
+// is the point — a server reached through a jump is verified, and recorded on
+// first sight, exactly as one reached directly.
+func connect(through *ssh.Client, t Target, auth []ssh.AuthMethod, hostKeys ssh.HostKeyCallback) (*ssh.Client, error) {
+	cfg := &ssh.ClientConfig{
 		User:            t.User,
 		Auth:            auth,
 		HostKeyCallback: hostKeys,
@@ -425,19 +470,95 @@ func dial(t Target) (*ssh.Client, error) {
 		// touches that host waits it out, the browser UI's workspace list
 		// included.
 		Timeout: connectTimeout * time.Second,
-	})
+	}
+
+	// The stream the handshake runs over: a socket from this machine, or one the
+	// jump host opens on our behalf. From here the two are the same thing — which
+	// is the whole reason a jumped connection behaves like a direct one.
+	var (
+		stream net.Conn
+		err    error
+	)
+	if through == nil {
+		stream, err = net.DialTimeout("tcp", t.addr(), cfg.Timeout)
+	} else {
+		// No ErrAuth reading on this one, unlike the handshake below: the jump has
+		// already let us in by the time it is asked for a stream, so a refusal here
+		// is its forwarding policy or a server that is not listening — something
+		// that may well be different in a second, which is what a retry is for.
+		stream, err = through.Dial("tcp", t.addr())
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := handshake(stream, t.addr(), cfg)
 	if err != nil {
 		// A refused key is named as such, here rather than at one call site, so it
 		// means the same thing whichever shape of the transport ran into it. There
 		// is nothing typed to match on: x/crypto's handshake failure is a formatted
 		// string, so the wording is read once and turned into something that is not.
 		if authFailed(err.Error()) {
-			return nil, fmt.Errorf("ssh %s: %w: %w", t.dest(), ErrAuth, err)
+			return nil, fmt.Errorf("%w: %w", ErrAuth, err)
 		}
-		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
+		return nil, err
 	}
-	go keepalive(client)
 	return client, nil
+}
+
+// handshake turns a stream into a connection, and gives up on one that stops
+// moving.
+//
+// The bound is enforced by hand because there is nowhere else to put it:
+// ClientConfig.Timeout is applied by ssh.Dial to its own TCP connect and by
+// NewClientConn to nothing at all, so a server that accepts a connection and
+// then says nothing — a half-open firewall, a machine mid-reboot — leaves every
+// command that touches it waiting for a version string that never comes. A
+// deadline on the stream would do it for a socket, but not for the one a jump
+// host hands back ("ssh: tcpChan: deadline not supported"); closing it ends the
+// handshake either way, so that is what both get.
+func handshake(stream net.Conn, addr string, cfg *ssh.ClientConfig) (*ssh.Client, error) {
+	type opened struct {
+		conn  ssh.Conn
+		chans <-chan ssh.NewChannel
+		reqs  <-chan *ssh.Request
+		err   error
+	}
+	done := make(chan opened, 1)
+	go func() {
+		conn, chans, reqs, err := ssh.NewClientConn(stream, addr, cfg)
+		done <- opened{conn, chans, reqs, err}
+	}()
+
+	select {
+	case h := <-done:
+		if h.err != nil {
+			stream.Close()
+			return nil, h.err
+		}
+		return ssh.NewClient(h.conn, h.chans, h.reqs), nil
+	case <-time.After(cfg.Timeout):
+		// The goroutine is not left hanging: closing the stream fails the
+		// handshake, which closes it in turn and sends to a buffered channel.
+		stream.Close()
+		return nil, fmt.Errorf("no answer within %s", cfg.Timeout)
+	}
+}
+
+// last is the connection the next hop is opened over — nil for the first, which
+// is dialled from this machine.
+func last(chain []*ssh.Client) *ssh.Client {
+	if len(chain) == 0 {
+		return nil
+	}
+	return chain[len(chain)-1]
+}
+
+// closeChain takes a route down, furthest hop first.
+func closeChain(chain []*ssh.Client) {
+	for i := len(chain) - 1; i >= 0; i-- {
+		chain[i].Close()
+	}
 }
 
 // Keepalives, matching the exec'd backend's ServerAliveInterval=5 and

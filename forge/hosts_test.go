@@ -13,7 +13,7 @@ import (
 //
 // The config it writes is the throwaway one this package's TestMain installs.
 func TestAddHostListAndRemove(t *testing.T) {
-	host, err := AddHost("root@1.2.3.4", "srv-add-test")
+	host, err := AddHost("root@1.2.3.4", "srv-add-test", "")
 	if err != nil {
 		t.Fatalf("AddHost: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestAddHostListAndRemove(t *testing.T) {
 	// against a config loaded earlier, two adds of one alias would both pass and
 	// the second would silently replace the first — a server you think you
 	// registered, pointing somewhere else.
-	if _, err := AddHost("root@5.6.7.8", "srv-add-test"); err == nil {
+	if _, err := AddHost("root@5.6.7.8", "srv-add-test", ""); err == nil {
 		t.Error("adding an alias twice should be refused")
 	}
 	cfg, err := loadConfig()
@@ -37,7 +37,7 @@ func TestAddHostListAndRemove(t *testing.T) {
 		t.Errorf("the refused add overwrote the original: %+v", got)
 	}
 
-	if _, err := AddHost("root@1.2.3.4:ssh", "bad-port"); err == nil {
+	if _, err := AddHost("root@1.2.3.4:ssh", "bad-port", ""); err == nil {
 		t.Error("an unparseable ssh target should be refused")
 	}
 
@@ -77,4 +77,31 @@ func containsAlias(hosts []*config.Host, alias string) bool {
 		}
 	}
 	return false
+}
+
+// A host behind a bastion carries its route with it, and the route is checked
+// while there is still someone at a keyboard to correct it — the alternative is
+// a connection failure, minutes or days later, that mentions nothing about a
+// jump.
+func TestAddHostKeepsAndChecksTheRouteToTheServer(t *testing.T) {
+	host, err := AddHost("root@10.0.0.5", "srv-jump-test", "admin@bastion.example.com:2222")
+	if err != nil {
+		t.Fatalf("AddHost: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveHost("srv-jump-test") })
+	if host.Jump != "admin@bastion.example.com:2222" {
+		t.Errorf("added %+v, want the route recorded as given", host)
+	}
+
+	if _, err := AddHost("root@10.0.0.6", "srv-badjump-test", "one,,two"); err == nil {
+		t.Error("a route that cannot be read should be refused")
+		_ = RemoveHost("srv-badjump-test")
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := cfg.Hosts["srv-badjump-test"]; exists {
+		t.Error("the host was registered anyway, with a route nothing can follow")
+	}
 }
