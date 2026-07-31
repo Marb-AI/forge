@@ -239,13 +239,21 @@ func TestAJumpThatNeverAnswersIsGivenUpOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer silent.Close()
+	// Accepted and then left alone, deliberately — but each one is closed when the
+	// test ends rather than deferred inside the loop, where the defers would pile
+	// up unrun until the goroutine returned.
+	over := make(chan struct{})
+	defer close(over)
 	go func() {
 		for {
 			conn, err := silent.Accept()
 			if err != nil {
-				return
+				return // listener closed: the test is over
 			}
-			defer conn.Close()
+			go func() {
+				<-over
+				conn.Close()
+			}()
 		}
 	}()
 	trust(t, target)
