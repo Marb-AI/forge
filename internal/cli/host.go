@@ -33,7 +33,7 @@ func hostCmd(args []string) int {
 // itself to the core, which streams its progress to stdout.
 func hostPrepare(args []string) int {
 	alias, rest := extractFlag(args, "alias")
-	jump, rest := extractFlag(rest, "jump")
+	jump, jumpGiven, rest := extractFlagSet(rest, "jump")
 	noFirewall := hasBoolFlag(rest, "--no-firewall")
 	noHarden := hasBoolFlag(rest, "--no-ssh-harden")
 	noPrune := hasBoolFlag(rest, "--no-docker-prune")
@@ -55,7 +55,14 @@ func hostPrepare(args []string) int {
 	if len(rest) < 1 || alias == "" {
 		return fail("usage: forge host prepare <ssh-target> --alias=<alias> [--jump=<[user@]host[:port],...>] [--no-firewall] [--no-ssh-harden] [--no-docker-prune] [--docker-prune-images] [--docker-prune-volumes]")
 	}
-	if err := forge.PrepareHost(rest[0], alias, jump, !noFirewall, !noHarden, !noPrune, pruneImages, pruneVolumes, os.Stdout); err != nil {
+	// Absent means "keep the route this host is already recorded with", which is
+	// what re-running prepare on a host behind a bastion has to mean — see
+	// forge.PrepareHost.
+	var route *string
+	if jumpGiven {
+		route = &jump
+	}
+	if err := forge.PrepareHost(rest[0], alias, route, !noFirewall, !noHarden, !noPrune, pruneImages, pruneVolumes, os.Stdout); err != nil {
 		return fail("%v", err)
 	}
 	return 0

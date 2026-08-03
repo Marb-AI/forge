@@ -28,6 +28,35 @@ func TestExtractFlag(t *testing.T) {
 	}
 }
 
+// A flag that was typed as empty and a flag that was not typed are different
+// answers, for the one flag where they mean different things: `--jump=` clears a
+// host's route, no --jump at all keeps the recorded one.
+func TestExtractFlagSetSaysWhetherItWasThere(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		wantVal   string
+		wantGiven bool
+	}{
+		{"absent", []string{"target"}, "", false},
+		{"equals form, empty", []string{"target", "--jump="}, "", true},
+		{"equals form", []string{"target", "--jump=bastion"}, "bastion", true},
+		{"space form", []string{"--jump", "bastion", "target"}, "bastion", true},
+		{"single dash equals, empty", []string{"target", "-jump="}, "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			val, given, rest := extractFlagSet(c.args, "jump")
+			if val != c.wantVal || given != c.wantGiven {
+				t.Fatalf("extractFlagSet(%v) = (%q,%v), want (%q,%v)", c.args, val, given, c.wantVal, c.wantGiven)
+			}
+			if !reflect.DeepEqual(rest, []string{"target"}) {
+				t.Fatalf("the positional did not survive: %v", rest)
+			}
+		})
+	}
+}
+
 func TestHasBoolFlag(t *testing.T) {
 	if !hasBoolFlag([]string{"-A", "x"}, "-A", "--agent") {
 		t.Error("expected -A found")

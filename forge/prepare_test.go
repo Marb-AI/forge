@@ -124,3 +124,45 @@ func TestIproutePackage(t *testing.T) {
 		t.Error("expected apk unsupported")
 	}
 }
+
+// Provisioning is idempotent and therefore re-run — for a new agent, or a fixed
+// nightly clean-up — and a re-run rewrites the host's record. A route that was
+// recorded once must survive that, or a host behind a bastion becomes
+// unreachable the moment someone prepares it again without remembering the flag.
+func TestPreparingAgainKeepsTheRouteUnlessItIsGivenOne(t *testing.T) {
+	if _, err := AddHost("root@10.0.0.5", "srv-route-test", "admin@bastion"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = RemoveHost("srv-route-test") })
+
+	for _, c := range []struct {
+		name  string
+		alias string
+		jump  *string
+		want  string
+	}{
+		{"not given, host on record", "srv-route-test", nil, "admin@bastion"},
+		{"not given, host is new", "srv-brand-new", nil, ""},
+		{"given", "srv-route-test", strptr("two@2.2.2.2"), "two@2.2.2.2"},
+		// The only way to say "this one is reachable directly now": without it, a
+		// route could be set and never taken back.
+		{"given as empty", "srv-route-test", strptr(""), ""},
+	} {
+		got, err := routeFor(c.alias, c.jump)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s: routeFor = %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	// And a route that cannot be read is still refused before anything is
+	// provisioned, exactly as it is at `host add`.
+	if _, err := routeFor("srv-route-test", strptr("one,,two")); err == nil {
+		t.Error("an unreadable route was accepted")
+	}
+}
+
+func strptr(s string) *string { return &s }

@@ -145,8 +145,9 @@ type Deps struct {
 	// PrepareHost provisions a bare server and registers it. It takes minutes and
 	// its progress is the point, so it writes every line to out (an SSE stream).
 	// jump is the route to the server (ssh's -J syntax), empty when it can be
-	// reached directly.
-	PrepareHost func(sshTarget, alias, jump string, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool, out io.Writer) error
+	// reached directly and nil to keep whatever route the host is already
+	// recorded with — see forge.PrepareHost.
+	PrepareHost func(sshTarget, alias string, jump *string, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool, out io.Writer) error
 	// DeleteWorkspace destroys a workspace on its host. IRREVERSIBLE: the agent
 	// runs `userdel -r`, so the workspace user and every file in its home are gone.
 	DeleteWorkspace func(name string) error

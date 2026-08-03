@@ -32,18 +32,26 @@ import (
 // directly. A server behind a bastion has to be reachable before it can be
 // provisioned, so the route is given here and kept with the host — the same
 // value `host add` takes, and the only way onto a private network.
-func PrepareHost(sshTarget, alias, jump string, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool, out io.Writer) error {
+//
+// It is a pointer because "not given" and "given as empty" are different
+// answers, and this command is re-run: provisioning is idempotent, so a host
+// gets prepared again to pick up a new agent or a fixed clean-up, and a flag
+// nobody typed must not silently drop the route that has been recorded all
+// along. Nil keeps what is on record, a value replaces it, and an empty value
+// clears it — the only way to say "this host is reachable directly now".
+func PrepareHost(sshTarget, alias string, jump *string, firewall, harden, dockerPrune, pruneImages, pruneVolumes bool, out io.Writer) error {
 	user, addr, port, err := config.ParseSSHTarget(sshTarget)
 	if err != nil {
 		return err
 	}
-	if _, err := sshx.ParseJump(jump); err != nil {
+	route, err := routeFor(alias, jump)
+	if err != nil {
 		return err
 	}
 	// Built from the host as it will be recorded, rather than assembled here, so
 	// the route is read the one way the transport reads every route — a hop with
 	// no login named takes this server's.
-	host := &config.Host{Alias: alias, User: user, Addr: addr, Port: port, Jump: jump}
+	host := &config.Host{Alias: alias, User: user, Addr: addr, Port: port, Jump: route}
 	target := sshx.AdminTarget(host)
 
 	// Probe: arch, uid, package manager — in one round trip.
@@ -123,6 +131,31 @@ func PrepareHost(sshTarget, alias, jump string, firewall, harden, dockerPrune, p
 	fmt.Fprintf(out, "    forge host gh-login %s\n", alias)
 	fmt.Fprintf(out, "\n  next: forge workspace create <name> %s\n", alias)
 	return nil
+}
+
+// routeFor settles which route a prepare uses: the one given, or the one already
+// recorded for this alias when none was.
+//
+// Reading the config here rather than in the front ends is what makes the rule
+// one rule. A CLI that looked the old route up and passed it along would leave
+// the browser's wizard — which sends whatever is in a text field — free to erase
+// a route by leaving it blank, and the two would disagree about what an absent
+// answer means.
+func routeFor(alias string, jump *string) (string, error) {
+	if jump == nil {
+		cfg, err := loadConfig()
+		if err != nil {
+			return "", err
+		}
+		if h := cfg.Hosts[alias]; h != nil {
+			return h.Jump, nil
+		}
+		return "", nil
+	}
+	if _, err := sshx.ParseJump(*jump); err != nil {
+		return "", err
+	}
+	return *jump, nil
 }
 
 // hostKeyDir holds the host-wide git identity: one key per server, copied into
