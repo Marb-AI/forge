@@ -312,7 +312,6 @@ type OK struct {
 	OK bool `json:"ok"`
 }
 
-// ErrorResult is printed (and the process exits non-zero) on failure.
 // VersionResult is what `forge-agent version` answers: which build of Forge
 // installed this agent. The client carries the agent it uploads, so this is the
 // version of the client that last prepared the server — the answer to "is the
@@ -321,6 +320,7 @@ type VersionResult struct {
 	Version string `json:"version"`
 }
 
+// ErrorResult is printed (and the process exits non-zero) on failure.
 type ErrorResult struct {
 	Error string `json:"error"`
 }

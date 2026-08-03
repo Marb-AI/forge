@@ -175,7 +175,7 @@ func AgentVersion(alias string) (string, error) {
 	}
 	h := cfg.Hosts[alias]
 	if h == nil {
-		return "", fmt.Errorf("unknown host %q", alias)
+		return "", fmt.Errorf("no such host %q (see: forge host list)", alias)
 	}
 	var res agentproto.VersionResult
 	if err := callAgent(h, &res, "version"); err != nil {
