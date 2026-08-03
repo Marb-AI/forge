@@ -32,6 +32,10 @@ func TestMainRouting(t *testing.T) {
 		{[]string{"ui", "status"}, 0},         // not running
 		{[]string{"show", "ports"}, 0},        // no hosts
 		{[]string{"host", "list"}, 0},         // no hosts
+		{[]string{"version"}, 0},              // this client's build
+		{[]string{"--version"}, 0},            // the spelling people try first
+		{[]string{"-v"}, 0},
+		{[]string{"version", "nope"}, 1}, // a host nobody registered
 	}
 	for _, c := range cases {
 		if got := Main(c.args); got != c.want {

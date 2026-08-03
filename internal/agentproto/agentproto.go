@@ -313,6 +313,14 @@ type OK struct {
 }
 
 // ErrorResult is printed (and the process exits non-zero) on failure.
+// VersionResult is what `forge-agent version` answers: which build of Forge
+// installed this agent. The client carries the agent it uploads, so this is the
+// version of the client that last prepared the server — the answer to "is the
+// far end older than the thing asking".
+type VersionResult struct {
+	Version string `json:"version"`
+}
+
 type ErrorResult struct {
 	Error string `json:"error"`
 }

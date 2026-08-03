@@ -59,6 +59,7 @@ Ports:
 
 Info:
   forge show ports [host]                        listening + forwarded ports
+  forge version [host-alias]                     which build this is (and the agent's, on a host)
 `
 
 // Main is the CLI entrypoint. It returns a process exit code.
@@ -86,6 +87,8 @@ func Main(args []string) int {
 		return runSupervisor()
 	case forge.RunUIArg: // hidden: the detached UI daemon re-execs itself with this
 		return runUI()
+	case "version", "--version", "-v":
+		return versionCmd(args[1:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return 0
@@ -131,6 +134,23 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// versionCmd prints this client's build, and — when a host is named — the build
+// that installed the agent on it. Two answers rather than one because they can
+// differ: the agent is uploaded by `host prepare`, so a server keeps whatever
+// the client that last prepared it carried until someone prepares it again.
+func versionCmd(args []string) int {
+	fmt.Printf("forge %s\n", forge.Version())
+	if len(args) == 0 {
+		return 0
+	}
+	agent, err := forge.AgentVersion(args[0])
+	if err != nil {
+		return fail("%v", err)
+	}
+	fmt.Printf("agent on %s %s\n", args[0], agent)
+	return 0
 }
 
 // extractFlag pulls a --name=value / --name value (or single-dash) flag out of

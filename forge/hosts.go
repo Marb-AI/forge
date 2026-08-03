@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"github.com/Marb-AI/forge/config"
+	"github.com/Marb-AI/forge/internal/agentproto"
 	"github.com/Marb-AI/forge/internal/sshx"
+	"github.com/Marb-AI/forge/internal/version"
 )
 
 // AddHost registers a server this client has already prepared (or that was
@@ -149,4 +152,37 @@ func RemoveHost(alias string) error {
 		}
 		return nil
 	})
+}
+
+// Version is the build this client is, for a front end that wants to show it.
+//
+// It comes through the core like everything else a front end needs: the CLI is
+// an adapter over these operations and names no package but this one, and the
+// browser will want the same string in the same words.
+func Version() string { return version.String() }
+
+// AgentVersion asks a host which build of Forge installed the agent on it.
+//
+// The client carries the agent it uploads, so the answer is the version of the
+// client that last prepared that server — which is the question you have when a
+// feature is missing and you are trying to work out which end is behind. An
+// agent too old to have this verb says so in those words, because "unknown op"
+// is the answer and it is not a useful one on its own.
+func AgentVersion(alias string) (string, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return "", err
+	}
+	h := cfg.Hosts[alias]
+	if h == nil {
+		return "", fmt.Errorf("unknown host %q", alias)
+	}
+	var res agentproto.VersionResult
+	if err := callAgent(h, &res, "version"); err != nil {
+		if strings.Contains(err.Error(), "unknown op") {
+			return "", fmt.Errorf("the agent on %q predates `forge-agent version` — re-run `forge host prepare` to replace it", alias)
+		}
+		return "", err
+	}
+	return res.Version, nil
 }
