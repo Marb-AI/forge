@@ -194,6 +194,9 @@ forge spawn >/dev/null 2>&1
 Hosts
   forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune]
                                                   provision a bare server + register it
+  forge host update [alias]                       put this client's agent on the host(s)
+                                                  — a copy, not a provision; install.sh
+                                                  does it for you on every upgrade
   forge host add <ssh-target> --alias=<alias>     register an already-prepared server
        [--jump=<[user@]host[:port],...>]          reach it through these servers (both commands;
                                                   prepare keeps a recorded route when re-run

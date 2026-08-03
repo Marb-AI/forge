@@ -27,6 +27,7 @@ Hosts:
                                                   [--docker-prune-images] [--docker-prune-volumes]
   forge host add <ssh-target> --alias=<alias>   register an already-prepared server
                                                 [--jump=<[user@]host[:port],...>]
+  forge host update [alias]                     put this client's agent on the host(s)
   forge host gh-login <alias>                   authenticate gh once for the whole host
   forge host list
   forge host remove <alias>
@@ -50,7 +51,7 @@ Forwarding:
 UI:
   forge ui [start]                               start the local browser UI + open it
   forge ui stop
-  forge ui status
+  forge ui status [-q]                           -q: nothing printed, exit 0 when it runs
   forge ui port <port>                           set the UI's localhost port
 
 Ports:
