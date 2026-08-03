@@ -22,6 +22,7 @@ const usage = `forge — remote Claude Code workspace manager
 Hosts:
   forge host prepare <ssh-target> --alias=<alias>  provision a bare server + register it
                                                   [--jump=<[user@]host[:port],...>] reach it through these servers
+                                                  (kept as recorded when re-run without it; --jump= clears it)
                                                   [--no-firewall] [--no-ssh-harden] [--no-docker-prune]
                                                   [--docker-prune-images] [--docker-prune-volumes]
   forge host add <ssh-target> --alias=<alias>   register an already-prepared server
@@ -138,23 +139,32 @@ func contains(ss []string, s string) bool {
 // args. Unlike the stdlib flag package this tolerates flags placed after
 // positionals, so `host add root@host --alias=x` works.
 func extractFlag(args []string, name string) (value string, rest []string) {
+	value, _, rest = extractFlagSet(args, name)
+	return value, rest
+}
+
+// extractFlagSet is the same, for a flag whose absence means something other
+// than its empty value: `--jump=` clears a host's route, while no --jump at all
+// keeps the one already recorded (see forge.PrepareHost).
+func extractFlagSet(args []string, name string) (value string, given bool, rest []string) {
 	rest = make([]string, 0, len(args))
 	long, short := "--"+name, "-"+name
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == long || a == short:
+			given = true
 			if i+1 < len(args) {
 				value = args[i+1]
 				i++
 			}
 		case strings.HasPrefix(a, long+"="):
-			value = a[len(long)+1:]
+			value, given = a[len(long)+1:], true
 		case strings.HasPrefix(a, short+"="):
-			value = a[len(short)+1:]
+			value, given = a[len(short)+1:], true
 		default:
 			rest = append(rest, a)
 		}
 	}
-	return value, rest
+	return value, given, rest
 }

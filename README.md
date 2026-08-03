@@ -195,7 +195,9 @@ Hosts
   forge host prepare <ssh-target> --alias=<alias> [--no-firewall] [--no-ssh-harden] [--no-docker-prune]
                                                   provision a bare server + register it
   forge host add <ssh-target> --alias=<alias>     register an already-prepared server
-       [--jump=<[user@]host[:port],...>]          reach it through these servers (both commands)
+       [--jump=<[user@]host[:port],...>]          reach it through these servers (both commands;
+                                                  prepare keeps a recorded route when re-run
+                                                  without it, and --jump= clears it)
   forge host list
   forge host remove <alias>
 

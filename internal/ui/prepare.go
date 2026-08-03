@@ -19,13 +19,13 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 	// a forgotten field should be able to produce, so absent means the safe
 	// default: on.
 	var req struct {
-		Target      string `json:"target"`
-		Alias       string `json:"alias"`
-		Jump        string `json:"jump"`
-		Firewall    *bool  `json:"firewall"`
-		Harden      *bool  `json:"harden"`
-		DockerPrune *bool  `json:"dockerPrune"`
-		PruneImages *bool  `json:"pruneImages"`
+		Target      string  `json:"target"`
+		Alias       string  `json:"alias"`
+		Jump        *string `json:"jump"`
+		Firewall    *bool   `json:"firewall"`
+		Harden      *bool   `json:"harden"`
+		DockerPrune *bool   `json:"dockerPrune"`
+		PruneImages *bool   `json:"pruneImages"`
 		// Opt-in like PruneImages, and for a stronger reason: it widens the volume
 		// pass to NAMED volumes, which is where a `compose down`-ed stack's data is.
 		PruneVolumes *bool `json:"pruneVolumes"`
@@ -35,7 +35,13 @@ func (s *server) handlePrepareHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Target, req.Alias = strings.TrimSpace(req.Target), strings.TrimSpace(req.Alias)
-	req.Jump = strings.TrimSpace(req.Jump)
+	// A pointer for the same reason the three below are: absent is not the same
+	// answer as empty. Re-preparing a host without saying anything about its route
+	// keeps the one on record; sending "" clears it.
+	if req.Jump != nil {
+		trimmed := strings.TrimSpace(*req.Jump)
+		req.Jump = &trimmed
+	}
 	if req.Target == "" {
 		writeJSONError(w, http.StatusBadRequest, fmt.Errorf("ssh target required, e.g. root@1.2.3.4"))
 		return

@@ -12,6 +12,7 @@ import (
 
 type prepareArgs struct {
 	firewall, harden, prune, pruneImages, pruneVolumes, called bool
+	jump                                                       *string
 }
 
 // prepareCapture builds a server whose PrepareHost records what it was asked for.
@@ -34,9 +35,9 @@ func prepareCapture(t *testing.T) (http.Handler, func() prepareArgs) {
 			DeleteWorkspace: func(string) error { return nil },
 			RemoveHost:      func(string) error { return nil },
 			SetUIPort:       func(int) error { return nil },
-			PrepareHost: func(_, _, _ string, firewall, harden, prune, pruneImages, pruneVolumes bool, _ io.Writer) error {
+			PrepareHost: func(_, _ string, jump *string, firewall, harden, prune, pruneImages, pruneVolumes bool, _ io.Writer) error {
 				mu.Lock()
-				got = prepareArgs{firewall, harden, prune, pruneImages, pruneVolumes, true}
+				got = prepareArgs{firewall, harden, prune, pruneImages, pruneVolumes, true, jump}
 				mu.Unlock()
 				return nil
 			},
@@ -172,3 +173,34 @@ func waitCalled(t *testing.T, got func() prepareArgs) prepareArgs {
 	}
 	return got()
 }
+
+// A route left out of the request is not a route set to nothing. Preparing a
+// host again — for a new agent, or a fixed clean-up — must not erase the bastion
+// it is reached through just because the field was not sent.
+func TestAnAbsentJumpIsNotAnEmptyOne(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body string
+		want *string
+	}{
+		{"absent", `{"target":"root@1.2.3.4","alias":"srv"}`, nil},
+		{"empty", `{"target":"root@1.2.3.4","alias":"srv","jump":""}`, ptr("")},
+		{"given", `{"target":"root@10.0.0.5","alias":"srv","jump":" admin@bastion "}`, ptr("admin@bastion")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, read := prepareCapture(t)
+			postPrepare(t, h, c.body)
+			got := waitCalled(t, read)
+			switch {
+			case c.want == nil && got.jump != nil:
+				t.Errorf("jump = %q, want it left alone", *got.jump)
+			case c.want != nil && got.jump == nil:
+				t.Errorf("jump = nil, want %q", *c.want)
+			case c.want != nil && *got.jump != *c.want:
+				t.Errorf("jump = %q, want %q", *got.jump, *c.want)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
