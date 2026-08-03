@@ -91,6 +91,7 @@ fi
 
 # --- done ------------------------------------------------------------------
 echo
+echo "forge: installed $("$TARGET" version 2>/dev/null || echo "$VERSION")"
 echo "forge: done. Config lives in $FORGE_HOME (created on first use)."
 if [ -n "$LINK" ] && command -v "$BIN" >/dev/null 2>&1; then
 	echo "forge: run 'forge help' to get started."

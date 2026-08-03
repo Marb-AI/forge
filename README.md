@@ -232,6 +232,9 @@ Ports
   forge ports assign [name]                        give a block to workspaces without one
 
 Info
+  forge version [host-alias]                      which build this client is — and,
+                                                  with a host named, the build that
+                                                  installed the agent on it
   forge show ports [host]                          ports in use on the server
 ```
 
