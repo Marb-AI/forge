@@ -11,13 +11,15 @@ import (
 
 func hostCmd(args []string) int {
 	if len(args) == 0 {
-		return fail("usage: forge host <add|prepare|gh-login|list|remove>")
+		return fail("usage: forge host <add|prepare|update|gh-login|list|remove>")
 	}
 	switch args[0] {
 	case "add":
 		return hostAdd(args[1:])
 	case "prepare":
 		return hostPrepare(args[1:])
+	case "update":
+		return hostUpdate(args[1:])
 	case "gh-login":
 		return hostGhLogin(args[1:])
 	case "list", "ls":
@@ -95,6 +97,59 @@ func hostAdd(args []string) int {
 	}
 	fmt.Printf("added host %q -> %s\n", host.Alias, hostRoute(host.User, host.Addr, host.Port, host.Jump))
 	return 0
+}
+
+// hostUpdate puts this client's agent on the hosts that are not running it. No
+// argument means every registered host, as `forge ports assign` does.
+func hostUpdate(args []string) int {
+	var (
+		ups []forge.AgentUpdate
+		err error
+	)
+	if len(args) > 0 {
+		var u forge.AgentUpdate
+		u, err = forge.UpdateAgent(args[0])
+		ups = []forge.AgentUpdate{u}
+	} else {
+		ups, err = forge.UpdateAgents()
+	}
+	if err != nil {
+		return fail("%v", err)
+	}
+	if len(ups) == 0 {
+		fmt.Println("no hosts registered")
+		return 0
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	failed := 0
+	for _, u := range ups {
+		switch {
+		case u.Err != nil:
+			failed++
+			fmt.Fprintf(w, "%s\t%v\n", u.Host, u.Err)
+		case u.Changed:
+			fmt.Fprintf(w, "%s\t%s -> %s\n", u.Host, was(u.Was), u.Now)
+		default:
+			fmt.Fprintf(w, "%s\talready %s\n", u.Host, u.Now)
+		}
+	}
+	if code := flush(w); code != 0 {
+		return code
+	}
+	if failed > 0 {
+		return 1
+	}
+	return 0
+}
+
+// was names what a host was running, for the one that could not say: the version
+// verb arrived in v0.10.0, so silence means older than that (or no agent at all).
+func was(v string) string {
+	if v == "" {
+		return "an agent too old to say"
+	}
+	return v
 }
 
 func hostList() int {
