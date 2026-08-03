@@ -24,6 +24,9 @@ func uiCmd(args []string) int {
 	case "stop":
 		return uiStop()
 	case "status":
+		if hasBoolFlag(args[1:], "-q", "--quiet") {
+			return uiRunning()
+		}
 		return uiStatus()
 	case "port":
 		return uiSetPort(rest)
@@ -57,6 +60,19 @@ func uiStop() int {
 		return 0
 	}
 	fmt.Println("forge ui stopped")
+	return 0
+}
+
+// uiRunning is `forge ui status -q`: nothing on stdout, the answer in the exit
+// code, the way `systemctl is-active -q` gives it. It exists for scripts — the
+// installer stops the daemons it finds running and starts those same ones again
+// afterwards — because the alternative is grepping a sentence written for a
+// human, which is a sentence nobody may then reword.
+func uiRunning() int {
+	d, err := forge.UIStatus()
+	if err != nil || !d.Running {
+		return 1
+	}
 	return 0
 }
 

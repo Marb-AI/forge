@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -25,19 +26,25 @@ type scripted struct {
 	// server that is off looks like from up here.
 	fail map[string]error
 	// reply matches on a substring of the command line; the first hit wins.
-	reply []struct {
-		match string
-		out   string
-		err   error
-	}
+	reply []reply
+}
+
+type reply struct {
+	match string
+	out   string
+	err   error
+	once  bool
+	used  bool
 }
 
 func (s *scripted) answer(match, out string, err error) {
-	s.reply = append(s.reply, struct {
-		match string
-		out   string
-		err   error
-	}{match, out, err})
+	s.reply = append(s.reply, reply{match: match, out: out, err: err})
+}
+
+// answerOnce answers the next matching command and then steps aside, so a test
+// can say "this is what it said before, and this is what it says after".
+func (s *scripted) answerOnce(match, out string, err error) {
+	s.reply = append(s.reply, reply{match: match, out: out, err: err, once: true})
 }
 
 func (s *scripted) Name() string { return "scripted" }
@@ -56,13 +63,18 @@ func (s *scripted) Run(t sshx.Target, c sshx.Command) error {
 		s.stdin = append(s.stdin, string(data))
 		s.mu.Unlock()
 	}
-	for _, r := range s.reply {
-		if strings.Contains(line, r.match) {
-			if r.out != "" && c.Stdout != nil {
-				io.WriteString(c.Stdout, r.out)
-			}
-			return r.err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.reply {
+		r := &s.reply[i]
+		if !strings.Contains(line, r.match) || (r.once && r.used) {
+			continue
 		}
+		r.used = true
+		if r.out != "" && c.Stdout != nil {
+			io.WriteString(c.Stdout, r.out)
+		}
+		return r.err
 	}
 	return nil
 }
@@ -73,6 +85,18 @@ func (s *scripted) Open(sshx.Target, sshx.Shell) (sshx.Terminal, error) {
 
 func (s *scripted) Forward(sshx.Target, int, int) (sshx.Tunnel, error) {
 	return nil, errors.New("this backend carries no ports")
+}
+
+// matched reports whether any command matches re.
+func (s *scripted) matched(re *regexp.Regexp) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, line := range s.ran {
+		if re.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }
 
 // did reports whether any command carried needle.
@@ -131,7 +155,10 @@ func TestUpdatingAHostThatIsAlreadyCurrentUploadsNothing(t *testing.T) {
 // writing, and the agent runs on every poll the UI makes.
 func TestUpdatingAHostThatIsBehindReplacesTheAgentByRename(t *testing.T) {
 	s := useScripted(t)
-	s.answer("forge-agent version", `{"version":"v0.0.1 (old)"}`, nil)
+	// Old before the swap, this build after it: the scripted answers change in
+	// the order they are asked, which is what the operation is checking too.
+	s.answerOnce("forge-agent version", `{"version":"v0.0.1 (old)"}`, nil)
+	s.answer("forge-agent version", fmt.Sprintf(`{"version":%q}`, version.String()), nil)
 	s.answer("uname -m", "x86_64\n", nil)
 	if _, err := AddHost("root@1.2.3.4", "srv-behind-test", ""); err != nil {
 		t.Fatal(err)
@@ -142,14 +169,27 @@ func TestUpdatingAHostThatIsBehindReplacesTheAgentByRename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if u.Err != nil {
+		t.Fatal(u.Err)
+	}
+	if u.Now != version.String() {
+		t.Errorf("Now = %q, want what the host reported after the swap", u.Now)
+	}
 	if !u.Changed || u.Was != "v0.0.1 (old)" {
 		t.Errorf("update = %+v, want a change away from the old build", u)
 	}
-	if !s.did("cat > " + agentUpload) {
+	if !s.did("cat > /tmp/forge-agent.") {
 		t.Errorf("nothing was uploaded: %v", s.ran)
 	}
-	if !s.did("mv " + agentPath + ".new " + agentPath) {
-		t.Errorf("the binary was not renamed into place: %v", s.ran)
+	// Renamed into place from a staging name of this run's own — never a fixed
+	// one, which two clients updating the same host would fight over.
+	staged := regexp.MustCompile(`mv ` + agentPath + `\.[0-9a-f]{12} ` + agentPath + `\b`)
+	if !s.matched(staged) {
+		t.Errorf("the binary was not renamed into place from a per-run staging file: %v", s.ran)
+	}
+	// And nothing of ours is left behind, whichever way the install went.
+	if !s.did("rm -f /tmp/forge-agent.") {
+		t.Errorf("the upload was not cleaned up: %v", s.ran)
 	}
 	// The upload must be the agent itself, not an empty stream.
 	if len(s.stdin) == 0 || !strings.Contains(s.stdin[0], "echo agent") {
@@ -168,7 +208,8 @@ func TestUpdatingAHostThatIsBehindReplacesTheAgentByRename(t *testing.T) {
 // is behind.
 func TestAnAgentTooOldToNameItselfIsReplaced(t *testing.T) {
 	s := useScripted(t)
-	s.answer("forge-agent version", `{"error":"unknown op \"version\""}`, errors.New("exit 1"))
+	s.answerOnce("forge-agent version", `{"error":"unknown op \"version\""}`, errors.New("exit 1"))
+	s.answer("forge-agent version", fmt.Sprintf(`{"version":%q}`, version.String()), nil)
 	s.answer("uname -m", "aarch64\n", nil)
 	if _, err := AddHost("root@1.2.3.4", "srv-ancient-test", ""); err != nil {
 		t.Fatal(err)

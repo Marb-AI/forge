@@ -49,10 +49,34 @@ else
 	echo "forge: need curl or wget" >&2; exit 1
 fi
 
+# --- stop what is running, with the build that started it ------------------
+# Before the swap, and with the OLD binary, deliberately. It is not about the
+# file being busy — the rename below handles that — it is that a daemon should
+# be stopped by its own build: stopping reads a pidfile and sends a signal, and
+# a future release that changes either would leave a new binary unable to stop
+# an old daemon, which then keeps the port and nothing can start.
+#
+# Only what is actually running is noted, so nothing that was deliberately down
+# gets started at the end.
+UI_WAS_UP=no
+FWD_WAS_UP=no
+TARGET="$INSTALL_DIR/$BIN"
+if [ -x "$TARGET" ]; then
+	"$TARGET" ui status -q 2>/dev/null && UI_WAS_UP=yes
+	"$TARGET" forwarding status -q 2>/dev/null && FWD_WAS_UP=yes
+	if [ "$UI_WAS_UP" = yes ]; then
+		echo "forge: stopping the running UI"
+		"$TARGET" ui stop >/dev/null 2>&1 || true
+	fi
+	if [ "$FWD_WAS_UP" = yes ]; then
+		echo "forge: stopping the forwarding supervisor"
+		"$TARGET" forwarding stop >/dev/null 2>&1 || true
+	fi
+fi
+
 # --- download --------------------------------------------------------------
 echo "forge: installing $VERSION for $OS/$ARCH"
 mkdir -p "$INSTALL_DIR"
-TARGET="$INSTALL_DIR/$BIN"
 # Downloaded beside the target and renamed onto it, never written over it: this
 # is an upgrade as often as an install, and a binary that is executing cannot be
 # opened for writing (ETXTBSY) — which is exactly what a running `forge ui`
@@ -115,6 +139,22 @@ if [ -f "$FORGE_HOME/config.json" ] && [ -z "${FORGE_SKIP_AGENT_UPDATE:-}" ]; th
 	echo "forge: updating the agent on the servers this machine knows"
 	echo "       (skip with FORGE_SKIP_AGENT_UPDATE=1)"
 	"$TARGET" host update || echo "forge: some hosts were not updated — run 'forge host update' when they are back"
+
+	# A workspace made before port blocks existed has none, and one is given here
+	# rather than by hand. Idempotent: a workspace that has a block keeps it, and
+	# after the first run this does nothing at all.
+	"$TARGET" ports assign >/dev/null 2>&1 || true
+fi
+
+# --- start again what was running ------------------------------------------
+# The new build, and only the daemons that were up before it.
+if [ "$UI_WAS_UP" = yes ]; then
+	echo "forge: starting the UI again"
+	"$TARGET" ui start >/dev/null 2>&1 || echo "forge: the UI did not come back — start it with 'forge ui'"
+fi
+if [ "$FWD_WAS_UP" = yes ]; then
+	echo "forge: starting the forwarding supervisor again"
+	"$TARGET" forwarding start >/dev/null 2>&1 || echo "forge: forwarding did not come back — start it with 'forge forwarding start'"
 fi
 
 echo "forge: done. Config lives in $FORGE_HOME (created on first use)."

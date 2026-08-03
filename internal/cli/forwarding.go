@@ -18,6 +18,9 @@ func forwardingCmd(args []string) int {
 	case "stop":
 		return forwardingStop()
 	case "status", "st":
+		if hasBoolFlag(args[1:], "-q", "--quiet") {
+			return forwardingRunning()
+		}
 		return forwardingStatus()
 	default:
 		return fail("unknown forwarding command %q", args[0])
@@ -42,6 +45,15 @@ func forwardingStop() int {
 		return 0
 	}
 	fmt.Println("forwarding stopped")
+	return 0
+}
+
+// forwardingRunning is `forge forwarding status -q` — see uiRunning.
+func forwardingRunning() int {
+	f, err := forge.ForwardingStatus()
+	if err != nil || !f.Running {
+		return 1
+	}
 	return 0
 }
 

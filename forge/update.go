@@ -1,6 +1,8 @@
 package forge
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sort"
@@ -37,8 +39,25 @@ import (
 // provisioning script, which puts it there.
 const agentPath = "/usr/local/bin/forge-agent"
 
-// agentUpload is where the new binary lands before it is moved into place.
-const agentUpload = "/tmp/forge-agent.new"
+// uploadPaths are where one run's binary lands and where it is staged before the
+// rename, both tagged with a token of this run's own.
+//
+// Fixed names would be a race with teeth: two clients updating the same host —
+// a second laptop, or an install.sh running while somebody types the command —
+// share /tmp, and one run truncating the file another has just finished
+// uploading ends with a half a binary installed as the agent. The token costs
+// nothing and the window closes.
+//
+// The staging path sits in the agent's own directory because the last step is a
+// rename, and a rename is only atomic within one filesystem.
+func uploadPaths() (upload, staging string, err error) {
+	var token [6]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", "", fmt.Errorf("cannot name a temporary file: %w", err)
+	}
+	tag := hex.EncodeToString(token[:])
+	return "/tmp/forge-agent." + tag, agentPath + "." + tag, nil
+}
 
 // AgentUpdate is what happened to one host.
 type AgentUpdate struct {
@@ -46,7 +65,10 @@ type AgentUpdate struct {
 	// Was is the build the host was running, empty when it was too old to say
 	// (the version verb arrived in v0.10.0) or had no agent at all.
 	Was string
-	// Now is what it runs after this, read back from the host rather than assumed.
+	// Now is what it runs after this — read back from the host, never the build
+	// this client hoped to put there. The two are the same thing when this
+	// worked, and when they are not, that difference is the whole point of
+	// asking.
 	Now string
 	// Changed is false for a host that was already running this build — the
 	// common case, and the reason this is cheap to run routinely.
@@ -98,7 +120,11 @@ func UpdateAgents() ([]AgentUpdate, error) {
 
 // updateAgentOn is the whole of it, for one host.
 func updateAgentOn(h *config.Host) AgentUpdate {
-	u := AgentUpdate{Host: h.Alias, Now: version.String()}
+	u := AgentUpdate{Host: h.Alias}
+	// What this client would put there, kept apart from what the host says it is
+	// running: one is an intention and the other is a fact, and this whole
+	// operation exists because they drift.
+	want := version.String()
 
 	// Ask first. A host already running this build is the common case once the
 	// installer does this on every upgrade, and skipping it turns "make sure they
@@ -110,7 +136,8 @@ func updateAgentOn(h *config.Host) AgentUpdate {
 	var res agentproto.VersionResult
 	if err := callAgent(h, &res, "version"); err == nil {
 		u.Was = res.Version
-		if res.Version == u.Now {
+		if res.Version == want {
+			u.Now = res.Version
 			return u
 		}
 	}
@@ -128,22 +155,34 @@ func updateAgentOn(h *config.Host) AgentUpdate {
 	}
 	defer closeSrc()
 
-	if err := target.Pipe(src, io.Discard, io.Discard, "cat > "+agentUpload); err != nil {
-		u.Err = fmt.Errorf("upload failed: %w", err)
-		return u
-	}
-	if err := installAgent(h, target); err != nil {
+	upload, staging, err := uploadPaths()
+	if err != nil {
 		u.Err = err
 		return u
 	}
-
-	// Read back what is there now rather than reporting what we sent. They are
-	// the same thing when this worked, and when they are not, that is the one
-	// fact worth having.
-	if err := callAgent(h, &res, "version"); err == nil {
-		u.Now = res.Version
+	if err := target.Pipe(src, io.Discard, io.Discard, "cat > "+upload); err != nil {
+		u.Err = fmt.Errorf("upload failed: %w", err)
+		return u
+	}
+	if err := installAgent(h, target, upload, staging); err != nil {
+		u.Err = err
+		return u
 	}
 	u.Changed = true
+
+	// Ask again, and treat silence as failure. This is not bookkeeping: the
+	// answer is the only evidence that what was installed is a binary this
+	// machine can actually run — a truncated upload or the wrong architecture
+	// looks exactly like a successful copy right up until something needs the
+	// agent.
+	if err := callAgent(h, &res, "version"); err != nil {
+		u.Err = fmt.Errorf("%s was replaced but cannot say which build it is now: %w", agentPath, err)
+		return u
+	}
+	u.Now = res.Version
+	if u.Now != want {
+		u.Err = fmt.Errorf("%s reports %s after being replaced with %s", agentPath, u.Now, want)
+	}
 	return u
 }
 
@@ -154,10 +193,11 @@ func updateAgentOn(h *config.Host) AgentUpdate {
 // the agent is invoked by every poll the UI makes, so "nothing is running right
 // now" is not something to rely on. A rename is atomic and leaves whatever was
 // mid-flight running on the old inode until it exits.
-func installAgent(h *config.Host, target sshx.Target) error {
-	staging := agentPath + ".new"
-	script := fmt.Sprintf("install -m 0755 %s %s && mv %s %s && rm -f %s",
-		agentUpload, staging, staging, agentPath, agentUpload)
+func installAgent(h *config.Host, target sshx.Target, upload, staging string) error {
+	// The cleanup runs whichever way it went: a run that failed half way leaves
+	// no binary of ours in /tmp or beside the agent.
+	script := fmt.Sprintf("install -m 0755 %s %s && mv %s %s; rc=$?; rm -f %s %s; exit $rc",
+		upload, staging, staging, agentPath, upload, staging)
 
 	remote := []string{"sh", "-c", "'" + script + "'"}
 	if h.User != "root" {

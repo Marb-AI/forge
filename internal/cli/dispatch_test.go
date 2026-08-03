@@ -30,10 +30,14 @@ func TestMainRouting(t *testing.T) {
 		{[]string{"workspace", "list"}, 0},    // no workspaces registered
 		{[]string{"forwarding", "status"}, 0}, // no supervisor
 		{[]string{"ui", "status"}, 0},         // not running
-		{[]string{"show", "ports"}, 0},        // no hosts
-		{[]string{"host", "list"}, 0},         // no hosts
-		{[]string{"version"}, 0},              // this client's build
-		{[]string{"--version"}, 0},            // the spelling people try first
+		// -q says the same thing in the exit code and nothing on stdout, which is
+		// what the installer reads to know which daemons to start again.
+		{[]string{"ui", "status", "-q"}, 1},
+		{[]string{"forwarding", "status", "-q"}, 1},
+		{[]string{"show", "ports"}, 0}, // no hosts
+		{[]string{"host", "list"}, 0},  // no hosts
+		{[]string{"version"}, 0},       // this client's build
+		{[]string{"--version"}, 0},     // the spelling people try first
 		{[]string{"-v"}, 0},
 		{[]string{"version", "nope"}, 1}, // a host nobody registered
 	}
