@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/Marb-AI/forge/config"
 )
 
 // TestPrepareScriptSyntax validates the generated provisioning script parses as
@@ -158,10 +160,22 @@ func TestPreparingAgainKeepsTheRouteUnlessItIsGivenOne(t *testing.T) {
 		}
 	}
 
-	// And a route that cannot be read is still refused before anything is
-	// provisioned, exactly as it is at `host add`.
+	// And a route that cannot be read is refused before anything is provisioned,
+	// exactly as it is at `host add` — whether it was typed now…
 	if _, err := routeFor("srv-route-test", strptr("one,,two")); err == nil {
 		t.Error("an unreadable route was accepted")
+	}
+	// …or has been sitting in the config since someone edited it by hand. Nobody
+	// has looked at that one since it was written, and this is the last moment
+	// where the answer is "fix this line" rather than "the host did not answer".
+	if err := updateConfig(func(c *config.Config) error {
+		c.Hosts["srv-route-test"].Jump = "one,,two"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := routeFor("srv-route-test", nil); err == nil {
+		t.Error("an unreadable route already on record was accepted")
 	}
 }
 

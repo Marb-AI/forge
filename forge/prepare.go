@@ -142,20 +142,30 @@ func PrepareHost(sshTarget, alias string, jump *string, firewall, harden, docker
 // a route by leaving it blank, and the two would disagree about what an absent
 // answer means.
 func routeFor(alias string, jump *string) (string, error) {
-	if jump == nil {
+	route := ""
+	switch {
+	case jump != nil:
+		route = *jump
+	default:
 		cfg, err := loadConfig()
 		if err != nil {
 			return "", err
 		}
 		if h := cfg.Hosts[alias]; h != nil {
-			return h.Jump, nil
+			route = h.Jump
 		}
-		return "", nil
 	}
-	if _, err := sshx.ParseJump(*jump); err != nil {
+	// Checked whichever way it arrived. A route that was typed just now and one
+	// that has been on record since some older Forge wrote it are equally worth
+	// reading before a connection is built out of it — the recorded one goes
+	// through here without anyone having looked at it since, and a config edited
+	// by hand is the case that makes that a real difference. Cheap, and it is the
+	// last moment where the answer is "fix this line" rather than "the host did
+	// not answer".
+	if _, err := sshx.ParseJump(route); err != nil {
 		return "", err
 	}
-	return *jump, nil
+	return route, nil
 }
 
 // hostKeyDir holds the host-wide git identity: one key per server, copied into
