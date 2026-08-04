@@ -169,3 +169,40 @@ func TestParseJumpRefusesWhatCannotBeARoute(t *testing.T) {
 		t.Errorf("ParseJump(\"  \") = %v, %v; want no hops and no error", hops, err)
 	}
 }
+
+// Every argv this package builds carries the device key, because the workspaces
+// Forge makes admit that key and nothing else — an ssh offering ~/.ssh would be
+// turned away from a workspace this very client had just created.
+//
+// IdentitiesOnly with it: -i only ADDS to what ssh would try, so without it a
+// running agent still gets first refusal and the key that matters may never be
+// offered at all.
+func TestEveryInteractiveArgvCarriesTheDeviceKey(t *testing.T) {
+	useIdentityPath(t, "/state/id.pem")
+
+	tgt := Target{User: "crm", Addr: "h", Port: 22}
+	for name, args := range map[string][]string{
+		"Args":             tgt.Args("id"),
+		"TTYArgs":          tgt.TTYArgs("bash"),
+		"LocalForwardArgs": tgt.LocalForwardArgs(3050, 3000),
+	} {
+		got := joined(args)
+		if !strings.Contains(got, "-i /state/id.pem") {
+			t.Errorf("%s offers no identity: %s", name, got)
+		}
+		if !strings.Contains(got, "IdentitiesOnly=yes") {
+			t.Errorf("%s lets ssh offer other keys as well: %s", name, got)
+		}
+	}
+}
+
+// A device whose key is somewhere a path cannot describe — a Keychain, a chip —
+// gets no -i, and nothing breaks: there is no ssh binary on such a device for
+// the argv to reach.
+func TestNoIdentityFileMeansNoArgumentForIt(t *testing.T) {
+	useIdentitySeam(t, nil, nil)
+
+	if got := joined(Target{User: "u", Addr: "h"}.Args("id")); strings.Contains(got, "-i ") {
+		t.Errorf("argv names a key file this device does not have: %s", got)
+	}
+}

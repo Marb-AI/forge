@@ -322,12 +322,28 @@ func useIdentity(t *testing.T, key []byte) {
 // the test that started it.
 func useIdentityFn(t *testing.T, key func() ([]byte, error)) {
 	t.Helper()
+	useIdentitySeam(t, key, nil)
+}
+
+// useIdentityPath is the other half: the key as a file, for the argv tests. It
+// leaves the material unset, which is what a device that only ever execs ssh
+// would look like.
+func useIdentityPath(t *testing.T, path string) {
+	t.Helper()
+	useIdentitySeam(t, nil, func() (string, error) { return path, nil })
+}
+
+// useIdentitySeam swaps both halves for one test and puts both back, under the
+// lock that guards them — they are one setting and a test must not be able to
+// leave them describing different keys either.
+func useIdentitySeam(t *testing.T, key func() ([]byte, error), path func() (string, error)) {
+	t.Helper()
 	identityMu.Lock()
-	prev := identityFn
+	prevKey, prevPath := identityFn, identityPath
 	identityMu.Unlock()
 
-	IdentityFrom(key)
-	t.Cleanup(func() { IdentityFrom(prev) })
+	IdentityFrom(key, path)
+	t.Cleanup(func() { IdentityFrom(prevKey, prevPath) })
 }
 
 // trust records the server's host key in ~/.ssh/known_hosts, where this backend

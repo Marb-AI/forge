@@ -70,6 +70,15 @@ func NewFileStore(dir string) *FileStore { return &FileStore{dir: dir} }
 // one of them.
 func (s *FileStore) path() string { return filepath.Join(s.dir, "id.pem") }
 
+// Path is that, for the one caller that needs a file rather than bytes: the ssh
+// binary, which takes -i and cannot be handed a key any other way.
+//
+// Deliberately not on Store. A store that keeps the key in a Keychain, or on a
+// chip it never leaves, has no path to give — and the only thing that wants one
+// is a command line, which exists only where there is a filesystem to run it on.
+// Whoever needs it asks whether the store has it.
+func (s *FileStore) Path() string { return s.path() }
+
 // Create generates an Ed25519 key. Ed25519 because it is the modern default
 // everywhere Forge connects and the keys are short enough to paste; the eventual
 // hardware-backed key will be P-256 instead, because Secure Enclave does not do
