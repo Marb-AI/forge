@@ -183,7 +183,12 @@ button:hover { background: var(--bg-3); }
    width on the value instead of on a label. */
 #ws-ident {
   display: block;
-  padding: 0 10px 6px;
+  /* The same box as the topic above it, top and bottom alike. It was 0 at the top
+     so the two blocks would sit tight together — but they are separated by a rule,
+     so what that bought was a first line touching it, with 6px of air under the
+     last. And with no topic to sit under (a workspace whose Claude has not written
+     one yet) this is the first thing in the pane, hard against its edge. */
+  padding: 6px 10px;
   background: var(--bg-2);
   border-bottom: 1px solid var(--border);
   min-width: 0;
