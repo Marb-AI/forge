@@ -19,6 +19,9 @@ import (
 
 const usage = `forge — remote Claude Code workspace manager
 
+Setup:
+  forge setup                                    give this device its key, and show it
+
 Hosts:
   forge host prepare <ssh-target> --alias=<alias>  provision a bare server + register it
                                                   [--jump=<[user@]host[:port],...>] reach it through these servers
@@ -73,6 +76,8 @@ func Main(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "setup":
+		return setupCmd()
 	case "host":
 		return hostCmd(args[1:])
 	case "workspace", "ws":
