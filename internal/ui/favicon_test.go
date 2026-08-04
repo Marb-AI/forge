@@ -97,6 +97,14 @@ func TestTheAppIconIsTheSameAnvil(t *testing.T) {
 		t.Fatal("build/icon.py has no ANVIL to compare against")
 	}
 	rendered := points(list)
+	// Same floor as the favicon side. Without it a list this test can no longer
+	// read — reformatted, or written some other way — reports as the two marks
+	// having drifted apart, which sends whoever reads it to the wrong file.
+	if len(rendered) < 3 {
+		t.Fatalf("read %d points out of build/icon.py's ANVIL %q — that is this test "+
+			"failing to read the list, not the two marks disagreeing",
+			len(rendered), list)
+	}
 
 	if !slices.Equal(drawn, rendered) {
 		t.Errorf("the tab and the Dock would show different marks:\n"+

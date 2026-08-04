@@ -28,10 +28,10 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 echo "  icon"
-ICONSET=$(mktemp -d)/Forge.iconset
-python3 "$(dirname "$0")/icon.py" "$ICONSET" >/dev/null
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Forge.icns"
-rm -rf "$ICONSET"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT INT TERM
+python3 "$(dirname "$0")/icon.py" "$WORK/Forge.iconset" >/dev/null
+iconutil -c icns "$WORK/Forge.iconset" -o "$APP/Contents/Resources/Forge.icns"
 
 # Both slices, then one binary of the two: a .app is downloaded once and run on
 # whatever the machine is, and a user who gets the wrong one has no way to tell
@@ -80,9 +80,20 @@ printf 'APPL????' >"$APP/Contents/PkgInfo"
 # Developer ID — Gatekeeper still stops a downloaded copy, and the way past it is
 # right-click → Open — but an unsigned bundle is refused outright on Apple
 # silicon, so this is the difference between "warns" and "cannot run at all".
+#
+# The timestamp is the difference between the two, not a detail: an ad-hoc
+# signature has no certificate to date, so asking for one is a call to Apple's
+# server that buys nothing and fails on a machine that is offline. A Developer ID
+# signature without one cannot be notarised at all, and stops verifying the day
+# the certificate expires rather than staying good for what it signed.
 IDENTITY=${CODESIGN_IDENTITY:--}
+if [ "$IDENTITY" = "-" ]; then
+	STAMP=--timestamp=none
+else
+	STAMP=--timestamp
+fi
 echo "  codesign ($IDENTITY)"
-codesign --force --sign "$IDENTITY" --options runtime --timestamp=none "$APP"
+codesign --force --sign "$IDENTITY" --options runtime "$STAMP" "$APP"
 codesign --verify --strict "$APP"
 
 echo "$APP"
