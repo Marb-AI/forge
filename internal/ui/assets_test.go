@@ -244,3 +244,33 @@ func TestReconnectBackoffCannotStampede(t *testing.T) {
 		t.Error("the backoff should reset when a byte actually arrives, not on attach")
 	}
 }
+
+// paddingOf finds the padding a selector is given in the stylesheet. Comments are
+// stripped first, for the reason zIndexOf explains.
+func paddingOf(t *testing.T, css, selector string) string {
+	t.Helper()
+	css = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	rule := regexp.MustCompile(`(?s)` + regexp.QuoteMeta(selector) + `\s*\{(.*?)\}`)
+	m := rule.FindStringSubmatch(css)
+	if m == nil {
+		t.Fatalf("%s has no rule in app.css", selector)
+	}
+	pad := regexp.MustCompile(`padding:\s*([^;]+);`).FindStringSubmatch(m[1])
+	if pad == nil {
+		t.Fatalf("%s sets no padding", selector)
+	}
+	return strings.TrimSpace(pad[1])
+}
+
+// The topic and the identity under it are two halves of one corner of the pane,
+// and they only read as one if they sit in the same box. The identity's top
+// padding was 0, which put its first line against the rule above it — and, for a
+// workspace with no topic yet, against the top edge of the pane itself.
+func TestTheIdentityBlockSitsInTheSameBoxAsTheTopic(t *testing.T) {
+	css := embeddedAsset(t, "app.css")
+	topic, ident := paddingOf(t, css, "#ws-topic"), paddingOf(t, css, "#ws-ident")
+	if topic != ident {
+		t.Errorf("#ws-topic has padding %q and #ws-ident %q — the two stack, so a "+
+			"difference shows as one of them hugging the rule between them", topic, ident)
+	}
+}
