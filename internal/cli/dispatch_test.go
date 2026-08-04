@@ -125,3 +125,34 @@ func funcBody(t *testing.T, file, name string) string {
 	t.Fatalf("%s has no func %s", file, name)
 	return ""
 }
+
+// The installer stops these daemons to swap the binary under them, and starts
+// back the ones that were up. Everything that can fail — the download above all
+// — has to happen BEFORE it stops anything: a failed fetch after the stop leaves
+// the UI and the tunnels down, and the next run, finding nothing up, starts
+// nothing back. One 404 cost exactly that.
+//
+// Read from here because these are this package's commands: `forge ui stop` and
+// `forge forwarding start` are what the script is holding.
+func TestTheInstallerFetchesBeforeItStopsAnything(t *testing.T) {
+	script, err := os.ReadFile("../../install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(needle string) int {
+		i := strings.Index(string(script), needle)
+		if i < 0 {
+			t.Fatalf("install.sh no longer contains %q", needle)
+		}
+		return i
+	}
+	fetch, stop, swap, start := at(`fetch "$URL"`), at(`ui stop`), at(`mv -f "$NEW"`), at(`ui start`)
+
+	if !(fetch < stop) {
+		t.Error("install.sh stops the daemons before it fetches — a download that fails " +
+			"then leaves them stopped, and the next run starts nothing back")
+	}
+	if !(stop < swap && swap < start) {
+		t.Errorf("install.sh must stop, then swap, then start (%d, %d, %d)", stop, swap, start)
+	}
+}

@@ -49,18 +49,57 @@ else
 	echo "forge: need curl or wget" >&2; exit 1
 fi
 
+# --- fetch, before anything is disturbed ------------------------------------
+# Everything that can fail lives here, and nothing is running differently because
+# of it yet: a bad tag, an asset GitHub has not published, a dropped connection.
+# This used to come after the daemons were stopped, which meant a failed download
+# left them stopped — and the next run, finding nothing up, started nothing back.
+# One 404 that way costs a working UI and a set of port tunnels.
+echo "forge: installing $VERSION for $OS/$ARCH"
+mkdir -p "$INSTALL_DIR"
+TARGET="$INSTALL_DIR/$BIN"
+# Fetched beside the target and renamed onto it further down, never written over
+# it: this is an upgrade as often as an install, and a binary that is executing
+# cannot be opened for writing (ETXTBSY) — which is exactly what a running
+# `forge ui` daemon is. A rename is atomic and leaves the running one on its old
+# inode.
+NEW="$TARGET.new.$$"
+# Whatever happens between here and the rename, the staged file goes with it:
+# a failed fetch, a chmod that could not, a signal from a ^C halfway through a
+# 19MB download. One trap rather than a cleanup per step, so a step added here
+# later cannot forget. After the rename there is nothing at this path to remove.
+trap 'rm -f "$NEW"' EXIT INT TERM
+
+if ! fetch "$URL" "$NEW"; then
+	echo "forge: download failed ($URL)" >&2
+	echo "       (a private repo needs a public release, or fetch the asset manually)" >&2
+	exit 1
+fi
+if ! chmod +x "$NEW"; then
+	echo "forge: cannot make $NEW executable — check the permissions on $INSTALL_DIR" >&2
+	exit 1
+fi
+
+# macOS: a cross-compiled Go binary carries a linker ad-hoc signature that Apple
+# Silicon (AMFI) can reject, killing the process with "killed: 9". Re-signing it
+# locally with codesign (present on every Mac) produces a signature AMFI accepts.
+# Signed before it is put in place, so what lands is already runnable.
+if [ "$OS" = darwin ] && command -v codesign >/dev/null 2>&1; then
+	codesign --force --sign - "$NEW" >/dev/null 2>&1 && echo "forge: re-signed for macOS"
+fi
+
 # --- stop what is running, with the build that started it ------------------
-# Before the swap, and with the OLD binary, deliberately. It is not about the
-# file being busy — the rename below handles that — it is that a daemon should
-# be stopped by its own build: stopping reads a pidfile and sends a signal, and
-# a future release that changes either would leave a new binary unable to stop
-# an old daemon, which then keeps the port and nothing can start.
+# Only now, with the new binary already on disk. Stopped with the OLD one,
+# deliberately: it is not about the file being busy — the rename below handles
+# that — it is that a daemon should be stopped by its own build, since stopping
+# reads a pidfile and sends a signal, and a release that changed either would
+# leave a new binary unable to stop an old daemon, which then keeps the port
+# while nothing can start.
 #
 # Only what is actually running is noted, so nothing that was deliberately down
 # gets started at the end.
 UI_WAS_UP=no
 FWD_WAS_UP=no
-TARGET="$INSTALL_DIR/$BIN"
 if [ -x "$TARGET" ]; then
 	"$TARGET" ui status -q 2>/dev/null && UI_WAS_UP=yes
 	"$TARGET" forwarding status -q 2>/dev/null && FWD_WAS_UP=yes
@@ -74,30 +113,9 @@ if [ -x "$TARGET" ]; then
 	fi
 fi
 
-# --- download --------------------------------------------------------------
-echo "forge: installing $VERSION for $OS/$ARCH"
-mkdir -p "$INSTALL_DIR"
-# Downloaded beside the target and renamed onto it, never written over it: this
-# is an upgrade as often as an install, and a binary that is executing cannot be
-# opened for writing (ETXTBSY) — which is exactly what a running `forge ui`
-# daemon is. A rename is atomic and leaves the running one on its old inode.
-NEW="$TARGET.new.$$"
-if ! fetch "$URL" "$NEW"; then
-	rm -f "$NEW"
-	echo "forge: download failed ($URL)" >&2
-	echo "       (a private repo needs a public release, or fetch the asset manually)" >&2
-	exit 1
-fi
-chmod +x "$NEW"
+# --- put it in place -------------------------------------------------------
 mv -f "$NEW" "$TARGET"
 echo "forge: binary -> $TARGET"
-
-# macOS: a cross-compiled Go binary carries a linker ad-hoc signature that Apple
-# Silicon (AMFI) can reject, killing the process with "killed: 9". Re-signing it
-# locally with codesign (present on every Mac) produces a signature AMFI accepts.
-if [ "$OS" = darwin ] && command -v codesign >/dev/null 2>&1; then
-	codesign --force --sign - "$TARGET" >/dev/null 2>&1 && echo "forge: re-signed for macOS"
-fi
 
 # --- symlink onto PATH -----------------------------------------------------
 LINK="$LINK_DIR/$BIN"
