@@ -34,6 +34,32 @@ func TestLoginPanelGroupsByAccountAndDoesNotSumWindows(t *testing.T) {
 	}
 }
 
+// The panel is ordered by name, and by nothing that moves. It used to lead with
+// the login closest to a limit, which sounds right and reads badly: those figures
+// change while you work, so the rows swap under you and every glance costs a
+// re-read. Urgency is carried by the figure and by the colour it turns, neither of
+// which moves a row.
+func TestTheClaudePanelIsOrderedByName(t *testing.T) {
+	body := jsFunc(t, embeddedAsset(t, "app.js"), "loginGroups")
+
+	// The groups' own sort, named exactly: this function sorts twice, and the other
+	// one puts a group's workspace names in order for the tooltip. A looser match
+	// finds that one first and passes while the panel reorders itself.
+	sortCall := regexp.MustCompile(`\[\.\.\.groups\.values\(\)\]\.sort\(([^;]*)\);`).FindStringSubmatch(body)
+	if sortCall == nil {
+		t.Fatal("nothing decides the order of the login groups")
+	}
+	if !strings.Contains(sortCall[1], "localeCompare") {
+		t.Errorf("the logins are ordered by %q, which is not their names", sortCall[1])
+	}
+	for _, moving := range []string{"Pressure", "used_percent", "five", "seven", "ts"} {
+		if strings.Contains(sortCall[1], moving) {
+			t.Errorf("the logins are ordered by %q — %q changes while you work, so the "+
+				"rows swap under you", sortCall[1], moving)
+		}
+	}
+}
+
 // The context window is a property of one session, so it belongs with the other
 // per-workspace facts at the top of the pane and nowhere else. A context figure in
 // the login panel would be a number about nothing: several workspaces on one login
@@ -115,27 +141,6 @@ func TestLoginPanelDoesNotDrawBarsForWindowsThatDoNotExist(t *testing.T) {
 	// Flat by construction: no meters, so three logins cost three lines.
 	if strings.Contains(body, "meterRow(") {
 		t.Error("the login panel should not draw meters — it is one line per login")
-	}
-}
-
-// The panel is ordered by name — see TestTheClaudePanelIsOrderedByName, which
-// holds the rule. It used to lead with the login closest to a limit, which sounds
-// right and reads badly: those figures move while you work, and a list that
-// reorders itself has to be re-read every time you glance at it. Urgency is
-// carried by the figure and by the colour it turns, neither of which moves a row.
-func TestLoginGroupsKeepEveryWorkspaceOfALoginTogether(t *testing.T) {
-	js := embeddedAsset(t, "app.js")
-	groups := jsFunc(t, js, "loginGroups")
-
-	// Keyed by account, so the same person in two organisations is two rows and one
-	// person on six workspaces is one.
-	if !strings.Contains(groups, "account.uuid") {
-		t.Error("groups should be keyed by the account, not by the workspace")
-	}
-	// The windows come from the freshest sample rather than being reconciled: they
-	// are one number reported many times.
-	if !strings.Contains(groups, "> g.ts") {
-		t.Error("the freshest sample should speak for the group's windows")
 	}
 }
 
