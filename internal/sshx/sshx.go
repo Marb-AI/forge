@@ -197,18 +197,15 @@ func (t Target) TTYArgs(remote ...string) []string {
 	return args
 }
 
-// ttyArgs is the argv for a Shell — the same interactive argv, plus the one
-// option a front end's terminal can ask for by itself.
+// ttyArgs is the argv for a Shell: the interactive argv and nothing else.
 //
-// -A goes first, before the options and the destination, because that is where
-// the workspace shell has always put it: the argv this produces is byte-for-byte
-// the one Forge ran when the UI built its own.
+// It used to carry -A as well, lending your agent to the far end so that git in
+// a workspace shell used your keys. That went with 2.2 — the workspace has a git
+// identity of its own, put there when it was created, and forwarding an agent on
+// top of it meant the same push was signed by different keys depending on
+// whether a person or Claude ran it.
 func (t Target) ttyArgs(s Shell) []string {
-	var args []string
-	if s.ForwardAgent {
-		args = append(args, "-A")
-	}
-	return append(args, t.TTYArgs(s.Remote...)...)
+	return t.TTYArgs(s.Remote...)
 }
 
 // LocalForwardArgs returns the ssh argv for a single local port forward with no

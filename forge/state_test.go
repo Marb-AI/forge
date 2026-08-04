@@ -196,9 +196,6 @@ func TestHomeIsResolvedOnlyWhereItIsExplained(t *testing.T) {
 	allowed := map[string]string{
 		"config/config.go":  "DefaultDir, the one place ~/.forge is spelled out",
 		"forge/terminal.go": "the local shell's working directory — the user's home, not Forge's",
-		"internal/sshx/gossh.go": "the pure-Go client reads ~/.ssh/known_hosts as a second " +
-			"opinion; its identity is the device key now, and this last borrowing goes " +
-			"with the rest of it",
 	}
 	for _, f := range grepRepo(t, "os.UserHomeDir(") {
 		if _, ok := allowed[f]; !ok {

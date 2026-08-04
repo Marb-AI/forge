@@ -471,15 +471,19 @@ UI — which ask the server for a terminal instead of putting one in front of an
 `ssh` process — the always-on port tunnels, and jump hosts. It keeps the servers
 it has accepted in `~/.forge/known_hosts`, trusting one on first sight and
 refusing it loudly if its key ever changes, which is what your `ssh` does with
-`StrictHostKeyChecking=accept-new`. One thing is still read from `~/.ssh` and
-never written: its `known_hosts`, as a second opinion, so a server your `ssh`
-already trusts is not trusted on sight a second time.
+`StrictHostKeyChecking=accept-new`.
 
-The `ssh` binary is still there, one word away: `FORGE_SSH_BACKEND=exec` puts it
+That client reads nothing of yours: not your keys, not your agent, not your
+`known_hosts`.
+
+The `ssh` binary is still there, one word away — `FORGE_SSH_BACKEND=exec` puts it
 back for one command, which is how you tell "is it the new client, or is it me".
-The CLI's own interactive sessions — `workspace ssh`, `claude attach`, `expose`
-— run it either way, because they hand over the terminal you are sitting at;
-they are given the same device key with `-i`.
+And the CLI's own interactive sessions — `workspace ssh`, `claude attach`,
+`expose` — run it either way, because they hand over the terminal you are
+sitting at. Both of those are OpenSSH being OpenSSH: your `~/.ssh/config`
+applies, its `known_hosts` is read and written, and an agent is forwarded if
+your config says to. They are given Forge's key with `-i`, since that is the one
+the servers and workspaces admit.
 
 ---
 

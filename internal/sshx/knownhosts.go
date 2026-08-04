@@ -35,14 +35,12 @@ import (
 //     the error names the file and line holding the old key. Nothing rewrites
 //     that line: a key that changed is either a rebuilt server or an attack,
 //     and only the person reading the message knows which.
-//   - ~/.ssh/known_hosts is still read, and never written. A host the ssh
-//     binary already trusts is not a host to accept on sight a second time,
-//     and both clients agreeing on which servers are known is the point of
-//     being able to switch between them. It is read-only because it is not
-//     ours: the write is the part that has to move, and it has.
-//
-// The last of those goes when the device key does, in v2 — that is the release
-// where Forge stops borrowing anything from ~/.ssh at all.
+// It used to read ~/.ssh/known_hosts as a second opinion as well, so that a host
+// the ssh binary already trusted was not trusted on sight a second time. That
+// was worth having while the ssh binary was the default and the two clients had
+// to agree; now that Forge connects with its own key through its own client, a
+// file OpenSSH owns is not part of the answer — and a device that has no such
+// file, which is every phone, would have been trusting on sight regardless.
 //
 // A file, rather than a Store interface like the config and the device key.
 // Those two are abstract because their answer genuinely differs per platform: a
@@ -116,18 +114,14 @@ var recordMu sync.Mutex
 // records the ones it has never seen.
 func hostKeyCallback() (ssh.HostKeyCallback, error) {
 	ours, ourErr := KnownHosts()
-	// Only the files that are there. knownhosts.New refuses one that is not, and
-	// a device that has accepted nothing yet has no file — writing an empty one
-	// to read it back would leave a record of nothing behind on every machine
-	// whose hosts all came from ~/.ssh. No files at all is not an error either:
-	// it says nothing is known, which makes the next server a first sight, which
-	// is exactly what it is.
+	// Only the file if it is there. knownhosts.New refuses one that is not, and a
+	// device that has accepted nothing yet has no file — writing an empty one to
+	// read it back would leave a record of nothing behind. No file at all is not
+	// an error either: it says nothing is known, which makes the next server a
+	// first sight, which is exactly what it is.
 	var files []string
 	if ourErr == nil && exists(ours) {
 		files = append(files, ours)
-	}
-	if legacy, ok := opensshKnownHosts(); ok {
-		files = append(files, legacy)
 	}
 
 	check, err := knownhosts.New(files...)
@@ -219,18 +213,6 @@ func record(path, hostname string, key ssh.PublicKey) error {
 	fmt.Fprintf(os.Stderr, "forge: trusting %s on first connection (%s), recorded in %s\n",
 		hostname, ssh.FingerprintSHA256(key), path)
 	return nil
-}
-
-// opensshKnownHosts is ~/.ssh/known_hosts if this machine has one — the second
-// opinion, read and never written. A machine without one (a phone, a container)
-// simply has no second opinion.
-func opensshKnownHosts() (string, bool) {
-	dir, err := sshDir()
-	if err != nil {
-		return "", false
-	}
-	path := filepath.Join(dir, knownHostsFile)
-	return path, exists(path)
 }
 
 func exists(path string) bool {

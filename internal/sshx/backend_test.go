@@ -343,7 +343,7 @@ func TestOpenHandsTheTargetAndTheShellToTheBackend(t *testing.T) {
 	f := useFake(t, &fakeBackend{})
 	tgt := Target{User: "crm", Addr: "1.2.3.4", Port: 2222}
 
-	term, err := tgt.Open(Shell{Remote: []string{"tmux", "attach"}, Cols: 100, Rows: 30, ForwardAgent: true})
+	term, err := tgt.Open(Shell{Remote: []string{"tmux", "attach"}, Cols: 100, Rows: 30})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,9 +357,6 @@ func TestOpenHandsTheTargetAndTheShellToTheBackend(t *testing.T) {
 	}
 	if f.shell.Cols != 100 || f.shell.Rows != 30 {
 		t.Errorf("size = %dx%d, want 100x30", f.shell.Cols, f.shell.Rows)
-	}
-	if !f.shell.ForwardAgent {
-		t.Error("the request to forward the agent was dropped on the way to the backend")
 	}
 }
 
@@ -383,13 +380,14 @@ func TestATerminalWithNoSizeOpensAtTheConventionalOne(t *testing.T) {
 }
 
 // The exec'd backend's terminal argv is the one Forge has always run: the UI used
-// to build it itself, and moving it here must not have changed a word of it —
-// same forced TTY, same options, same order, and -A where the workspace shell has
-// always had it.
+// to build it itself, and moving it here did not change a word of it — same
+// forced TTY, same options, same order. The one thing that has changed since is
+// -A, which no terminal carries any more: the workspace has a git identity of
+// its own and a forwarded agent on top of it meant two identities for one push.
 func TestTheExecdTerminalArgvIsTheOneForgeAlwaysRan(t *testing.T) {
 	tgt := Target{User: "crm", Addr: "203.0.113.7", Port: 2222}
 
-	shell := tgt.ttyArgs(Shell{ForwardAgent: true, Cols: 80, Rows: 24})
+	shell := tgt.ttyArgs(Shell{Cols: 80, Rows: 24})
 	claude := tgt.ttyArgs(Shell{Remote: []string{"tmux", "attach"}})
 	host := tgt.ttyArgs(Shell{})
 
@@ -404,13 +402,11 @@ func TestTheExecdTerminalArgvIsTheOneForgeAlwaysRan(t *testing.T) {
 		}
 	}
 
-	// -A comes before everything, which is where it was when the UI wrote this
-	// argv by hand.
-	if shell[0] != "-A" || shell[1] != "-t" {
-		t.Errorf("agent forwarding is not where it was: %v", shell)
-	}
-	if slices.Contains(host, "-A") {
-		t.Errorf("a terminal that did not ask for the agent forwards it: %v", host)
+	// And none of them lends the agent any more.
+	for name, args := range map[string][]string{"shell": shell, "claude": claude, "host": host} {
+		if slices.Contains(args, "-A") {
+			t.Errorf("the %s terminal forwards your agent: %v", name, args)
+		}
 	}
 
 	// The command, if any, is the tail — and a terminal without one ends at the
