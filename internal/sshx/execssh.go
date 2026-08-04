@@ -13,13 +13,16 @@ import (
 	"github.com/Marb-AI/forge/internal/proc"
 )
 
-// execBackend runs the system's ssh binary, which is how Forge has always
-// reached its servers and remains the default.
+// execBackend runs the system's ssh binary, which is how Forge reached its
+// servers for years and is now the way back: FORGE_SSH_BACKEND=exec.
 //
 // Its whole argument is that it is not ours: keys, ~/.ssh/config, known_hosts,
 // agent forwarding, a hardware token, whatever the user has already made work —
-// all of it applies without Forge knowing any of it exists. The pure-Go client
-// buys the platforms where there is no binary to run; it does not buy this.
+// all of it applies without Forge knowing any of it exists. That is also why it
+// could not stay the default once Forge had a key of its own to offer; what it
+// is for now is the comparison. When something looks wrong, one word runs the
+// same operation through the client that has worked for years, and the answer to
+// "is it the new client" takes a second rather than a bisect.
 type execBackend struct{}
 
 func (execBackend) Name() string { return "ssh" }

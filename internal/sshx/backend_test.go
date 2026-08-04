@@ -185,21 +185,24 @@ func TestTheExecBackendReportsExitCodesThroughTheSameType(t *testing.T) {
 	}
 }
 
-// Which backend is in use is a decision, not a preference: nothing changes
-// until someone says so, and today that is one environment variable.
-func TestTheDefaultBackendIsStillTheSshBinary(t *testing.T) {
+// Forge's own client is what runs unless somebody says otherwise, and the way
+// back is one word. Anything else in that variable is not a third option — it is
+// a typo, and a typo must not quietly change which client is talking to your
+// servers.
+func TestTheDefaultBackendIsForgesOwnClient(t *testing.T) {
 	useBackend(t, nil)
 
-	if got := backend().Name(); got != "ssh" {
-		t.Errorf("backend with nothing set = %q, want the exec'd ssh", got)
-	}
-	t.Setenv(backendEnv, "go")
 	if got := backend().Name(); got != "go" {
-		t.Errorf("backend with %s=go = %q, want the pure-Go client", backendEnv, got)
+		t.Errorf("backend with nothing set = %q, want Forge's own client", got)
+	}
+	t.Setenv(backendEnv, "exec")
+	if got := backend().Name(); got != "ssh" {
+		t.Errorf("backend with %s=exec = %q, want the ssh binary back", backendEnv, got)
 	}
 	t.Setenv(backendEnv, "something-else")
-	if got := backend().Name(); got != "ssh" {
-		t.Errorf("backend with %s=something-else = %q, want the exec'd ssh", backendEnv, got)
+	if got := backend().Name(); got != "go" {
+		t.Errorf("backend with %s=something-else = %q, want the default — a typo is not "+
+			"a way to change clients", backendEnv, got)
 	}
 
 	Use(&fakeBackend{})
@@ -417,5 +420,24 @@ func TestTheExecdTerminalArgvIsTheOneForgeAlwaysRan(t *testing.T) {
 	}
 	if last := host[len(host)-1]; last != "crm@203.0.113.7" {
 		t.Errorf("the argv ends at %q, want just the destination", last)
+	}
+}
+
+// The way back has to stay reachable and stay one word. Anything that made the
+// ssh binary hard to get at would take with it the only quick answer to "is this
+// the new client's doing" — which is the question this variable exists for.
+func TestTheWayBackToTheSshBinaryIsOneWord(t *testing.T) {
+	useBackend(t, nil)
+	t.Setenv(backendEnv, "exec")
+
+	b := backend()
+	if b.Name() != "ssh" {
+		t.Fatalf("backend = %q, want the ssh binary", b.Name())
+	}
+	// And it is the whole transport that goes back, not the commands alone: a
+	// terminal or a tunnel still answered by the other client would make the
+	// comparison useless.
+	if _, ok := b.(execBackend); !ok {
+		t.Errorf("backend is %T, want the exec'd one for every shape", b)
 	}
 }

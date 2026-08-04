@@ -241,18 +241,23 @@ func (e *ExitError) Unwrap() error { return e.Err }
 // failed.
 func (e *ExitError) ExitCode() int { return e.Code }
 
-// backendEnv selects the transport for the process.
+// backendEnv is the way back to the ssh binary.
 //
-// An environment variable rather than a setting, because this is not a
-// preference: it is which client we are testing today. The pure-Go one is
-// built, exercised against a real server, and left switched off — flipping the
-// default is its own change, with the device key behind it, and until then a
-// Forge that silently stopped using your ~/.ssh config would be a mystery, not
-// a feature.
+// Forge's own client is the default now. It has the device key behind it, which
+// was the condition: until Forge had a key of its own, switching would have
+// meant silently ignoring your ~/.ssh config, and a Forge that stopped using
+// your keys without being asked is a mystery rather than a feature. With a key
+// it created, installed on the servers it prepared and in the workspaces it
+// made, there is nothing left to borrow and no surprise to spring.
+//
+// The variable stays, pointing the other way: FORGE_SSH_BACKEND=exec puts the
+// system ssh back for one process. It is not a preference to be set and
+// forgotten — it is what you reach for when the new client is suspected, and
+// what makes "is it this, or is it me" answerable in one command.
 const backendEnv = "FORGE_SSH_BACKEND"
 
 // chosen is the backend a front end wired in explicitly, if any. Nil means "ask
-// the environment", which is what every Forge in existence does today.
+// the environment", which is what every Forge does unless a test says otherwise.
 //
 // Process-wide and set at startup, like the core's stores: one process talks to
 // its servers one way, and changing that under a running daemon would leave
@@ -278,10 +283,10 @@ func backend() Backend {
 	if chosen != nil {
 		return chosen
 	}
-	if os.Getenv(backendEnv) == "go" {
-		return goBackend{}
+	if os.Getenv(backendEnv) == "exec" {
+		return execBackend{}
 	}
-	return execBackend{}
+	return goBackend{}
 }
 
 // Output runs a remote command and returns its stdout.

@@ -460,20 +460,26 @@ can be provisioned. It is kept in Forge's config rather than left to
 `~/.ssh/config` so that both clients — and a phone, which has neither file nor
 `ssh` — follow the same route.
 
-**How Forge reaches a server.** By running your `ssh`. Your keys, your
-`~/.ssh/config`, your agent, your hardware token — all of it applies, and Forge
-knows about none of it. A second client, built on Go's SSH library instead of a
-subprocess, now sits behind the same seam and can be switched on with
-`FORGE_SSH_BACKEND=go`; it is what will let Forge run where there is no `ssh`
-binary to call. It covers everything Forge does to a server: the commands, the
-terminals in the UI — which ask the server for a terminal instead of putting one
-in front of an `ssh` process — and the always-on port tunnels. It keeps the
-servers it has accepted in `~/.forge/known_hosts`, trusting one on first sight
-and refusing it loudly if its key ever changes, which is what your `ssh` does
-with `StrictHostKeyChecking=accept-new`; `~/.ssh/known_hosts` is read as well, so
-both clients agree on which servers are known, and never written. It is not the
-default and not finished — it still borrows identities from `~/.ssh`, having no
-key of its own yet — so turn it on only to try it.
+**How Forge reaches a server.** With an SSH client of its own, built on Go's SSH
+library rather than by running the `ssh` binary — and with a key of its own,
+made by `forge setup` and kept in `~/.forge`. Your keys are not offered and your
+agent is not consulted — nothing on this machine has to be set up first, which is
+what lets Forge run where there is no `ssh` to call and no `~/.ssh` at all.
+
+It covers everything Forge does to a server: the commands, the terminals in the
+UI — which ask the server for a terminal instead of putting one in front of an
+`ssh` process — the always-on port tunnels, and jump hosts. It keeps the servers
+it has accepted in `~/.forge/known_hosts`, trusting one on first sight and
+refusing it loudly if its key ever changes, which is what your `ssh` does with
+`StrictHostKeyChecking=accept-new`. One thing is still read from `~/.ssh` and
+never written: its `known_hosts`, as a second opinion, so a server your `ssh`
+already trusts is not trusted on sight a second time.
+
+The `ssh` binary is still there, one word away: `FORGE_SSH_BACKEND=exec` puts it
+back for one command, which is how you tell "is it the new client, or is it me".
+The CLI's own interactive sessions — `workspace ssh`, `claude attach`, `expose`
+— run it either way, because they hand over the terminal you are sitting at;
+they are given the same device key with `-i`.
 
 ---
 
