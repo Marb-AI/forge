@@ -245,21 +245,39 @@ func TestReconnectBackoffCannotStampede(t *testing.T) {
 	}
 }
 
-// paddingOf finds the padding a selector is given in the stylesheet. Comments are
-// stripped first, for the reason zIndexOf explains.
+// paddingOf finds the padding a selector is given in the stylesheet, the way
+// zIndexOf finds a z-index: every rule the selector appears in, last one wins,
+// and a selector grouped with others counts. Anchoring a regex to the selector
+// and taking the first match would read a rule the cascade has already
+// overridden, and would miss the selector entirely once it is listed beside
+// another — neither of which is a difference this test should be blind to.
 func paddingOf(t *testing.T, css, selector string) string {
 	t.Helper()
 	css = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
-	rule := regexp.MustCompile(`(?s)` + regexp.QuoteMeta(selector) + `\s*\{(.*?)\}`)
-	m := rule.FindStringSubmatch(css)
-	if m == nil {
-		t.Fatalf("%s has no rule in app.css", selector)
+
+	rule := regexp.MustCompile(`(?s)([^{}]*)\{([^}]*)\}`)
+	pad := regexp.MustCompile(`padding:\s*([^;]+);`)
+
+	found := ""
+	for _, m := range rule.FindAllStringSubmatch(css, -1) {
+		selectors, body := m[1], m[2]
+		hit := false
+		for _, s := range strings.Split(selectors, ",") {
+			if strings.TrimSpace(s) == selector {
+				hit = true
+			}
+		}
+		if !hit {
+			continue
+		}
+		if pm := pad.FindStringSubmatch(body); pm != nil {
+			found = strings.TrimSpace(pm[1])
+		}
 	}
-	pad := regexp.MustCompile(`padding:\s*([^;]+);`).FindStringSubmatch(m[1])
-	if pad == nil {
+	if found == "" {
 		t.Fatalf("%s sets no padding", selector)
 	}
-	return strings.TrimSpace(pad[1])
+	return found
 }
 
 // The topic and the identity under it are two halves of one corner of the pane,
@@ -272,5 +290,27 @@ func TestTheIdentityBlockSitsInTheSameBoxAsTheTopic(t *testing.T) {
 	if topic != ident {
 		t.Errorf("#ws-topic has padding %q and #ws-ident %q — the two stack, so a "+
 			"difference shows as one of them hugging the rule between them", topic, ident)
+	}
+}
+
+// The helper above reads a stylesheet, so it gets one of its own: what it must
+// survive is the cascade (a later rule wins), a selector listed beside another,
+// and a comment sitting where a rule would be.
+func TestPaddingOfReadsTheCascade(t *testing.T) {
+	const css = `
+#a { padding: 1px; }
+/* #a { padding: 999px; } — a rule in a comment is not a rule */
+#a-suffix { padding: 3px; }
+#a[hidden] { display: none; }
+#b, #a { padding: 2px 4px; }
+`
+	if got := paddingOf(t, css, "#a"); got != "2px 4px" {
+		t.Errorf("padding of #a = %q, want the last rule that names it (%q)", got, "2px 4px")
+	}
+	if got := paddingOf(t, css, "#b"); got != "2px 4px" {
+		t.Errorf("padding of #b = %q — a selector grouped with another still has one", got)
+	}
+	if got := paddingOf(t, css, "#a-suffix"); got != "3px" {
+		t.Errorf("padding of #a-suffix = %q; a longer name is not the shorter one", got)
 	}
 }
