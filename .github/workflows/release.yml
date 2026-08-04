@@ -21,8 +21,12 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      # The tag is passed in rather than left to `git describe`: the binaries carry
+      # this string and answer `forge version` with it, so it must be the tag
+      # being published and not whatever the checkout happens to be able to
+      # describe.
       - name: Build release binaries
-        run: make release   # embeds the linux agent; darwin built natively, linux/windows cross-compiled
+        run: make release VERSION="$GITHUB_REF_NAME"   # embeds the linux agent; darwin built natively, linux/windows cross-compiled
 
       - name: Ad-hoc sign macOS binaries
         run: |
@@ -31,10 +35,40 @@ jobs:
             codesign -dv "$b" 2>&1 | grep -i 'Signature' || true
           done
 
+      # Two things this decides, both from the tag and a file, so that publishing
+      # is `git push origin <tag>` and nothing else:
+      #
+      #   * A tag with a hyphen in it is a pre-release — semver's own mark for
+      #     "not final" (v1.2.3-rc.1). Without --prerelease GitHub would serve it
+      #     as `releases/latest`, and every `curl … | sh` in the world installs
+      #     whatever that points at.
+      #   * Notes come from .github/release-notes/<tag>.md when there is one, and
+      #     its `# ` heading becomes the title. A release worth writing about is
+      #     worth writing about in the repository, reviewed with the code it
+      #     describes; --generate-notes stays the answer for the ones that are not.
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" ./dist/* \
-            --title "forge $GITHUB_REF_NAME" \
-            --generate-notes
+          tag="$GITHUB_REF_NAME"
+          notes=".github/release-notes/$tag.md"
+          title="forge $tag"
+          body="$RUNNER_TEMP/body.md"
+
+          if [ -f "$notes" ]; then
+            if [ "$(head -1 "$notes" | cut -c1-2)" = "# " ]; then
+              title=$(head -1 "$notes" | cut -c3-)
+              tail -n +2 "$notes" > "$body"
+            else
+              cp "$notes" "$body"
+            fi
+            set -- --notes-file "$body"
+          else
+            set -- --generate-notes
+          fi
+
+          case "$tag" in
+            *-*) set -- "$@" --prerelease ;;
+          esac
+
+          gh release create "$tag" ./dist/* --title "$title" "$@"
