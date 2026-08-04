@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -14,7 +13,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 )
 
 // goBackend is Forge's own SSH client: golang.org/x/crypto/ssh, no subprocess.
@@ -33,11 +31,8 @@ import (
 // knownhosts.go.
 //
 // It authenticates with this device's own key, handed in by the core (see
-// identity.go) — not with an agent and not with anything in ~/.ssh, neither of
-// which exists on a phone. One borrowing is left and is still here: it reads
-// ~/.ssh/known_hosts as a second opinion, never writing to it, so that a host
-// the ssh binary already trusts is not trusted on sight a second time. That one
-// goes on its own, and until it does this client still wants a $HOME.
+// identity.go). Nothing here reads ~/.ssh, consults an agent, or wants a $HOME
+// — which is the whole point, because a phone has none of the three.
 type goBackend struct{}
 
 func (goBackend) Name() string { return "go" }
@@ -105,14 +100,6 @@ func openTerm(client *ssh.Client, t Target, s Shell) (*remoteTerm, error) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("ssh %s: %w", t.dest(), err)
-	}
-
-	// Before the pty request, and before the session starts: both of the agent's
-	// halves are set up while the channel is still being configured. A failure is
-	// not fatal, exactly as `ssh -A` without a running agent is not — the shell
-	// opens, and git inside it asks for credentials it does not have.
-	if s.ForwardAgent {
-		forwardAgent(client, sess)
 	}
 
 	cols, rows := s.size()
@@ -338,24 +325,6 @@ var ptyModes = ssh.TerminalModes{
 // local shell already has one) but it is a change in what the server is told,
 // and it belongs where all the terminals get it at once, not to one backend.
 func termType() string { return os.Getenv("TERM") }
-
-// forwardAgent lends the local agent to the session: a handler on this end for
-// the channels the far end opens back, and the request that tells it forwarding
-// is available.
-//
-// Both halves are best-effort for the same reason `ssh -A` is: the agent is a
-// convenience for what runs *inside* the session, and a terminal that opens
-// without it is far better than no terminal at all.
-func forwardAgent(client *ssh.Client, sess *ssh.Session) {
-	sock := os.Getenv("SSH_AUTH_SOCK")
-	if sock == "" {
-		return
-	}
-	if err := agent.ForwardToRemote(client, sock); err != nil {
-		return
-	}
-	_ = agent.RequestAgentForwarding(sess)
-}
 
 // remoteTerm is a Terminal whose pty is on the server. It owns the connection it
 // was opened on, so closing it is what a terminal closing has always been: the
@@ -633,16 +602,4 @@ func authMethods() ([]ssh.AuthMethod, error) {
 		return nil, err
 	}
 	return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
-}
-
-// sshDir is ~/.ssh, and one thing is left there: the known_hosts this client
-// reads as a second opinion (see knownhosts.go). Credentials no longer come from
-// it — the device key does that — and this last borrowing goes when that file
-// does.
-func sshDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot locate ~/.ssh: %w", err)
-	}
-	return filepath.Join(home, ".ssh"), nil
 }

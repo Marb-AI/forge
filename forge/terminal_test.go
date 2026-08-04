@@ -49,17 +49,13 @@ func TestEachTerminalKindConnectsAsWhatItIsFor(t *testing.T) {
 	if !slices.Contains(claude.Remote, agentproto.AttachClaude) {
 		t.Errorf("the claude terminal does not attach the session: %v", claude.Remote)
 	}
-	if claude.ForwardAgent {
-		t.Error("the claude terminal forwards your SSH agent; tmux has no use for your git keys")
-	}
-
-	// The workspace shell forwards your agent — that is what makes git in it use
-	// your keys with nothing stored on the server — and runs no command at all.
+	// The workspace shell is a login shell as the workspace, with nothing lent to
+	// it: git here uses the identity `host prepare` put on the server, the same
+	// one Claude's session uses. It used to carry your forwarded agent, which
+	// meant the same repository was pushed under two identities depending on who
+	// ran the command.
 	if sshTarget != workspace {
 		t.Errorf("the workspace shell logs in as %+v, want the workspace %+v", sshTarget, workspace)
-	}
-	if !sshShell.ForwardAgent {
-		t.Error("the workspace shell does not forward the SSH agent")
 	}
 	if len(sshShell.Remote) != 0 {
 		t.Errorf("the workspace shell runs %v instead of just logging in", sshShell.Remote)
@@ -69,9 +65,6 @@ func TestEachTerminalKindConnectsAsWhatItIsFor(t *testing.T) {
 	// without your keys along for it.
 	if hostTarget != admin {
 		t.Errorf("the host terminal logs in as %+v, want the host's own account %+v", hostTarget, admin)
-	}
-	if host.ForwardAgent {
-		t.Error("the host terminal forwards your SSH agent — host admin has no business with your git keys")
 	}
 	if len(host.Remote) != 0 {
 		t.Errorf("the host terminal runs %v instead of just logging in", host.Remote)
@@ -135,9 +128,6 @@ func TestOpeningARemoteTerminalHandsItToTheTransportWithTheWindowSize(t *testing
 	if transport.shell.Cols != 100 || transport.shell.Rows != 30 {
 		t.Errorf("the transport was given %dx%d, want the 100x30 the window asked for",
 			transport.shell.Cols, transport.shell.Rows)
-	}
-	if !transport.shell.ForwardAgent {
-		t.Error("the kind's agent forwarding did not reach the transport")
 	}
 }
 

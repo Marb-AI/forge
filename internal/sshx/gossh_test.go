@@ -346,55 +346,31 @@ func useIdentitySeam(t *testing.T, key func() ([]byte, error), path func() (stri
 	t.Cleanup(func() { IdentityFrom(prevKey, prevPath) })
 }
 
-// trust records the server's host key in ~/.ssh/known_hosts, where this backend
-// reads what the ssh binary already knows. Recording it there rather than in
-// Forge's own file is deliberate for the tests that only need a server they are
-// allowed to talk to: it leaves first sight — and therefore what gets written —
-// to the tests about trust (see knownhosts_test.go).
+// trust records the server's host key where this client actually looks: the
+// store Forge owns. A test that has not been given one gets a throwaway.
+//
+// It used to write into ~/.ssh/known_hosts, which this client read as a second
+// opinion. It does not read it any more, so writing there would record trust
+// nobody consults.
 func trust(t *testing.T, srv *testServer) {
 	t.Helper()
+	path, err := KnownHosts()
+	if err != nil {
+		path = filepath.Join(recordHostKeysIn(t), knownHostsFile)
+	}
 	line := knownhosts.Line([]string{knownhosts.Normalize(srv.addr.String())}, srv.hostKey)
-	f, err := os.OpenFile(knownHostsPath(t), os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(line + "\n"); err != nil {
-		t.Fatal(err)
-	}
-}
 
-// knownHostsPath is ~/.ssh/known_hosts, created empty if it is not there — an
-// absent file is a different failure ("nothing can be verified") from a host
-// that is simply not in it, and a test that wants the second must not get the
-// first by accident.
-//
-// Emptied after each test, and that is not tidiness. HOME is one directory for
-// the whole package (see TestMain), the servers here listen on a port the
-// operating system picks, and this file records a host BY that port — so a port
-// handed out twice in one run means a later server inheriting an earlier one's
-// key. What the client then reports is "the host key has CHANGED", which is
-// correct, and nothing to do with the test asking.
-func knownHostsPath(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(sshDirForTest(t), "known_hosts")
-	f, err := os.OpenFile(path, os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		f.Close()
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Reported rather than swallowed: an emptying that quietly did not happen
-	// leaves the next test reading this one's hosts, which is the failure this
-	// cleanup exists to prevent — and it would come back as somebody else's
-	// mysterious "the host key has CHANGED".
-	t.Cleanup(func() {
-		if err := os.Truncate(path, 0); err != nil {
-			t.Errorf("could not empty %s, so the next test inherits these hosts: %v", path, err)
-		}
-	})
-	return path
 }
 
 func TestTheGoClientRunsACommandAndBringsBackWhatItPrinted(t *testing.T) {
@@ -589,35 +565,28 @@ func TestResizingATerminalTellsTheServerTheWindowChanged(t *testing.T) {
 	}
 }
 
-// Agent forwarding is what makes git inside a workspace shell use your keys with
-// nothing stored on the server, and it is the one thing a terminal kind asks for
-// beyond its command — so it has to be requested when asked for, and not
-// otherwise: the host shell deliberately does without your git keys.
-func TestATerminalForwardsTheAgentOnlyWhenAskedTo(t *testing.T) {
+// No terminal lends this machine's agent to the far end any more. It used to,
+// so that git in a workspace shell used your keys — and the same repository was
+// then pushed under one identity when you ran the command and another when
+// Claude did, since Claude's session never had an agent to forward. Both use the
+// workspace's own git identity now.
+func TestNoTerminalForwardsTheAgent(t *testing.T) {
 	pub := writeClientKey(t)
 	srv := startTTYServer(t, pub, echoTTY)
 	trust(t, srv)
 	useGo(t)
 	startStubAgent(t)
 
-	asked, err := srv.target("crm").Open(Shell{ForwardAgent: true, Cols: 80, Rows: 24})
+	term, err := srv.target("crm").Open(Shell{Cols: 80, Rows: 24})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer asked.Close()
-	if got := srv.next(t, "the agent"); got != "agent-forward" {
-		t.Errorf("first request = %q, want the agent offered before the session starts", got)
-	}
-	srv.next(t, "a pty")
-	srv.next(t, "a login shell")
+	defer term.Close()
 
-	plain, err := srv.target("admin").Open(Shell{Cols: 80, Rows: 24})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plain.Close()
+	// The pty is the first thing the server is asked for: nothing was offered
+	// ahead of it.
 	if got := srv.next(t, "a pty"); strings.HasPrefix(got, "agent-forward") {
-		t.Error("a terminal that did not ask for the agent forwarded it anyway")
+		t.Errorf("the agent was offered before the pty: %q", got)
 	}
 }
 
@@ -744,17 +713,4 @@ func startStubAgent(t *testing.T) <-chan net.Conn {
 func useGo(t *testing.T) {
 	t.Helper()
 	useBackend(t, goBackend{})
-}
-
-// sshDirForTest is ~/.ssh under the package's throwaway HOME, created on demand.
-func sshDirForTest(t *testing.T) string {
-	t.Helper()
-	dir, err := sshDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return dir
 }

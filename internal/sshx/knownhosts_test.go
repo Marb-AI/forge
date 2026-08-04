@@ -27,7 +27,6 @@ func TestTheGoClientTrustsAServerOnFirstSightAndWritesItDown(t *testing.T) {
 	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
 		return "ok", "", 0
 	})
-	knownHostsPath(t) // ~/.ssh has a file, and this server is deliberately not in it
 	dir := recordHostKeysIn(t)
 	useGo(t)
 
@@ -81,38 +80,34 @@ func TestTheGoClientRefusesAServerWhoseKeyChanged(t *testing.T) {
 	}
 }
 
-// The ssh binary's known_hosts is still read, so a host it already trusts is not
-// trusted on sight a second time — and still never written, which is the half of
-// this that moved. (It goes with the rest of the ~/.ssh borrowing in v2.)
-func TestTheGoClientReadsOpenSSHsKnownHostsAndWritesNothingToIt(t *testing.T) {
+// The ssh binary's known_hosts is not consulted at all. It was, as a second
+// opinion, while that binary was the default and the two clients had to agree on
+// which servers were known; now Forge connects with its own key through its own
+// client, and a file OpenSSH owns is not part of the answer. A device that has
+// no such file — every phone — would have been trusting on sight regardless.
+func TestOpenSSHsKnownHostsIsNotConsulted(t *testing.T) {
 	pub := writeClientKey(t)
 	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
 		return "", "", 0
 	})
-	trust(t, srv) // recorded in ~/.ssh/known_hosts, as `ssh` would have
-	before, err := os.ReadFile(knownHostsPath(t))
-	if err != nil {
+	// Recorded where `ssh` would have it, and nowhere else.
+	legacy := filepath.Join(t.TempDir(), "known_hosts")
+	line := knownhosts.Line([]string{knownhosts.Normalize(srv.addr.String())}, srv.hostKey)
+	if err := os.WriteFile(legacy, []byte(line+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HOME", filepath.Dir(filepath.Dir(legacy)))
+
 	dir := recordHostKeysIn(t)
 	useGo(t)
 
 	if _, err := srv.target("crm").Output("id"); err != nil {
-		t.Fatalf("a host ssh already trusts was refused: %v", err)
-	}
-
-	// Not copied — and not even a file: a connection that had nothing to record
-	// leaves no record behind.
-	if _, err := os.Stat(filepath.Join(dir, "known_hosts")); !os.IsNotExist(err) {
-		t.Errorf("Forge's own file exists after a connection to a host ssh already trusts (%v): %q",
-			err, lines(t, filepath.Join(dir, "known_hosts")))
-	}
-	after, err := os.ReadFile(knownHostsPath(t))
-	if err != nil {
 		t.Fatal(err)
 	}
-	if string(after) != string(before) {
-		t.Errorf("~/.ssh/known_hosts was written to; it is read-only to Forge")
+	// It was a first sight as far as this client is concerned, so it wrote the
+	// server down itself rather than taking OpenSSH's word for it.
+	if got := lines(t, filepath.Join(dir, "known_hosts")); len(got) != 1 {
+		t.Errorf("Forge recorded %d hosts, want the one it just met: %q", len(got), got)
 	}
 }
 
@@ -124,8 +119,7 @@ func TestTheGoClientRefusesAnUnknownServerWithNowhereToRecordIt(t *testing.T) {
 	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
 		return "", "", 0
 	})
-	knownHostsPath(t) // the file exists; this server is deliberately not in it
-	useGo(t)          // and nothing called KnownHostsIn
+	useGo(t) // and nothing called KnownHostsIn
 
 	_, err := srv.target("crm").Output("id")
 	if err == nil {

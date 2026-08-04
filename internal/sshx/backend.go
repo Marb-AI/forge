@@ -61,11 +61,6 @@ type Shell struct {
 	// Cols and Rows size the terminal before the first byte is drawn. A zero
 	// dimension is filled in — see size.
 	Cols, Rows uint16
-	// ForwardAgent lends this machine's SSH agent to the session, which is what
-	// makes git inside a workspace shell use your keys with nothing stored on the
-	// server. It is `ssh -A`, and like `ssh -A` it is a request: a session whose
-	// agent could not be forwarded still opens.
-	ForwardAgent bool
 }
 
 func (s Shell) line() string { return joinRemote(s.Remote) }

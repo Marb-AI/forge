@@ -117,9 +117,13 @@ func termShell(h *config.Host, workspace, kind string) (sshx.Target, sshx.Shell,
 	case TermClaude:
 		return sshx.WorkspaceTarget(h, workspace), sshx.Shell{Remote: []string{agentproto.AttachClaude}}, nil
 	case TermSSH:
-		// Login shell with the local SSH agent forwarded — identical to
-		// `forge workspace <name> ssh`, so git in the shell uses your keys.
-		return sshx.WorkspaceTarget(h, workspace), sshx.Shell{ForwardAgent: true}, nil
+		// A login shell as the workspace, and nothing lent to it. It used to carry
+		// your forwarded agent so that git here used your keys — which meant the
+		// same repository was pushed under two different identities depending on
+		// whether you or Claude ran the command. Claude's session never had an
+		// agent to forward. Now neither does: both use the git identity `host
+		// prepare` put on the server, which is the one registered on GitHub.
+		return sshx.WorkspaceTarget(h, workspace), sshx.Shell{}, nil
 	case TermHost:
 		// No agent forwarding — host admin doesn't use your git keys.
 		return sshx.AdminTarget(h), sshx.Shell{}, nil
