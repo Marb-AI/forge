@@ -250,7 +250,7 @@ func locateAgentBinary(goarch string) (string, error) {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
 			return p, nil
 		}
-		return "", fmt.Errorf("FORGE_AGENT_BIN=%s not found", p)
+		return "", fmt.Errorf("FORGE_AGENT_BIN=%q not found", p)
 	}
 	var cands []string
 	if exe, err := os.Executable(); err == nil {

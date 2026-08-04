@@ -4,9 +4,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/Marb-AI/forge/config"
 	"github.com/Marb-AI/forge/internal/agentproto"
@@ -329,7 +329,7 @@ func CreateWorkspace(name, alias string) (*PortBlock, error) {
 		return nil, fmt.Errorf("no such host %q (see: forge host list)", alias)
 	}
 
-	pubkey, err := findPublicKey()
+	pubkey, err := workspaceKeys()
 	if err != nil {
 		return nil, err
 	}
@@ -412,21 +412,38 @@ func TrackInc(name string, seconds int) error {
 		"-name", name, "-seconds", strconv.Itoa(seconds))
 }
 
-// findPublicKey returns the client's SSH public key to install into the
-// workspace user's authorized_keys. FORGE_PUBKEY overrides the search.
-func findPublicKey() ([]byte, error) {
-	if p := os.Getenv("FORGE_PUBKEY"); p != "" {
-		return os.ReadFile(p)
-	}
-	home, err := os.UserHomeDir()
+// workspaceKeys are the public keys a new workspace lets in.
+//
+// This device's, always. It is the key Forge connects with, so a workspace that
+// did not have it would be one Forge could create and never open again — and
+// after the transport flips there is no second key to fall back on.
+//
+// FORGE_PUBKEY adds one BESIDE it, rather than replacing it as it used to. The
+// escape hatch is worth keeping: somebody may want to reach the workspace from a
+// plain terminal, without Forge in the middle. Replacing was the wrong shape for
+// it, because a single environment variable could then produce a workspace this
+// client cannot enter, and nothing would say so until the first attempt.
+//
+// authorized_keys is a list, so this costs nothing but a second line.
+func workspaceKeys() ([]byte, error) {
+	k, err := Keys()
 	if err != nil {
 		return nil, err
 	}
-	for _, name := range []string{"id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"} {
-		p := filepath.Join(home, ".ssh", name)
-		if data, err := os.ReadFile(p); err == nil {
-			return data, nil
+	mine, err := k.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("%w (run: forge setup)", err)
+	}
+	lines := []string{strings.TrimSpace(mine)}
+
+	if p := os.Getenv("FORGE_PUBKEY"); p != "" {
+		extra, err := os.ReadFile(p)
+		if err != nil {
+			return nil, fmt.Errorf("FORGE_PUBKEY=%q: %w", p, err)
+		}
+		if line := strings.TrimSpace(string(extra)); line != "" {
+			lines = append(lines, line)
 		}
 	}
-	return nil, fmt.Errorf("no SSH public key found in ~/.ssh (set FORGE_PUBKEY to override)")
+	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
