@@ -35,6 +35,12 @@ jobs:
             codesign -dv "$b" 2>&1 | grep -i 'Signature' || true
           done
 
+      # The desktop app, zipped into dist/ so the publish step below picks it up
+      # with everything else. It signs itself (build/bundle.sh), because a bundle
+      # is signed as a bundle rather than as the binary inside it.
+      - name: Build Forge.app
+        run: make app-zip VERSION="$GITHUB_REF_NAME"
+
       # Two things this decides, both from the tag and a file, so that publishing
       # is `git push origin <tag>` and nothing else:
       #

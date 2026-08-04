@@ -19,7 +19,7 @@ ifeq ($(shell uname -s),Darwin)
 APPENV := CGO_CFLAGS=-mmacosx-version-min=11.0 CGO_LDFLAGS=-mmacosx-version-min=11.0
 endif
 
-.PHONY: all build cli agent agent-linux app release clean fmt vet test tidy
+.PHONY: all build cli agent agent-linux app app-bundle app-zip release clean fmt vet test tidy
 
 all: build
 
@@ -37,6 +37,20 @@ agent:
 #
 app:
 	$(APPENV) go build $(GOFLAGS) $(LDFLAGS) -o $(BIN)/forge-app ./cmd/forge-app
+
+# Forge.app: the same shell, wrapped so the Finder will open it. Universal, so a
+# download runs on whichever Mac it lands on, and ad-hoc signed — see build/bundle.sh
+# for why that is the floor rather than a substitute for Developer ID.
+app-bundle:
+	./build/bundle.sh $(VERSION) $(BIN)
+
+# ditto rather than zip: it is the one that preserves the bundle's symlinks and
+# its signature, and a .app that arrives with a broken signature is a .app macOS
+# refuses to open.
+app-zip: app-bundle
+	@mkdir -p $(DIST)
+	ditto -c -k --keepParent $(BIN)/Forge.app $(DIST)/Forge-macos-universal.zip
+	@echo "  $(DIST)/Forge-macos-universal.zip"
 
 # The agent runs on the (Linux) server; cross-compile it from the laptop.
 agent-linux:
