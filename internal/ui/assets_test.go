@@ -341,3 +341,26 @@ func TestTheEyeHidesTheTimesAndNotTheBanner(t *testing.T) {
 			"that goes with them takes its own controls out of reach", rule[1])
 	}
 }
+
+// A metric is an icon and a figure, and they have to read as one thing. Pinned to
+// the two edges of a fixed-width cell — an 11px/1fr grid — the space inside a pair
+// grew with the cell while the space between pairs stayed at the row's own gap, so
+// every figure sat nearer the NEXT metric's icon than its own.
+func TestAServerMetricHoldsItsIconAndItsFigureTogether(t *testing.T) {
+	css := embeddedAsset(t, "app.css")
+	css = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+
+	rule := regexp.MustCompile(`\.srv-metrics \.m\s*\{([^}]*)\}`).FindStringSubmatch(css)
+	if rule == nil {
+		t.Fatal("app.css has no rule for a server metric")
+	}
+	body := rule[1]
+	if strings.Contains(body, "grid-template-columns") {
+		t.Errorf("a metric is laid out as %q — columns hold the icon and the figure "+
+			"apart by as much as the cell is wide", strings.TrimSpace(body))
+	}
+	if !strings.Contains(body, "flex-end") {
+		t.Errorf("a metric is laid out as %q — without an end alignment the slack "+
+			"lands between the icon and its own figure", strings.TrimSpace(body))
+	}
+}

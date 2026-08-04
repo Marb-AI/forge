@@ -189,15 +189,21 @@ func TestPaneKeepsIdentityAtTheTopAndMetricsAtTheBottom(t *testing.T) {
 	topic := strings.Index(index, `id="ws-topic"`)
 	ident := strings.Index(index, `id="ws-ident"`)
 	tree := strings.Index(index, `id="filetree"`)
+	ports := strings.Index(index, `id="ports"`)
 	logins := strings.Index(index, `id="logins"`)
 	servers := strings.Index(index, `id="servers"`)
 	if !(topic < ident && ident < tree) {
 		t.Errorf("the login/server chips belong under the topic and above the tree (%d, %d, %d)",
 			topic, ident, tree)
 	}
-	if !(tree < logins && logins < servers) {
-		t.Errorf("the metrics panels belong below the tree, Claude above the servers (%d, %d, %d)",
-			tree, logins, servers)
+	// The pane is in two halves, and the seam is what a tab switch replaces. Above
+	// it: the tree and the ports, both answers about the workspace you have open.
+	// Below it: the Claude allowances and the servers, which every session shares
+	// and which therefore must not move when you change tabs.
+	if !(tree < ports && ports < logins && logins < servers) {
+		t.Errorf("the pane's order is tree, ports, Claude, servers — what changes with "+
+			"the tab on top, what every session shares underneath (%d, %d, %d, %d)",
+			tree, ports, logins, servers)
 	}
 }
 
