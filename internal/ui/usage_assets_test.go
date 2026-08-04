@@ -34,6 +34,32 @@ func TestLoginPanelGroupsByAccountAndDoesNotSumWindows(t *testing.T) {
 	}
 }
 
+// The panel is ordered by name, and by nothing that moves. It used to lead with
+// the login closest to a limit, which sounds right and reads badly: those figures
+// change while you work, so the rows swap under you and every glance costs a
+// re-read. Urgency is carried by the figure and by the colour it turns, neither of
+// which moves a row.
+func TestTheClaudePanelIsOrderedByName(t *testing.T) {
+	body := jsFunc(t, embeddedAsset(t, "app.js"), "loginGroups")
+
+	// The groups' own sort, named exactly: this function sorts twice, and the other
+	// one puts a group's workspace names in order for the tooltip. A looser match
+	// finds that one first and passes while the panel reorders itself.
+	sortCall := regexp.MustCompile(`\[\.\.\.groups\.values\(\)\]\.sort\(([^;]*)\);`).FindStringSubmatch(body)
+	if sortCall == nil {
+		t.Fatal("nothing decides the order of the login groups")
+	}
+	if !strings.Contains(sortCall[1], "localeCompare") {
+		t.Errorf("the logins are ordered by %q, which is not their names", sortCall[1])
+	}
+	for _, moving := range []string{"Pressure", "used_percent", "five", "seven", "ts"} {
+		if strings.Contains(sortCall[1], moving) {
+			t.Errorf("the logins are ordered by %q — %q changes while you work, so the "+
+				"rows swap under you", sortCall[1], moving)
+		}
+	}
+}
+
 // The context window is a property of one session, so it belongs with the other
 // per-workspace facts at the top of the pane and nowhere else. A context figure in
 // the login panel would be a number about nothing: several workspaces on one login
@@ -118,21 +144,6 @@ func TestLoginPanelDoesNotDrawBarsForWindowsThatDoNotExist(t *testing.T) {
 	}
 }
 
-// The panel exists to be glanced at, so the login about to stop working belongs at
-// the top. Sorted by whichever of its windows is fullest.
-func TestLoginGroupsAreOrderedByPressure(t *testing.T) {
-	js := embeddedAsset(t, "app.js")
-	groups := jsFunc(t, js, "loginGroups")
-	if !strings.Contains(groups, "groupPressure(b) - groupPressure(a)") {
-		t.Error("groups should be ordered fullest-window first")
-	}
-	// A group with no window must not sort as 0% — that would put it above a login
-	// at 3% while claiming to know something about it. It goes last, hence -1.
-	if !strings.Contains(jsFunc(t, js, "groupPressure"), "-1") {
-		t.Error("a group with no window should sort below every group that has one")
-	}
-}
-
 // Each round is an SSH round trip per host, so the poll is gated the way the
 // servers one is: parked when nothing can be seen, re-armed after each poll settles
 // rather than on a fixed timer (an ssh to a hung host outlasts any interval).
@@ -189,15 +200,21 @@ func TestPaneKeepsIdentityAtTheTopAndMetricsAtTheBottom(t *testing.T) {
 	topic := strings.Index(index, `id="ws-topic"`)
 	ident := strings.Index(index, `id="ws-ident"`)
 	tree := strings.Index(index, `id="filetree"`)
+	ports := strings.Index(index, `id="ports"`)
 	logins := strings.Index(index, `id="logins"`)
 	servers := strings.Index(index, `id="servers"`)
 	if !(topic < ident && ident < tree) {
 		t.Errorf("the login/server chips belong under the topic and above the tree (%d, %d, %d)",
 			topic, ident, tree)
 	}
-	if !(tree < logins && logins < servers) {
-		t.Errorf("the metrics panels belong below the tree, Claude above the servers (%d, %d, %d)",
-			tree, logins, servers)
+	// The pane is in two halves, and the seam is what a tab switch replaces. Above
+	// it: the tree and the ports, both answers about the workspace you have open.
+	// Below it: the Claude allowances and the servers, which every session shares
+	// and which therefore must not move when you change tabs.
+	if !(tree < ports && ports < logins && logins < servers) {
+		t.Errorf("the pane's order is tree, ports, Claude, servers — what changes with "+
+			"the tab on top, what every session shares underneath (%d, %d, %d, %d)",
+			tree, ports, logins, servers)
 	}
 }
 

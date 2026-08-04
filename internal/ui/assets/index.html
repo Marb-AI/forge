@@ -84,29 +84,11 @@
         </div>
         <div id="filetree" class="muted">Select a workspace.</div>
 
-        <!-- The Claude panel: one group per login, because a rate limit belongs to
-             an account and not to a workspace. Beside the servers panel and above
-             it, the two answering the same shape of question — what is running
-             out, and where. -->
-        <div id="logins">
-          <div class="pane-head" id="logins-head" title="Show/hide Claude usage">
-            <span>Claude</span>
-            <span class="pane-actions">
-              <span id="logins-count" class="muted"></span>
-              <button id="logins-toggle" title="Collapse">
-                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
-                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-              </button>
-            </span>
-          </div>
-          <div id="loginlist" class="muted">Loading…</div>
-        </div>
-        <!-- The ports panel: what this workspace publishes, and a way in. Above
-             the servers panel because it's about the workspace you're in, not
-             about the machines in general — and because these are links you
-             click, not numbers you glance at. -->
+        <!-- The ports panel: what this workspace publishes, and a way in. Directly
+             under the tree, because those two are the pane's workspace half: both
+             are answers about the tab you have open and both are replaced when you
+             move to another one. Everything below this line is shared by every
+             session and stays put. -->
         <div id="ports">
           <div class="pane-head" id="ports-head" title="Show/hide published ports">
             <span>Ports</span>
@@ -121,6 +103,26 @@
             </span>
           </div>
           <div id="portlist" class="muted">Loading…</div>
+        </div>
+        <!-- The Claude panel: one group per login, because a rate limit belongs to
+             an account and not to a workspace. Below the ports and above the
+             servers, with them in the half of the pane that does NOT change when
+             you switch tabs — an allowance is spent by every session at once, and
+             a panel that holds still is one less thing to re-read. -->
+        <div id="logins">
+          <div class="pane-head" id="logins-head" title="Show/hide Claude usage">
+            <span>Claude</span>
+            <span class="pane-actions">
+              <span id="logins-count" class="muted"></span>
+              <button id="logins-toggle" title="Collapse">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </button>
+            </span>
+          </div>
+          <div id="loginlist" class="muted">Loading…</div>
         </div>
         <!-- The servers panel: every registered machine and what it's using
              right now. Below the tree because it's ambient — you glance at it,

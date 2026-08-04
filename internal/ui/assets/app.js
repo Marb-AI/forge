@@ -1033,15 +1033,12 @@ function loginGroups() {
     g.names.push(ws.name);
   }
   for (const g of groups.values()) g.names.sort((a, b) => a.localeCompare(b));
-  // Closest to a limit first: the panel exists to be glanced at, and the login
-  // about to stop working is the one worth putting at the top. Groups with no
-  // window to compare fall to the bottom in name order.
-  return [...groups.values()].sort((a, b) => groupPressure(b) - groupPressure(a) ||
-    a.label.localeCompare(b.label));
-}
-
-function groupPressure(g) {
-  return Math.max(g.five ? g.five.used_percent : -1, g.seven ? g.seven.used_percent : -1);
+  // By name, and only by name. This used to lead with whichever login was closest
+  // to a limit, which sounds right and reads badly: the figures move while you
+  // work, so the rows swap under you and every glance costs a re-read of a list
+  // you already knew. Urgency is already carried where it does not move anything
+  // — the figure itself, and the colour it turns.
+  return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function renderLogins() {
