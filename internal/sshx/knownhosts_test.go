@@ -90,13 +90,18 @@ func TestOpenSSHsKnownHostsIsNotConsulted(t *testing.T) {
 	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
 		return "", "", 0
 	})
-	// Recorded where `ssh` would have it, and nowhere else.
-	legacy := filepath.Join(t.TempDir(), "known_hosts")
-	line := knownhosts.Line([]string{knownhosts.Normalize(srv.addr.String())}, srv.hostKey)
-	if err := os.WriteFile(legacy, []byte(line+"\n"), 0o600); err != nil {
+	// Recorded at the path OpenSSH actually uses, in a home of this test's own —
+	// anywhere else and the test would pass whether or not the file is consulted,
+	// which is the one thing it is here to find out.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("HOME", filepath.Dir(filepath.Dir(legacy)))
+	line := knownhosts.Line([]string{knownhosts.Normalize(srv.addr.String())}, srv.hostKey)
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "known_hosts"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	dir := recordHostKeysIn(t)
 	useGo(t)
@@ -106,7 +111,12 @@ func TestOpenSSHsKnownHostsIsNotConsulted(t *testing.T) {
 	}
 	// It was a first sight as far as this client is concerned, so it wrote the
 	// server down itself rather than taking OpenSSH's word for it.
-	if got := lines(t, filepath.Join(dir, "known_hosts")); len(got) != 1 {
+	ours := filepath.Join(dir, "known_hosts")
+	if _, err := os.Stat(ours); err != nil {
+		t.Fatalf("Forge recorded nothing (%v) — it took OpenSSH's word for a host it "+
+			"had never seen", err)
+	}
+	if got := lines(t, ours); len(got) != 1 {
 		t.Errorf("Forge recorded %d hosts, want the one it just met: %q", len(got), got)
 	}
 }
