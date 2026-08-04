@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 	"testing"
@@ -96,19 +99,29 @@ func TestStartingTheUIBringsTheTunnelsUpAndStoppingItDoesNot(t *testing.T) {
 }
 
 // funcBody returns a top-level function's source from one of this package's files.
+//
+// Parsed rather than matched: the obvious version looks for the next line that is
+// a lone closing brace, which is correct only for as long as every file stays
+// gofmt'd and no string literal in one holds a "}" at the start of a line. The
+// parser knows where a function ends, so this cannot be wrong about it.
 func funcBody(t *testing.T, file, name string) string {
 	t.Helper()
 	src, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := strings.Index(string(src), "\nfunc "+name+"(")
-	if start < 0 {
-		t.Fatalf("%s has no func %s", file, name)
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, file, src, 0)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", file, err)
 	}
-	end := strings.Index(string(src)[start+1:], "\n}\n")
-	if end < 0 {
-		t.Fatalf("func %s in %s does not end", name, file)
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != name || fn.Body == nil {
+			continue
+		}
+		return string(src[fset.Position(fn.Pos()).Offset:fset.Position(fn.End()).Offset])
 	}
-	return string(src)[start : start+end+3]
+	t.Fatalf("%s has no func %s", file, name)
+	return ""
 }
