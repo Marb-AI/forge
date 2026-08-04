@@ -118,18 +118,24 @@ func TestLoginPanelDoesNotDrawBarsForWindowsThatDoNotExist(t *testing.T) {
 	}
 }
 
-// The panel exists to be glanced at, so the login about to stop working belongs at
-// the top. Sorted by whichever of its windows is fullest.
-func TestLoginGroupsAreOrderedByPressure(t *testing.T) {
+// The panel is ordered by name — see TestTheClaudePanelIsOrderedByName, which
+// holds the rule. It used to lead with the login closest to a limit, which sounds
+// right and reads badly: those figures move while you work, and a list that
+// reorders itself has to be re-read every time you glance at it. Urgency is
+// carried by the figure and by the colour it turns, neither of which moves a row.
+func TestLoginGroupsKeepEveryWorkspaceOfALoginTogether(t *testing.T) {
 	js := embeddedAsset(t, "app.js")
 	groups := jsFunc(t, js, "loginGroups")
-	if !strings.Contains(groups, "groupPressure(b) - groupPressure(a)") {
-		t.Error("groups should be ordered fullest-window first")
+
+	// Keyed by account, so the same person in two organisations is two rows and one
+	// person on six workspaces is one.
+	if !strings.Contains(groups, "account.uuid") {
+		t.Error("groups should be keyed by the account, not by the workspace")
 	}
-	// A group with no window must not sort as 0% — that would put it above a login
-	// at 3% while claiming to know something about it. It goes last, hence -1.
-	if !strings.Contains(jsFunc(t, js, "groupPressure"), "-1") {
-		t.Error("a group with no window should sort below every group that has one")
+	// The windows come from the freshest sample rather than being reconciled: they
+	// are one number reported many times.
+	if !strings.Contains(groups, "> g.ts") {
+		t.Error("the freshest sample should speak for the group's windows")
 	}
 }
 

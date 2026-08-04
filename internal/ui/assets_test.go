@@ -364,3 +364,25 @@ func TestAServerMetricHoldsItsIconAndItsFigureTogether(t *testing.T) {
 			"lands between the icon and its own figure", strings.TrimSpace(body))
 	}
 }
+
+// The Claude panel is ordered by name, and by nothing that moves. Leading with
+// the login closest to a limit sounds right and reads badly: those figures change
+// while you work, so the rows swap under you and every glance costs a re-read.
+// Urgency is carried by the figure and its colour, which move nothing.
+func TestTheClaudePanelIsOrderedByName(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+
+	sortCall := regexp.MustCompile(`\[\.\.\.groups\.values\(\)\]\.sort\(([^;]*)\);`).FindStringSubmatch(js)
+	if sortCall == nil {
+		t.Fatal("nothing decides the order of the login groups")
+	}
+	if !strings.Contains(sortCall[1], "localeCompare") {
+		t.Errorf("the logins are ordered by %q, which is not their names", sortCall[1])
+	}
+	for _, moving := range []string{"Pressure", "used_percent", "five", "seven", "ts"} {
+		if strings.Contains(sortCall[1], moving) {
+			t.Errorf("the logins are ordered by %q — %q changes while you work, so the "+
+				"rows swap under you", sortCall[1], moving)
+		}
+	}
+}
