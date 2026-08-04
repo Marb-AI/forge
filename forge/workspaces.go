@@ -439,7 +439,7 @@ func workspaceKeys() ([]byte, error) {
 	if p := os.Getenv("FORGE_PUBKEY"); p != "" {
 		extra, err := os.ReadFile(p)
 		if err != nil {
-			return nil, fmt.Errorf("FORGE_PUBKEY=%s: %w", p, err)
+			return nil, fmt.Errorf("FORGE_PUBKEY=%q: %w", p, err)
 		}
 		if line := strings.TrimSpace(string(extra)); line != "" {
 			lines = append(lines, line)

@@ -141,3 +141,23 @@ func TestCreatingAWorkspaceNeedsAKeyFirst(t *testing.T) {
 		t.Errorf("err = %v, want it to name the command that makes one", err)
 	}
 }
+
+// A path out of an environment variable goes in the error quoted. Paths with
+// spaces are ordinary — "/Users/me/My Keys/id.pub" unquoted reads as a path that
+// ends at "My", and the reader is left guessing where the message begins.
+func TestAnUnreadableExtraKeyNamesThePathUnambiguously(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	swapState(t, dir)
+	if _, _, err := Setup(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FORGE_PUBKEY", filepath.Join(t.TempDir(), "My Keys", "absent.pub"))
+
+	_, err := workspaceKeys()
+	if err == nil {
+		t.Fatal("a key file that is not there was accepted")
+	}
+	if !strings.Contains(err.Error(), `"`) {
+		t.Errorf("err = %v, want the path quoted so its ends are visible", err)
+	}
+}
