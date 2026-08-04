@@ -61,9 +61,9 @@ func Use(cfg config.Store, k keys.Store) error {
 	return nil
 }
 
-// setStores records the pair and points the transport at the same directory, so
-// that the servers this device has accepted are kept with the rest of its state
-// rather than in a place the transport decided on alone. Called under stateMu.
+// setStores records the pair and points the transport at both halves: the
+// directory where the servers this device has accepted are kept, and the key it
+// reaches them with. Called under stateMu.
 //
 // The store's own Dir is handed over rather than the path it returns: resolving
 // it can create the directory, and a Forge that never connects to anything
@@ -72,6 +72,10 @@ func Use(cfg config.Store, k keys.Store) error {
 func setStores(cfg config.Store, k keys.Store) {
 	cfgStore, keyStore = cfg, k
 	sshx.KnownHostsIn(cfg.Dir)
+	// And the key it reaches them with. Handed over as the store's own method, so
+	// it is read at the moment a connection needs it — a key made by `forge setup`
+	// in another terminal is usable by a daemon that was already running.
+	sshx.IdentityFrom(k.PrivateKey)
 }
 
 // present names which half of the wiring was missing, so the error says what to
