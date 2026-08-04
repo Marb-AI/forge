@@ -61,6 +61,10 @@ func main() {
 	// it. Stopping the instance closes the terminals it opened and gives the port
 	// back — nothing else will, because an in-process UI has no signal handler and
 	// no pidfile for anyone to find it by.
+	//
+	// Stop is idempotent, which is what lets this be said twice: OnShutdown fires
+	// when the application terminates the way applications do, and Run's error
+	// path (below) reaches neither it nor a deferred call.
 	app.OnShutdown(func() { _ = inst.Stop() })
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -78,6 +82,12 @@ func main() {
 	})
 
 	if err := app.Run(); err != nil {
+		// Run's own defers do not reach the shutdown hooks — those belong to the
+		// platform's termination path, which a failed Run never gets to — and
+		// os.Exit below would skip a deferred call here anyway. So the instance is
+		// stopped by hand, and its terminals end as sessions closing rather than as
+		// connections a dead process left behind.
+		_ = inst.Stop()
 		fmt.Fprintf(os.Stderr, "forge-app: %v\n", err)
 		os.Exit(1)
 	}

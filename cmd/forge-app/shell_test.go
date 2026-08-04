@@ -8,13 +8,14 @@ import (
 
 // The desktop shell is a window and nothing else.
 //
-// It is the newest place where the boundary Iniciativa 1 drew could quietly come
-// undone, and the easiest: a shell has a real UI toolkit in its hands, so the
-// tempting next move is always to do one small thing natively — read the config
-// to show the servers in a menu, open an ssh session for a "connect" button,
-// stat a path for a file dialog. Each of those is an operation, each already
-// exists in package forge, and each done here would exist twice: once for this
-// shell, once for the browser, and a third time for the phone.
+// It is the newest place where the boundary between the core and its front ends
+// could quietly come undone, and the easiest: a shell has a real UI toolkit in
+// its hands, so the tempting next move is always to do one small thing natively
+// — read the config to show the servers in a menu, open an ssh session for a
+// "connect" button, stat a path for a file dialog. Each of those is an
+// operation, each already exists in package forge, and each done here would
+// exist twice: once for this shell, once for the browser, and a third time for
+// the phone.
 //
 // So the rule is the same one the CLI carries, and for the same reason: the
 // packages a shell is allowed to know about, written down, because no compiler
