@@ -34,8 +34,10 @@ import (
 //
 // It authenticates with this device's own key, handed in by the core (see
 // identity.go) — not with an agent and not with anything in ~/.ssh, neither of
-// which exists on a phone. What is left of that borrowing is one file, the
-// known_hosts it reads as a second opinion, and that goes with the flip.
+// which exists on a phone. One borrowing is left and is still here: it reads
+// ~/.ssh/known_hosts as a second opinion, never writing to it, so that a host
+// the ssh binary already trusts is not trusted on sight a second time. That one
+// goes on its own, and until it does this client still wants a $HOME.
 type goBackend struct{}
 
 func (goBackend) Name() string { return "go" }
@@ -226,7 +228,8 @@ func listenLoopback(port int) ([]net.Listener, error) {
 // this backend never sees ssh's wording. Windows reports the same condition under
 // a code of its own, where it falls through as an ordinary failure and the tunnel
 // retries rather than reporting what is in the way — a worse message, not a worse
-// tunnel, on a backend that is off by default.
+// tunnel, and only on Windows, which is the platform this client is least used
+// on and the one where `FORGE_SSH_BACKEND=exec` is least likely to be an option.
 func asPortBusy(port int, err error) error {
 	if errors.Is(err, syscall.EADDRINUSE) {
 		return fmt.Errorf("%w: cannot listen to port: %d", ErrPortBusy, port)
