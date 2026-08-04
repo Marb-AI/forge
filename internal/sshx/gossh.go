@@ -21,9 +21,8 @@ import (
 //
 // It exists for the platforms where the exec'd backend cannot: a phone has no
 // ssh binary and no way to spawn one, so either the client is library code or
-// Forge is a laptop program forever. It is off by default (FORGE_SSH_BACKEND=go
-// turns it on) because it is new against a client that has worked for years,
-// and because two things it needs are not built yet — see below.
+// Forge is a laptop program forever. It is what runs now, unless somebody asks
+// for the other one (FORGE_SSH_BACKEND=exec).
 //
 // Where it matches the exec'd backend it does so on purpose: the same connect
 // timeout, the same keepalives, the same key-only stance, the same command string
