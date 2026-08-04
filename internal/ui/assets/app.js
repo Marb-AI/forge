@@ -650,10 +650,19 @@ function renderTrackBanner() {
   const have = !!n;                            // there's a running session to show
   const show = have && !track.hidden;
   banner.hidden = !show;
-  // The header toggle only means something when there's a session; it lights when
-  // the banner is showing, and lets you bring it back after hiding it.
-  toggle.hidden = !have;
+  // The way back is never gated on something the setting is not. Hiding is one
+  // global choice, and this button is the only thing that undoes it — nothing else
+  // touches that key — so gating it on "this workspace has a session" made it a
+  // one-way door: hide the banner, move to a tab whose Claude is stopped, and the
+  // way back is gone from a setting that is still in force.
+  //
+  // So: whenever there is something to show, or whenever it is being hidden.
+  toggle.hidden = !have && !track.hidden;
   toggle.classList.toggle("active", show);
+  // What the click will do, rather than what the button is about. It is the same
+  // control both ways round, and a button that says "Show" while showing is a
+  // button you press to find out.
+  toggle.title = show ? "Hide session tracking" : "Show session tracking";
   if (!show) return;
   banner.classList.toggle("live", trackingLive());
   banner.classList.toggle("paused", track.paused);

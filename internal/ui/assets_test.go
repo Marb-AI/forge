@@ -244,3 +244,21 @@ func TestReconnectBackoffCannotStampede(t *testing.T) {
 		t.Error("the backoff should reset when a byte actually arrives, not on attach")
 	}
 }
+
+// Hiding the session banner is one global setting, and this button is the only
+// thing that undoes it — nothing else writes that key. So its visibility must not
+// depend on anything the setting does not: gated on "this workspace has a session"
+// it was a one-way door, because hiding it and then opening a workspace whose
+// Claude is stopped left a setting in force with no way to reach it.
+func TestHidingTheTrackingBannerLeavesAWayBack(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+
+	rule := regexp.MustCompile(`toggle\.hidden\s*=\s*([^;]+);`).FindStringSubmatch(js)
+	if rule == nil {
+		t.Fatal("nothing decides whether the tracking toggle is shown")
+	}
+	if !strings.Contains(rule[1], "track.hidden") {
+		t.Errorf("the toggle is shown by %q, which does not consider whether the banner "+
+			"is hidden — the only control that brings it back cannot be hidden itself", rule[1])
+	}
+}
