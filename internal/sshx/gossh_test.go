@@ -339,8 +339,18 @@ func knownHostsPath(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
-	t.Cleanup(func() { os.Truncate(path, 0) })
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Reported rather than swallowed: an emptying that quietly did not happen
+	// leaves the next test reading this one's hosts, which is the failure this
+	// cleanup exists to prevent — and it would come back as somebody else's
+	// mysterious "the host key has CHANGED".
+	t.Cleanup(func() {
+		if err := os.Truncate(path, 0); err != nil {
+			t.Errorf("could not empty %s, so the next test inherits these hosts: %v", path, err)
+		}
+	})
 	return path
 }
 
