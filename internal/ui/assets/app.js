@@ -645,16 +645,22 @@ function trackCopyText() {
 
 function renderTrackBanner() {
   const banner = document.getElementById("track-banner");
-  const toggle = document.getElementById("track-toggle");
   const n = trackNumbers(state.active);
   const have = !!n;                            // there's a running session to show
-  const show = have && !track.hidden;
-  banner.hidden = !show;
-  // The header toggle only means something when there's a session; it lights when
-  // the banner is showing, and lets you bring it back after hiding it.
-  toggle.hidden = !have;
-  toggle.classList.toggle("active", show);
-  if (!show) return;
+  banner.hidden = !have;
+  if (!have) return;
+
+  // The eye hides the NUMBERS, and nothing else. Tracking goes on, the buttons
+  // stay where they are, and the way back is the same eye you pressed — which is
+  // the whole point: it is for not watching the counter, not for turning the
+  // feature off.
+  banner.classList.toggle("numbers-hidden", track.hidden);
+  const hide = document.getElementById("track-hide");
+  hide.title = track.hidden
+    ? "Show the times — tracking never stopped"
+    : "Hide the times — tracking keeps running";
+  hide.classList.toggle("active", track.hidden);
+
   banner.classList.toggle("live", trackingLive());
   banner.classList.toggle("paused", track.paused);
   document.getElementById("track-session").textContent = fmtDur(n.session);
@@ -881,8 +887,7 @@ document.getElementById("track-pause").addEventListener("click", () => {
 });
 document.getElementById("track-copy").addEventListener("click", (e) =>
   copyToClipboard(trackCopyText(), e.currentTarget));
-document.getElementById("track-hide").addEventListener("click", () => setTrackHidden(true));
-document.getElementById("track-toggle").addEventListener("click", () => setTrackHidden(!track.hidden));
+document.getElementById("track-hide").addEventListener("click", () => setTrackHidden(!track.hidden));
 
 setInterval(trackTick, 1000);
 setInterval(flushActive, 15000);

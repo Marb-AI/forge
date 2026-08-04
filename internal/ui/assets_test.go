@@ -314,3 +314,30 @@ func TestPaddingOfReadsTheCascade(t *testing.T) {
 		t.Errorf("padding of #a-suffix = %q; a longer name is not the shorter one", got)
 	}
 }
+
+// The eye over the clocks hides the TIMES, not the banner: tracking keeps running,
+// the controls stay where they are, and the same button brings the numbers back.
+// It used to hide the whole strip — which took the buttons with it, including the
+// only way to undo it, and turned "I don't want to watch the counter" into "the
+// feature is gone".
+//
+// Checked the way the design describes it: the file tree's class flip, applied to
+// the clocks. And what the banner itself does must not depend on that setting.
+func TestTheEyeHidesTheTimesAndNotTheBanner(t *testing.T) {
+	css, js := embeddedAsset(t, "app.css"), embeddedAsset(t, "app.js")
+
+	flip := regexp.MustCompile(`#track-banner\.numbers-hidden\s+\.track-clocks\s*\{[^}]*display:\s*none`)
+	if !flip.MatchString(css) {
+		t.Error("nothing hides .track-clocks on the banner's own class — the eye has " +
+			"nothing to flip, so it can only be hiding something bigger")
+	}
+
+	rule := regexp.MustCompile(`banner\.hidden\s*=\s*([^;]+);`).FindStringSubmatch(js)
+	if rule == nil {
+		t.Fatal("nothing decides whether the banner is shown")
+	}
+	if strings.Contains(rule[1], "track.hidden") {
+		t.Errorf("the banner is shown by %q — the eye is for the times, and a banner "+
+			"that goes with them takes its own controls out of reach", rule[1])
+	}
+}
