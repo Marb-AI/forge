@@ -146,7 +146,6 @@ button:hover { background: var(--bg-3); }
 .pane-head button svg { display: block; }
 .pane-head button.active { color: var(--fg); background: var(--bg-3); }
 .pane-actions { display: flex; align-items: center; gap: 2px; }
-#track-toggle.active { color: var(--fg); background: var(--bg-3); }
 
 /* ---- session tracking banner (above the file tree) ---- */
 /* The workspace topic. Two lines at most and then an ellipsis: it is a label you
@@ -232,6 +231,10 @@ button:hover { background: var(--bg-3); }
 }
 #track-banner[hidden] { display: none; }
 .track-clocks { display: flex; align-items: center; gap: 10px; min-width: 0; }
+/* The eye takes the numbers, not the banner: tracking keeps running and the
+   controls stay where they were, you just stop watching the counter go up. The
+   same class flip the file tree uses to drop dotfiles — see #filetree. */
+#track-banner.numbers-hidden .track-clocks { display: none; }
 .track-clock {
   display: inline-flex;
   align-items: center;
@@ -262,6 +265,10 @@ button:hover { background: var(--bg-3); }
 .track-btns button svg { display: block; }
 .track-btns button:hover { color: var(--fg); background: var(--bg-3); }
 .track-btns button.ok { color: #57b66a; }
+/* The eye, while the times are hidden: lit like any other control that is doing
+   something, so "no numbers" reads as a setting and not as a workspace with
+   nothing to report. */
+.track-btns button.active { color: var(--fg); background: var(--bg-3); }
 #cf-copy { margin-right: auto; }
 #cf-copy.ok { color: #57b66a; border-color: #57b66a; }
 
