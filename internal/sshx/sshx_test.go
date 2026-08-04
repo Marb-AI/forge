@@ -178,11 +178,7 @@ func TestParseJumpRefusesWhatCannotBeARoute(t *testing.T) {
 // running agent still gets first refusal and the key that matters may never be
 // offered at all.
 func TestEveryInteractiveArgvCarriesTheDeviceKey(t *testing.T) {
-	identityMu.Lock()
-	prev := identityPath
-	identityMu.Unlock()
-	IdentityFileFrom(func() (string, error) { return "/state/id.pem", nil })
-	t.Cleanup(func() { IdentityFileFrom(prev) })
+	useIdentityPath(t, "/state/id.pem")
 
 	tgt := Target{User: "crm", Addr: "h", Port: 22}
 	for name, args := range map[string][]string{
@@ -204,11 +200,7 @@ func TestEveryInteractiveArgvCarriesTheDeviceKey(t *testing.T) {
 // gets no -i, and nothing breaks: there is no ssh binary on such a device for
 // the argv to reach.
 func TestNoIdentityFileMeansNoArgumentForIt(t *testing.T) {
-	identityMu.Lock()
-	prev := identityPath
-	identityMu.Unlock()
-	IdentityFileFrom(nil)
-	t.Cleanup(func() { IdentityFileFrom(prev) })
+	useIdentitySeam(t, nil, nil)
 
 	if got := joined(Target{User: "u", Addr: "h"}.Args("id")); strings.Contains(got, "-i ") {
 		t.Errorf("argv names a key file this device does not have: %s", got)

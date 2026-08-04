@@ -41,20 +41,20 @@ var (
 // points here when it resolves its own stores.
 var errNoIdentity = errors.New("nothing told the transport which key this device uses")
 
-// IdentityFrom tells the transport where to get this device's private key. The
-// core calls it with its key store.
-func IdentityFrom(key func() ([]byte, error)) {
+// IdentityFrom tells the transport which key this device uses — both ways of
+// describing it, in one call.
+//
+// One call because it is one key. Set separately, the two could be made to
+// disagree: a swap between the halves would leave a client signing with the
+// material of one store while an argv pointed the ssh binary at the file of
+// another. That window is small and only opens at startup, which is a poor
+// reason to leave it open when the fix is a single setter.
+//
+// path may be nil, for a device whose key is somewhere a path cannot describe.
+func IdentityFrom(key func() ([]byte, error), path func() (string, error)) {
 	identityMu.Lock()
 	defer identityMu.Unlock()
-	identityFn = key
-}
-
-// IdentityFileFrom tells it where that key is on disk, when it is on disk. Only
-// the exec'd ssh needs this; everything else takes the bytes.
-func IdentityFileFrom(path func() (string, error)) {
-	identityMu.Lock()
-	defer identityMu.Unlock()
-	identityPath = path
+	identityFn, identityPath = key, path
 }
 
 // identityFile is the key's path, or empty when this device keeps it somewhere a
