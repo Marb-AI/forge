@@ -325,6 +325,13 @@ func trust(t *testing.T, srv *testServer) {
 // absent file is a different failure ("nothing can be verified") from a host
 // that is simply not in it, and a test that wants the second must not get the
 // first by accident.
+//
+// Emptied after each test, and that is not tidiness. HOME is one directory for
+// the whole package (see TestMain), the servers here listen on a port the
+// operating system picks, and this file records a host BY that port — so a port
+// handed out twice in one run means a later server inheriting an earlier one's
+// key. What the client then reports is "the host key has CHANGED", which is
+// correct, and nothing to do with the test asking.
 func knownHostsPath(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(sshDirForTest(t), "known_hosts")
@@ -333,6 +340,7 @@ func knownHostsPath(t *testing.T) string {
 		t.Fatal(err)
 	}
 	f.Close()
+	t.Cleanup(func() { os.Truncate(path, 0) })
 	return path
 }
 
