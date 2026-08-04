@@ -14,9 +14,7 @@ import (
 // handshake trace to find out you never ran setup.
 func TestTheTransportSaysWhichKeyIsMissing(t *testing.T) {
 	t.Run("nothing wired it", func(t *testing.T) {
-		prev := identityFn
-		IdentityFrom(nil)
-		t.Cleanup(func() { IdentityFrom(prev) })
+		useIdentityFn(t, nil)
 
 		_, err := identity()
 		if !errors.Is(err, errNoIdentity) {
@@ -26,9 +24,7 @@ func TestTheTransportSaysWhichKeyIsMissing(t *testing.T) {
 
 	t.Run("the device has no key yet", func(t *testing.T) {
 		absent := errors.New("this device has no key yet")
-		prev := identityFn
-		IdentityFrom(func() ([]byte, error) { return nil, absent })
-		t.Cleanup(func() { IdentityFrom(prev) })
+		useIdentityFn(t, func() ([]byte, error) { return nil, absent })
 
 		_, err := identity()
 		if !errors.Is(err, absent) {
@@ -53,12 +49,10 @@ func TestTheTransportSaysWhichKeyIsMissing(t *testing.T) {
 // restarting it.
 func TestTheKeyIsReadWhenItIsNeeded(t *testing.T) {
 	reads := 0
-	prev := identityFn
-	IdentityFrom(func() ([]byte, error) {
+	useIdentityFn(t, func() ([]byte, error) {
 		reads++
 		return nil, errors.New("no key")
 	})
-	t.Cleanup(func() { IdentityFrom(prev) })
 
 	identity()
 	identity()

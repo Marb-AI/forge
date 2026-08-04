@@ -310,8 +310,23 @@ func writeClientKey(t *testing.T) ssh.PublicKey {
 // backend and the known-hosts directory.
 func useIdentity(t *testing.T, key []byte) {
 	t.Helper()
+	useIdentityFn(t, func() ([]byte, error) { return key, nil })
+}
+
+// useIdentityFn is the same for a source that answers something other than key
+// material — the three ways there can be no key to offer.
+//
+// The old value is read under the lock that guards it, not beside it. Nothing
+// writes it from another goroutine today, so this is not a race being fixed; it
+// is one not being left for whoever adds a parallel test or a dial that outlives
+// the test that started it.
+func useIdentityFn(t *testing.T, key func() ([]byte, error)) {
+	t.Helper()
+	identityMu.Lock()
 	prev := identityFn
-	IdentityFrom(func() ([]byte, error) { return key, nil })
+	identityMu.Unlock()
+
+	IdentityFrom(key)
 	t.Cleanup(func() { IdentityFrom(prev) })
 }
 
@@ -712,9 +727,7 @@ func startStubAgent(t *testing.T) <-chan net.Conn {
 // useGo selects the pure-Go backend for one test.
 func useGo(t *testing.T) {
 	t.Helper()
-	prev := chosen
-	Use(goBackend{})
-	t.Cleanup(func() { Use(prev) })
+	useBackend(t, goBackend{})
 }
 
 // sshDirForTest is ~/.ssh under the package's throwaway HOME, created on demand.

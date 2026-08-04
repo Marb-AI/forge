@@ -261,9 +261,7 @@ func TestTheExecdBackendReportsWhySshGaveUp(t *testing.T) {
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Skip("no ssh binary")
 	}
-	prev := chosen
-	Use(execBackend{})
-	t.Cleanup(func() { Use(prev) })
+	useBackend(t, execBackend{})
 
 	// Nothing is listening there, so ssh fails to connect and says so.
 	dead := Target{User: "nobody", Addr: "127.0.0.1", Port: freePort(t)}
