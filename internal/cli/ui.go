@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -43,11 +44,42 @@ func uiStart() int {
 	url := ui.URL(d.Port, d.Token)
 	if already {
 		fmt.Printf("forge ui already running (pid %d)\n  %s\n", d.PID, url)
-		return 0
+	} else {
+		fmt.Printf("forge ui started\n  %s\n", url)
 	}
-	fmt.Printf("forge ui started\n  %s\n", url)
-	openBrowser(url)
+	startTunnels()
+	if !already {
+		openBrowser(url)
+	}
 	return 0
+}
+
+// startTunnels brings the forwarding supervisor up alongside the UI, if it is not
+// already there.
+//
+// Not a convenience. The ports panel lists what a workspace publishes and offers
+// each one as a link to this machine — and every one of those links is carried by
+// a tunnel the supervisor holds. Without it the panel is a list of addresses that
+// do not answer, which is worse than no panel at all, and the only sign is a
+// browser tab that times out.
+//
+// The other direction is deliberately not symmetric: `forge ui stop` leaves the
+// tunnels running. They serve this machine — a browser tab, a curl, an editor —
+// and not the window you happened to close.
+//
+// Best effort, and quiet when it works: this is not what you asked for, so it
+// gets one line when it does something and one line when it cannot, never an
+// error that makes a running UI look like a failure.
+func startTunnels() {
+	if running, err := forge.ForwardingStatus(); err == nil && running.Running {
+		return
+	}
+	if err := forge.RestartForwarding(); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: the ports panel needs tunnels and they did not start (%v)\n"+
+			"       start them with: forge forwarding start\n", err)
+		return
+	}
+	fmt.Println("  tunnels running — the ports panel's links are live")
 }
 
 func uiStop() int {

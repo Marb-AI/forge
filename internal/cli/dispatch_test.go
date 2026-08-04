@@ -1,6 +1,10 @@
 package cli
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 // What is left to test here is the dispatch: that a word on the command line
 // reaches the right operation, and that the exit code says what happened. The
@@ -69,4 +73,42 @@ func TestHostAddArguments(t *testing.T) {
 			t.Errorf("host remove %s = %d", alias, got)
 		}
 	}
+}
+
+// The ports panel offers every published port as a link to this machine, and each
+// of those is carried by a tunnel the forwarding supervisor holds. Starting the UI
+// without them leaves a panel full of addresses that do not answer — with no sign
+// but a browser tab that times out — so `forge ui` brings them up.
+//
+// Not the other way round: stopping the UI leaves the tunnels alone. They serve
+// this machine, not the window.
+func TestStartingTheUIBringsTheTunnelsUpAndStoppingItDoesNot(t *testing.T) {
+	start := funcBody(t, "ui.go", "uiStart")
+	if !strings.Contains(start, "startTunnels()") {
+		t.Error("`forge ui` starts no tunnels — its ports panel would link to addresses nothing answers on")
+	}
+	if body := funcBody(t, "ui.go", "startTunnels"); !strings.Contains(body, "RestartForwarding") {
+		t.Errorf("startTunnels does not start the supervisor: %q", body)
+	}
+	if stop := funcBody(t, "ui.go", "uiStop"); strings.Contains(stop, "Forwarding") {
+		t.Error("`forge ui stop` touches the tunnels — they outlive the window that showed them")
+	}
+}
+
+// funcBody returns a top-level function's source from one of this package's files.
+func funcBody(t *testing.T, file, name string) string {
+	t.Helper()
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(src), "\nfunc "+name+"(")
+	if start < 0 {
+		t.Fatalf("%s has no func %s", file, name)
+	}
+	end := strings.Index(string(src)[start+1:], "\n}\n")
+	if end < 0 {
+		t.Fatalf("func %s in %s does not end", name, file)
+	}
+	return string(src)[start : start+end+3]
 }
