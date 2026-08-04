@@ -11,7 +11,15 @@ GOFLAGS :=
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-X github.com/Marb-AI/forge/internal/version.Version=$(VERSION)"
 
-.PHONY: all build cli agent agent-linux release clean fmt vet test tidy
+# The macOS SDK builds the webview objects for its own version, and the Go linker
+# targets 11.0, which is one warning per object file — dozens of them, burying
+# anything worth reading. Saying 11.0 on both sides silences it and keeps the app
+# running on the same macOS versions the CLI does. Nothing to set anywhere else.
+ifeq ($(shell uname -s),Darwin)
+APPENV := CGO_CFLAGS=-mmacosx-version-min=11.0 CGO_LDFLAGS=-mmacosx-version-min=11.0
+endif
+
+.PHONY: all build cli agent agent-linux app release clean fmt vet test tidy
 
 all: build
 
@@ -22,6 +30,13 @@ cli:
 
 agent:
 	go build $(GOFLAGS) $(LDFLAGS) -o $(BIN)/forge-agent ./cmd/forge-agent
+
+# The desktop shell: the same core in a window instead of a browser tab. Not part
+# of `build`, because it is cgo over the system's webview and a plain `make` has
+# no business needing Xcode or GTK installed.
+#
+app:
+	$(APPENV) go build $(GOFLAGS) $(LDFLAGS) -o $(BIN)/forge-app ./cmd/forge-app
 
 # The agent runs on the (Linux) server; cross-compile it from the laptop.
 agent-linux:
