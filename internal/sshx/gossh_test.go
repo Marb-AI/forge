@@ -280,8 +280,12 @@ func (s *testServer) target(user string) Target {
 	return Target{User: user, Addr: host, Port: p}
 }
 
-// writeClientKey generates this test's identity and puts it where the backend
-// looks for one, returning its public half for the server to accept.
+// writeClientKey generates this test's identity and hands it to the transport,
+// returning its public half for the server to accept.
+//
+// Handed in rather than written to ~/.ssh, which is where it used to go and
+// where nothing looks any more: the device key is given to the transport by
+// whoever wired it, and in a test that is the test.
 func writeClientKey(t *testing.T) ssh.PublicKey {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -292,15 +296,38 @@ func writeClientKey(t *testing.T) ssh.PublicKey {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := sshDirForTest(t)
-	if err := os.WriteFile(filepath.Join(dir, "id_ed25519"), pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	useIdentity(t, pem.EncodeToMemory(block))
+
 	signer, err := ssh.NewSignerFromKey(priv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return signer.PublicKey()
+}
+
+// useIdentity points the transport at some key material for one test and puts
+// back whatever was there afterwards — the seam is process-wide, like the chosen
+// backend and the known-hosts directory.
+func useIdentity(t *testing.T, key []byte) {
+	t.Helper()
+	useIdentityFn(t, func() ([]byte, error) { return key, nil })
+}
+
+// useIdentityFn is the same for a source that answers something other than key
+// material — the three ways there can be no key to offer.
+//
+// The old value is read under the lock that guards it, not beside it. Nothing
+// writes it from another goroutine today, so this is not a race being fixed; it
+// is one not being left for whoever adds a parallel test or a dial that outlives
+// the test that started it.
+func useIdentityFn(t *testing.T, key func() ([]byte, error)) {
+	t.Helper()
+	identityMu.Lock()
+	prev := identityFn
+	identityMu.Unlock()
+
+	IdentityFrom(key)
+	t.Cleanup(func() { IdentityFrom(prev) })
 }
 
 // trust records the server's host key in ~/.ssh/known_hosts, where this backend
@@ -643,53 +670,12 @@ func readUntil(r io.Reader, marker string, within time.Duration) (string, bool) 
 	}
 }
 
-// The agent is consulted on every connection, and there is a connection per
-// command — so a socket left open is a file descriptor per command, and a daemon
-// that polls every workspace runs out of them. It has to be released when the
-// handshake that needed it is over.
-func TestTheAgentSocketIsReleasedAfterEveryCommand(t *testing.T) {
-	pub := writeClientKey(t)
-	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
-		return "ok", "", 0
-	})
-	trust(t, srv)
-	useGo(t)
-	agentConns := startStubAgent(t)
-
-	if _, err := srv.target("crm").Output("id"); err != nil {
-		t.Fatal(err)
-	}
-
-	conn := <-agentConns
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
-		t.Errorf("the agent socket is still open after the command: read gave %v, want EOF", err)
-	}
-}
-
-// An agent that is running but holds nothing useful must not stop the key files
-// from being tried — x/crypto walks authentication methods by name and never
-// goes back to one it has tried, so offering the agent separately would let a
-// colleague's empty agent lock Forge out of every server it can reach today.
-func TestAnAgentWithNoKeysDoesNotShadowTheKeyFiles(t *testing.T) {
-	pub := writeClientKey(t)
-	srv := startServer(t, pub, func(string, io.Reader) (string, string, int) {
-		return "reached", "", 0
-	})
-	trust(t, srv)
-	useGo(t)
-	startStubAgent(t)
-
-	out, err := srv.target("crm").Output("id")
-	if err != nil {
-		t.Fatalf("an empty agent shadowed ~/.ssh: %v", err)
-	}
-	if string(out) != "reached" {
-		t.Errorf("Output = %q, want the server's stdout", out)
-	}
-}
-
 // startStubAgent listens on a unix socket, points SSH_AUTH_SOCK at it, and hands
+//
+// It is here for agent FORWARDING, which is a different thing from authenticating
+// with an agent: the device key is what gets this client in, and what a terminal
+// lends to the far end is your agent, for git inside the workspace. Nothing in
+// this package reads it to log in any more.
 // back every connection it accepts.
 //
 // It answers "I have no keys", which is a real answer rather than a hang: the
@@ -741,9 +727,7 @@ func startStubAgent(t *testing.T) <-chan net.Conn {
 // useGo selects the pure-Go backend for one test.
 func useGo(t *testing.T) {
 	t.Helper()
-	prev := chosen
-	Use(goBackend{})
-	t.Cleanup(func() { Use(prev) })
+	useBackend(t, goBackend{})
 }
 
 // sshDirForTest is ~/.ssh under the package's throwaway HOME, created on demand.

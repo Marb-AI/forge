@@ -33,11 +33,10 @@ import (
 // as the exec'd backend's accept-new does, in a file Forge owns — see
 // knownhosts.go.
 //
-// One gap is left, and closes with the device key in v2: credentials come from
-// the agent and ~/.ssh, the same identities the ssh binary would have found.
-// Forge does not yet have a key of its own to offer, and an encrypted key with
-// no agent is skipped rather than prompted for — this backend has no terminal
-// to ask on.
+// It authenticates with this device's own key, handed in by the core (see
+// identity.go) — not with an agent and not with anything in ~/.ssh, neither of
+// which exists on a phone. What is left of that borrowing is one file, the
+// known_hosts it reads as a second opinion, and that goes with the flip.
 type goBackend struct{}
 
 func (goBackend) Name() string { return "go" }
@@ -396,15 +395,10 @@ func (r *remoteTerm) Close() error {
 // none of that can be reviewed against "the behaviour is unchanged". It comes
 // with the step that measures it.
 func dial(t Target) (*ssh.Client, error) {
-	auth, closeAuth, err := authMethods()
+	auth, err := authMethods()
 	if err != nil {
 		return nil, err
 	}
-	// The agent is only consulted while the handshakes run, and none of the dials
-	// below return until they are over — so this is the moment its socket stops
-	// being needed. Leaving it open would cost one file descriptor per command,
-	// which a daemon polling every workspace notices within the day.
-	defer closeAuth()
 	hostKeys, err := hostKeyCallback()
 	if err != nil {
 		return nil, err
@@ -620,86 +614,29 @@ func keepalive(client *ssh.Client) {
 	}
 }
 
-// authMethods offers the same identities the ssh binary would find: the agent's
-// keys first, then the default key files. The returned func releases what they
-// hold — today the agent's socket — and is safe to call more than once.
+// authMethods is this device's key, and nothing else.
 //
-// They are offered as ONE publickey method, which is not a detail: x/crypto
-// tries each authentication method by *name* and never returns to a name it has
-// already tried, so an agent offered as its own method would mean a running
-// agent with no useful key in it silently prevents ~/.ssh from ever being tried
-// — a Forge that stops connecting because a colleague's agent is up. OpenSSH
-// walks its identities inside the single publickey method; so does this.
+// One publickey method holding one signer. There is no agent to consult and no
+// directory to walk: a server either trusts this device or it does not, which is
+// the whole point of the device having a key of its own — see identity.go.
 //
 // Password and keyboard-interactive are absent rather than disabled, which is
 // what the exec'd backend spends two options saying (PasswordAuthentication=no,
 // KbdInteractiveAuthentication=no): a bad key must fail immediately and
 // honestly instead of dropping into a prompt, which in the UI daemon is a
 // prompt nobody is there to answer.
-func authMethods() ([]ssh.AuthMethod, func(), error) {
-	var (
-		signers []ssh.Signer
-		open    []io.Closer
-	)
-	release := func() {
-		for _, c := range open {
-			c.Close()
-		}
-		open = nil
-	}
-
-	// The agent, if one is running. Its keys come first because that is where a
-	// passphrase-protected key — already unlocked, once, by whoever started the
-	// agent — lives. They stay usable only while the socket is open, since the
-	// signing happens on the far side of it; that is why release runs after the
-	// handshake rather than here.
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		if conn, err := net.Dial("unix", sock); err == nil {
-			open = append(open, conn)
-			if fromAgent, err := agent.NewClient(conn).Signers(); err == nil {
-				signers = append(signers, fromAgent...)
-			}
-		}
-	}
-
-	signers = append(signers, defaultIdentities()...)
-	if len(signers) == 0 {
-		release()
-		return nil, func() {}, fmt.Errorf("no usable SSH key: no agent (SSH_AUTH_SOCK) and nothing readable in ~/.ssh (%s)",
-			"id_ed25519, id_ecdsa, id_rsa")
-	}
-	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, release, nil
-}
-
-// identityFiles are the key names OpenSSH tries by default, in its order.
-var identityFiles = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
-
-// defaultIdentities loads whichever of them exist and can be parsed. A key that
-// is missing, unreadable or passphrase-protected is skipped in silence: the
-// server decides which of the offered keys it accepts, and one unusable file is
-// not a reason to refuse to connect with the others.
-func defaultIdentities() []ssh.Signer {
-	dir, err := sshDir()
+func authMethods() ([]ssh.AuthMethod, error) {
+	signer, err := identity()
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	var signers []ssh.Signer
-	for _, name := range identityFiles {
-		pem, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		signer, err := ssh.ParsePrivateKey(pem)
-		if err != nil {
-			continue
-		}
-		signers = append(signers, signer)
-	}
-	return signers
+	return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
 }
 
-// sshDir is ~/.ssh, where this backend borrows its credentials from until the
-// device key replaces them.
+// sshDir is ~/.ssh, and one thing is left there: the known_hosts this client
+// reads as a second opinion (see knownhosts.go). Credentials no longer come from
+// it — the device key does that — and this last borrowing goes when that file
+// does.
 func sshDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

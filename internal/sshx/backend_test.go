@@ -86,10 +86,25 @@ func (f *fakeBackend) Run(t Target, c Command) error {
 // useFake installs a backend for one test and puts the previous one back after.
 func useFake(t *testing.T, f *fakeBackend) *fakeBackend {
 	t.Helper()
-	prev := chosen
-	Use(f)
-	t.Cleanup(func() { Use(prev) })
+	useBackend(t, f)
 	return f
+}
+
+// useBackend is that, for any backend — including nil, which means "whatever the
+// environment says".
+//
+// The old value is read under the lock that guards it, not beside it. Nothing
+// writes it from another goroutine today, so this is not a race being fixed; it
+// is one not being left for whoever adds a parallel test or a dial that outlives
+// the test that started it.
+func useBackend(t *testing.T, b Backend) {
+	t.Helper()
+	chosenMu.Lock()
+	prev := chosen
+	chosenMu.Unlock()
+
+	Use(b)
+	t.Cleanup(func() { Use(prev) })
 }
 
 func TestOutputReturnsStdoutAndTheCommandItRan(t *testing.T) {
@@ -173,9 +188,7 @@ func TestTheExecBackendReportsExitCodesThroughTheSameType(t *testing.T) {
 // Which backend is in use is a decision, not a preference: nothing changes
 // until someone says so, and today that is one environment variable.
 func TestTheDefaultBackendIsStillTheSshBinary(t *testing.T) {
-	prev := chosen
-	Use(nil)
-	t.Cleanup(func() { Use(prev) })
+	useBackend(t, nil)
 
 	if got := backend().Name(); got != "ssh" {
 		t.Errorf("backend with nothing set = %q, want the exec'd ssh", got)
