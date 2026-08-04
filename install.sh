@@ -64,13 +64,21 @@ TARGET="$INSTALL_DIR/$BIN"
 # `forge ui` daemon is. A rename is atomic and leaves the running one on its old
 # inode.
 NEW="$TARGET.new.$$"
+# Whatever happens between here and the rename, the staged file goes with it:
+# a failed fetch, a chmod that could not, a signal from a ^C halfway through a
+# 19MB download. One trap rather than a cleanup per step, so a step added here
+# later cannot forget. After the rename there is nothing at this path to remove.
+trap 'rm -f "$NEW"' EXIT INT TERM
+
 if ! fetch "$URL" "$NEW"; then
-	rm -f "$NEW"
 	echo "forge: download failed ($URL)" >&2
 	echo "       (a private repo needs a public release, or fetch the asset manually)" >&2
 	exit 1
 fi
-chmod +x "$NEW"
+if ! chmod +x "$NEW"; then
+	echo "forge: cannot make $NEW executable — check the permissions on $INSTALL_DIR" >&2
+	exit 1
+fi
 
 # macOS: a cross-compiled Go binary carries a linker ad-hoc signature that Apple
 # Silicon (AMFI) can reject, killing the process with "killed: 9". Re-signing it
