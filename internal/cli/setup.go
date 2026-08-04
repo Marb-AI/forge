@@ -13,7 +13,13 @@ import (
 // what the command is for — you come back to it every time you add a server, and
 // a command that only tells you something the first time is a command you end up
 // digging the answer out of a file for.
-func setupCmd() int {
+func setupCmd(args []string) int {
+	// Takes nothing, and says so rather than ignoring it: every other command
+	// here refuses argv it does not understand, and a typo that vanishes without
+	// a word is the one that gets typed again.
+	if len(args) > 0 {
+		return fail("usage: forge setup (takes no arguments)")
+	}
 	pubkey, created, err := forge.Setup()
 	if err != nil {
 		return fail("%v", err)

@@ -77,7 +77,7 @@ func Main(args []string) int {
 	}
 	switch args[0] {
 	case "setup":
-		return setupCmd()
+		return setupCmd(args[1:])
 	case "host":
 		return hostCmd(args[1:])
 	case "workspace", "ws":
