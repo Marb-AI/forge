@@ -64,6 +64,55 @@ func SpawnSupervisor() (pid int, already bool, err error) {
 	return pid, false, nil
 }
 
+// Tunnels is this process holding the port forwards itself, for a front end with
+// no daemon behind it: a desktop shell, and a phone after it, where a detached
+// process is either surprising or impossible.
+//
+// It may be holding nothing at all — see StartForwarding — and Stop is safe
+// either way, which is what lets a caller keep one of these without asking which
+// kind it got.
+type Tunnels struct{ in *supervisor.Instance }
+
+// Stop takes down whatever this process put up, and leaves alone whatever it
+// did not. Idempotent.
+func (t *Tunnels) Stop() {
+	if t != nil && t.in != nil {
+		t.in.Stop()
+	}
+}
+
+// StartForwarding makes sure this machine's tunnels are up, without a daemon.
+//
+// A daemon is what `forge ui` uses and it is the right answer there: the tunnels
+// serve the machine rather than the window, so they outlive the browser tab. An
+// application is the other case. Nothing can be re-exec'd on a phone, and the
+// bundle a desktop app ships in holds no `forge` to re-exec anyway — so the
+// supervisor runs here, in this process, for as long as there is a window.
+//
+// If one is already running, it is left alone and this returns a handle that
+// holds nothing. Two supervisors on one machine want the same local ports, and
+// the second one to ask loses every tunnel to ErrPortBusy; the one already up is
+// serving the same ports this one would, so there is nothing to gain by taking
+// them from it — and it belongs to whoever started it, not to this window.
+func StartForwarding() (*Tunnels, error) {
+	dir, err := StateDir()
+	if err != nil {
+		return nil, err
+	}
+	if _, running := daemonPID(supervisor.PIDPath(dir)); running {
+		return &Tunnels{}, nil
+	}
+	st, err := Store()
+	if err != nil {
+		return nil, err
+	}
+	in, err := supervisor.Start(st, ObservePorts)
+	if err != nil {
+		return nil, err
+	}
+	return &Tunnels{in: in}, nil
+}
+
 // RestartForwarding stops the supervisor if it is up and starts a fresh one,
 // which then picks up whatever the hosts currently publish.
 //

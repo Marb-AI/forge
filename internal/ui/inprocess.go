@@ -46,9 +46,16 @@ type Instance struct {
 	// Token is this run's session token. It is not written anywhere: hand it to
 	// the webview (see URL) and it goes no further.
 	Token string
+	// TunnelErr is why this process is not carrying the port forwards, when it
+	// meant to. Reported rather than returned: a UI that came up is a UI that came
+	// up, and the ports panel being a list of addresses that do not answer is a
+	// thing to say out loud, not a reason to have no window at all. Empty when the
+	// tunnels are up, or when a supervisor was already running and was left to it.
+	TunnelErr error
 
-	s   *server
-	srv *http.Server
+	s       *server
+	srv     *http.Server
+	tunnels *forge.Tunnels
 
 	done chan struct{} // closed when the serve loop has returned
 	err  error         // why, unless it was a clean shutdown
@@ -81,7 +88,20 @@ func Start(dir string, port int) (*Instance, error) {
 	if dir != "" {
 		forge.Open(dir)
 	}
-	return start(port, CoreDeps())
+	in, err := start(port, CoreDeps())
+	if err != nil {
+		return nil, err
+	}
+	// And the tunnels, for the same reason `forge ui` brings them up: the ports
+	// panel offers everything a workspace publishes as a link to this machine, and
+	// every one of those is carried by a forward somebody has to hold. Without one
+	// the panel is a list of addresses that time out, which is worse than no panel.
+	//
+	// The daemon can leave them running when it stops, because they serve the
+	// machine rather than the window. This cannot: the forwards are in *this*
+	// process, so they end when it does, and Stop is what says so.
+	in.tunnels, in.TunnelErr = forge.StartForwarding()
+	return in, nil
 }
 
 // start is Start with the wiring handed in, so the tests can drive a real server
@@ -118,6 +138,7 @@ func (in *Instance) URL() string { return URL(in.Port, in.Token) }
 // shell that stops on a window close and again on quit is the normal case.
 func (in *Instance) Stop() error {
 	in.stopOnce.Do(func() {
+		in.tunnels.Stop()
 		in.stopErr = shutdown(in.srv, in.s)
 		<-in.done
 		if in.stopErr == nil {

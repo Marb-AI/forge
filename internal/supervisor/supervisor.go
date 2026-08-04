@@ -134,9 +134,67 @@ func Run(store config.Store, observe Observer) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := store.Load()
+	// Before anything else, and before Start, because that is what the thing
+	// waiting on this daemon is watching for: a pidfile that only appeared after
+	// the first round of dialling would read as a supervisor that failed to come
+	// up on every server that is slow to answer.
+	if err := os.WriteFile(PIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(PIDPath(dir))
+
+	in, err := Start(store, observe)
 	if err != nil {
 		return err
+	}
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	// Block until signalled, even with zero tunnels: the supervisor is a stable
+	// daemon so `spawn` is idempotent and `forwarding start` can reload it.
+	<-sigc
+
+	in.Stop()
+	return nil
+}
+
+// Instance is a supervisor running inside somebody else's process: a desktop
+// shell, or a phone, where there is no second process to put it in.
+//
+// It is the same split ui.Start made, for the same reason and against the same
+// two pieces of daemon furniture:
+//
+//   - No pidfile. It names "this machine's supervisor" and `forge forwarding
+//     stop` terminates whatever it names — which here is the application, window
+//     and all. An app that could be closed by a CLI command that means to stop
+//     some tunnels is worse than one the CLI cannot see.
+//   - No signal handler. The shell owns the process and its signals; Stop is what
+//     it calls, when its own lifecycle says to.
+//
+// What follows from having no pidfile is worth saying plainly: a `forge
+// forwarding start` afterwards will not find this one, will start a daemon of its
+// own, and that daemon's tunnels will fail to take the local ports this instance
+// is holding. They fail as ErrPortBusy, which the supervisor already names per
+// tunnel and keeps going from, so the collision is visible rather than silent —
+// but it is a collision, and the way not to have it is not to ask for a second
+// supervisor while an application is up.
+type Instance struct {
+	s      *Supervisor
+	cancel context.CancelFunc
+
+	stopOnce sync.Once
+}
+
+// Start puts the tunnels up and returns. The caller is expected to Stop it;
+// nothing else will.
+func Start(store config.Store, observe Observer) (*Instance, error) {
+	dir, err := store.Dir()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return nil, err
 	}
 	s := &Supervisor{
 		dir:     dir,
@@ -145,23 +203,10 @@ func Run(store config.Store, observe Observer) error {
 		workers: map[key]*worker{},
 	}
 
-	if err := os.WriteFile(PIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-		return err
-	}
-	defer os.Remove(PIDPath(dir))
-
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigc
-		cancel()
-	}()
 
 	// Start from the cache immediately: waiting for the first poll would leave a
-	// freshly spawned supervisor with no tunnels for as long as the hosts take to
+	// freshly started supervisor with no tunnels for as long as the hosts take to
 	// answer, and those are the tunnels the user already had a moment ago.
 	s.reconcile(ctx, cfg, cachedTunnels(cfg), allHosts(cfg))
 
@@ -169,13 +214,17 @@ func Run(store config.Store, observe Observer) error {
 	go s.statusLoop(ctx)
 	s.writeStatus() // initial snapshot
 
-	// Block until signalled, even with zero tunnels: the supervisor is a stable
-	// daemon so `spawn` is idempotent and `forwarding start` can reload it.
-	<-ctx.Done()
+	return &Instance{s: s, cancel: cancel}, nil
+}
 
-	s.stopAll()
-	s.writeStatus()
-	return nil
+// Stop takes every tunnel down and waits for the ports to be free, which is what
+// makes it safe to start another supervisor straight after. Idempotent.
+func (in *Instance) Stop() {
+	in.stopOnce.Do(func() {
+		in.cancel()
+		in.s.stopAll()
+		in.s.writeStatus()
+	})
 }
 
 // pollLoop asks every host what it publishes and reconciles the tunnel set to it.
