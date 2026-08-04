@@ -50,6 +50,8 @@ Forwarding:
 
 UI:
   forge ui [start]                               start the local browser UI + open it
+                                                 (brings the tunnels up too — the ports
+                                                 panel's links need them)
   forge ui stop
   forge ui status [-q]                           -q: nothing printed, exit 0 when it runs
   forge ui port <port>                           set the UI's localhost port

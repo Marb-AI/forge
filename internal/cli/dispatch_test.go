@@ -1,6 +1,13 @@
 package cli
 
-import "testing"
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strings"
+	"testing"
+)
 
 // What is left to test here is the dispatch: that a word on the command line
 // reaches the right operation, and that the exit code says what happened. The
@@ -69,4 +76,52 @@ func TestHostAddArguments(t *testing.T) {
 			t.Errorf("host remove %s = %d", alias, got)
 		}
 	}
+}
+
+// The ports panel offers every published port as a link to this machine, and each
+// of those is carried by a tunnel the forwarding supervisor holds. Starting the UI
+// without them leaves a panel full of addresses that do not answer — with no sign
+// but a browser tab that times out — so `forge ui` brings them up.
+//
+// Not the other way round: stopping the UI leaves the tunnels alone. They serve
+// this machine, not the window.
+func TestStartingTheUIBringsTheTunnelsUpAndStoppingItDoesNot(t *testing.T) {
+	start := funcBody(t, "ui.go", "uiStart")
+	if !strings.Contains(start, "startTunnels()") {
+		t.Error("`forge ui` starts no tunnels — its ports panel would link to addresses nothing answers on")
+	}
+	if body := funcBody(t, "ui.go", "startTunnels"); !strings.Contains(body, "RestartForwarding") {
+		t.Errorf("startTunnels does not start the supervisor: %q", body)
+	}
+	if stop := funcBody(t, "ui.go", "uiStop"); strings.Contains(stop, "Forwarding") {
+		t.Error("`forge ui stop` touches the tunnels — they outlive the window that showed them")
+	}
+}
+
+// funcBody returns a top-level function's source from one of this package's files.
+//
+// Parsed rather than matched: the obvious version looks for the next line that is
+// a lone closing brace, which is correct only for as long as every file stays
+// gofmt'd and no string literal in one holds a "}" at the start of a line. The
+// parser knows where a function ends, so this cannot be wrong about it.
+func funcBody(t *testing.T, file, name string) string {
+	t.Helper()
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, file, src, 0)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", file, err)
+	}
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != name || fn.Body == nil {
+			continue
+		}
+		return string(src[fset.Position(fn.Pos()).Offset:fset.Position(fn.End()).Offset])
+	}
+	t.Fatalf("%s has no func %s", file, name)
+	return ""
 }
