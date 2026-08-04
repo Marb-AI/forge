@@ -248,3 +248,20 @@ func grepRepo(t *testing.T, needle string) []string {
 	}
 	return found
 }
+
+// The exec'd ssh cannot be handed bytes, so a store backed by files hands over
+// its path as well — asked for rather than assumed, because a Keychain has none
+// to give and the question has to be askable of any store.
+func TestTheExecdSshIsToldWhereTheKeyIs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	swapState(t, dir)
+
+	if _, _, err := Setup(); err != nil {
+		t.Fatal(err)
+	}
+	args := sshx.AdminTarget(&config.Host{User: "root", Addr: "h", Port: 22}).TTYArgs("id")
+	want := filepath.Join(dir, "id.pem")
+	if !strings.Contains(strings.Join(args, " "), want) {
+		t.Errorf("argv does not point at this device's key (%s): %v", want, args)
+	}
+}

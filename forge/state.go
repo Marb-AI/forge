@@ -76,6 +76,14 @@ func setStores(cfg config.Store, k keys.Store) {
 	// it is read at the moment a connection needs it — a key made by `forge setup`
 	// in another terminal is usable by a daemon that was already running.
 	sshx.IdentityFrom(k.PrivateKey)
+	// The same key as a path, when this store has one. Only the exec'd ssh needs
+	// it, and only a store backed by files can answer — asked for rather than
+	// assumed, because a Keychain cannot.
+	if f, ok := k.(interface{ Path() string }); ok {
+		sshx.IdentityFileFrom(func() (string, error) { return f.Path(), nil })
+	} else {
+		sshx.IdentityFileFrom(nil)
+	}
 }
 
 // present names which half of the wiring was missing, so the error says what to

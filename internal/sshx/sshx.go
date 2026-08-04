@@ -60,6 +60,17 @@ func commonOpts(t Target) []string {
 		// because this option writes to one that is OpenSSH's — knownhosts.go.
 		"-o", "StrictHostKeyChecking=accept-new",
 	}
+	// The device key, and only it. Since the workspaces Forge makes admit that key
+	// and nothing else, an ssh that offered ~/.ssh instead would be turned away
+	// from a workspace this very client had just created — and IdentitiesOnly is
+	// what stops it offering them anyway, since -i only ADDS to the list ssh
+	// would otherwise try.
+	//
+	// Skipped when this device keeps its key somewhere a path cannot describe;
+	// there is no ssh binary on such a device either.
+	if key := identityFile(); key != "" {
+		opts = append(opts, "-i", key, "-o", "IdentitiesOnly=yes")
+	}
 	// -J, and the same string the pure-Go client parses: the login of every hop
 	// is already spelled out in it (see jumpChain), so ssh cannot fall back to
 	// this machine's username on one client while the other uses the host's.

@@ -30,6 +30,10 @@ import (
 var (
 	identityMu sync.Mutex
 	identityFn func() ([]byte, error)
+	// identityPath is the same key as a file, for the one client that cannot be
+	// handed bytes: the ssh binary, which takes -i. Empty on a device whose store
+	// has no file to point at — a phone — where nothing execs ssh anyway.
+	identityPath func() (string, error)
 )
 
 // errNoIdentity is nothing having pointed the transport at a key. Like
@@ -43,6 +47,31 @@ func IdentityFrom(key func() ([]byte, error)) {
 	identityMu.Lock()
 	defer identityMu.Unlock()
 	identityFn = key
+}
+
+// IdentityFileFrom tells it where that key is on disk, when it is on disk. Only
+// the exec'd ssh needs this; everything else takes the bytes.
+func IdentityFileFrom(path func() (string, error)) {
+	identityMu.Lock()
+	defer identityMu.Unlock()
+	identityPath = path
+}
+
+// identityFile is the key's path, or empty when this device keeps it somewhere a
+// path cannot describe. No error: a missing path is not a failure here, it is an
+// argument that does not get added.
+func identityFile() string {
+	identityMu.Lock()
+	path := identityPath
+	identityMu.Unlock()
+	if path == nil {
+		return ""
+	}
+	p, err := path()
+	if err != nil {
+		return ""
+	}
+	return p
 }
 
 // identity is the signer every connection authenticates with.
