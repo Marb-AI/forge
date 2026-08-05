@@ -1,7 +1,9 @@
 package forge
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -83,6 +85,54 @@ func TestAnApplicationHoldsTheTunnelsItself(t *testing.T) {
 		t.Error("ForwardingStatus found a daemon that does not exist")
 	}
 }
+
+// A supervisor that could not be started leaves no tunnels behind on screen.
+//
+// The ports panel reads the status file without asking whether anybody is
+// holding those tunnels — see tunnelStates — so the file is only ever true
+// because whatever ends a supervisor clears it. Failing to start one is the
+// third way of ending up with none, and the one that matters most here: the
+// caller carries on with TunnelErr set and puts a window up, so a stale file
+// would show live tunnels for ports that answer nothing.
+func TestFailingToStartTheTunnelsClearsWhatTheLastOneLeft(t *testing.T) {
+	dir := scratchState(t)
+
+	// What a previous supervisor would have left: a status file describing
+	// tunnels, and no pidfile, because it is gone.
+	stale := filepath.Join(dir, "status.json")
+	if err := os.WriteFile(stale, []byte(`{"pid":1,"tunnels":[{"workspace":"w","port":16000}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A store with nowhere to keep state is the failure this path can actually
+	// have; the directory is still known, so there is a file to clear.
+	keys, err := Keys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev, err := Store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Use(halfStore{Store: prev}, keys); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := StartForwarding(); err == nil {
+		t.Fatal("a store that cannot be loaded started tunnels anyway")
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("the panel would show tunnels from a supervisor that is not running")
+	}
+}
+
+// halfStore knows its directory and cannot load — the shape that gets past
+// StateDir and fails inside the supervisor.
+type halfStore struct{ config.Store }
+
+func (halfStore) Load() (*config.Config, error) { return nil, errCannotLoad }
+
+var errCannotLoad = errors.New("this config cannot be read")
 
 // Stop is called on window close and again on quit, so it has to survive being
 // said twice — and a handle that was never started has to survive it too.

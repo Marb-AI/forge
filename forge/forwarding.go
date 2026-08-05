@@ -102,13 +102,27 @@ func StartForwarding() (*Tunnels, error) {
 	if _, running := daemonPID(supervisor.PIDPath(dir)); running {
 		return &Tunnels{}, nil
 	}
+
+	// From here on nothing is running, so the status file — if a previous
+	// supervisor left one — describes tunnels that do not exist. The ports panel
+	// reads it without asking whether anyone is holding them (tunnelStates in
+	// ports.go), which is only ever safe because whatever stops a supervisor
+	// clears it. Failing to start one is the third way of having none, and it has
+	// to clear it too: a caller that carries on with TunnelErr set — which is the
+	// whole point of reporting rather than returning — would otherwise put a panel
+	// on screen showing live tunnels for ports nothing answers on.
+	fail := func(err error) (*Tunnels, error) {
+		supervisor.ClearStatus(dir)
+		return nil, err
+	}
+
 	st, err := Store()
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	in, err := supervisor.Start(st, ObservePorts)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	return &Tunnels{in: in}, nil
 }

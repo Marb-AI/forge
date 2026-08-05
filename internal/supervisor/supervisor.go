@@ -134,19 +134,26 @@ func Run(store config.Store, observe Observer) error {
 	if err != nil {
 		return err
 	}
-	// Before anything else, and before Start, because that is what the thing
-	// waiting on this daemon is watching for: a pidfile that only appeared after
-	// the first round of dialling would read as a supervisor that failed to come
-	// up on every server that is slow to answer.
-	if err := os.WriteFile(PIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-		return err
-	}
-	defer os.Remove(PIDPath(dir))
-
 	in, err := Start(store, observe)
 	if err != nil {
 		return err
 	}
+
+	// The pidfile last, because it is the readiness signal: startSupervisor waits
+	// up to three seconds for one naming a live process and calls that "the
+	// supervisor is up". Written any earlier it could name a daemon that is about
+	// to exit — the caller would be told it started, and the first sign otherwise
+	// would be tunnels that never appear.
+	//
+	// Last costs nothing, which is the part worth knowing: Start puts a goroutine
+	// behind each tunnel rather than dialling on its way in, so it returns in the
+	// time it takes to read the config, and nothing waiting on this file waits any
+	// longer for it.
+	if err := os.WriteFile(PIDPath(dir), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		in.Stop()
+		return err
+	}
+	defer os.Remove(PIDPath(dir))
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
