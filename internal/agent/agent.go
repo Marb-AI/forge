@@ -45,7 +45,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 // Main is the forge-agent entrypoint; returns a process exit code.
 func Main(args []string) int {
 	if len(args) == 0 {
-		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-status|workspace-activity|workspace-track|workspace-track-inc|workspace-usage|workspace-port-block|workspace-ports|workspace-container|claude-chat-send|claude-chat-tail|claude-chat-history|host-stats|version>")
+		return emitError("usage: forge-agent <workspace-create|workspace-delete|workspace-list|workspace-adopt|workspace-status|workspace-activity|workspace-track|workspace-track-inc|workspace-usage|workspace-port-block|workspace-ports|workspace-container|claude-chat-send|claude-chat-tail|claude-chat-history|host-stats|version>")
 	}
 	switch args[0] {
 	case "workspace-create":
@@ -54,6 +54,8 @@ func Main(args []string) int {
 		return opDelete(args[1:])
 	case "workspace-list":
 		return opList()
+	case "workspace-adopt":
+		return opAdopt(args[1:])
 	case "workspace-status":
 		return opStatus(args[1:])
 	case "workspace-activity":
@@ -166,6 +168,15 @@ func opCreate(args []string) int {
 	// Own everything by the workspace user.
 	if out, err := run("chown", "-R", *name+":"+*name, home); err != nil {
 		return emitError("chown: %v: %s", err, out)
+	}
+
+	// And write it down as Forge's, here rather than at the end: what follows is
+	// installing Claude Code over the network, which is the slowest and least
+	// reliable part of this and leaves a real workspace behind when it fails. A
+	// record written only on complete success would call that workspace somebody
+	// else's, and nothing afterwards would ever say otherwise.
+	if err := recordWorkspace(*name); err != nil {
+		return emitError("record %q: %v", *name, err)
 	}
 
 	// Install Claude Code as the workspace user — a workspace exists to run it.
@@ -309,6 +320,13 @@ func opDelete(args []string) int {
 	if out, err := run("userdel", "-r", *name); err != nil {
 		return emitError("userdel: %v: %s", err, out)
 	}
+	// After the account is gone, not before: a record that forgot a workspace the
+	// deletion then failed to remove would leave an account nothing claims — and
+	// nothing would ever claim it again, because adopting is something a client
+	// does for workspaces it knows about.
+	if err := forgetWorkspace(*name); err != nil {
+		return emitError("record: %v", err)
+	}
 	return emit(agentproto.OK{OK: true})
 }
 
@@ -437,7 +455,18 @@ func opList() int {
 		}
 		return emitError("read %s: %v", baseDir, err)
 	}
-	list := agentproto.ListResult{Workspaces: []agentproto.Workspace{}}
+	// One read for the whole listing rather than one per entry: it is the same
+	// file every time and the answer cannot change underneath a single call.
+	r, recorded, err := readRosterIfAny()
+	if err != nil {
+		return emitError("read the workspace record: %v", err)
+	}
+	ours := map[string]bool{}
+	for _, name := range r.Workspaces {
+		ours[name] = true
+	}
+
+	list := agentproto.ListResult{Workspaces: []agentproto.Workspace{}, Recorded: recorded}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -445,6 +474,10 @@ func opList() int {
 		name := e.Name()
 		list.Workspaces = append(list.Workspaces, agentproto.Workspace{
 			Name: name, Owner: name, Status: sessionStatus(name),
+			// Whether this host says the workspace is Forge's. False on a host that
+			// has never been told — every host that predates the record — where the
+			// client's own config is still the answer.
+			Ours: ours[name],
 			// The block rides along on the list because that is what the client
 			// allocates against: to hand out a new one it needs every block already
 			// taken, on every host, and this is the call it already makes to each.
@@ -1890,7 +1923,13 @@ func seedSSH(home, name string, pubkey []byte) error {
 // hostKeyDir holds the host-wide git identity created by `forge host prepare`.
 // hostGhDir holds the host-wide gh credential created by `forge host gh-login`.
 // Both are copied into each workspace at create. Kept in sync with internal/cli.
-const (
+// hostKeyDir is a var rather than a const so the tests can point it somewhere
+// they may write — the same reason baseDir is one. Nothing changes it at runtime.
+//
+// hostGhDir is derived once, at init, so moving hostKeyDir does not move it. That
+// is fine for what moves it (a test of the workspace record) and would not be for
+// a test of the gh credential, which should set this one too.
+var (
 	hostKeyDir = "/etc/forge"
 	hostGhDir  = hostKeyDir + "/gh"
 )
