@@ -404,19 +404,17 @@ func TestAConversationComesBackOldestFirstWithItsPrompts(t *testing.T) {
 	}
 	got := out()
 
-	for i, want := range []string{"first question", `"n":1`, "second question", `"n":2`,
+	// Each in turn and each after the last: a transcript that printed the three
+	// questions and then the three answers would contain every one of these and
+	// be no conversation at all.
+	at := 0
+	for _, want := range []string{"first question", `"n":1`, "second question", `"n":2`,
 		"third question", `"n":3`} {
-		j := strings.Index(got, want)
+		j := strings.Index(got[at:], want)
 		if j < 0 {
-			t.Fatalf("the transcript is missing %q:\n%s", want, got)
+			t.Fatalf("expected %q after position %d; the transcript reads:\n%s", want, at, got)
 		}
-		if i > 0 && j < strings.Index(got, "first question") {
-			t.Errorf("%q came before the first question", want)
-		}
-	}
-	// Oldest first: the conversation reads downwards, like every other one.
-	if strings.Index(got, "first question") > strings.Index(got, "third question") {
-		t.Error("the conversation came back newest first")
+		at += j + len(want)
 	}
 	if strings.Contains(got, "s-1") {
 		t.Error("the session file was read as a turn")

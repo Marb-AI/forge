@@ -3325,25 +3325,30 @@ function chatShow(ws) {
     if (hint) hint.hidden = true;
     chatRender(c, msg);
   };
-  const stop = () => {
+  // ok says whether the conversation actually arrived. A read that failed must
+  // leave this workspace looking un-fetched, or closing the panel and opening it
+  // again would show the same empty box — and a page reload would be the only way
+  // back to a conversation that is sitting on the host, intact.
+  const stop = (ok) => {
     es.close();
+    if (!ok) c.shown = false;
     // A conversation nobody has started yet is not a failure, and the invitation
     // to start one should still be there.
     if (!any && hint) hint.hidden = false;
     if (c.live) { c.live.classList.remove("live"); c.live = null; }
     log.scrollTop = log.scrollHeight;
   };
-  es.addEventListener("done", stop);
+  es.addEventListener("done", () => stop(true));
   es.addEventListener("failed", (ev) => {
     let why = "the conversation could not be read";
     try { why = JSON.parse(ev.data) || why; } catch { /* keep the default */ }
     chatAppend(chatNode("chat-note bad", why));
-    stop();
+    stop(false);
   });
   // History is finite and asked for once. The browser would otherwise reconnect
   // and replay the whole thing on every hiccup — and unlike a live turn there are
   // no ids to resume from, because these are several files concatenated.
-  es.onerror = () => stop();
+  es.onerror = () => stop(false);
 }
 
 // chatAppend adds a node and keeps the view at the bottom, but only if it was

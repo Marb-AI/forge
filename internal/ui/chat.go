@@ -237,6 +237,11 @@ func chatEnd(w io.Writer, flusher http.Flusher, err error, r *http.Request) {
 // anything being encoded. Passing chunks through instead would split objects
 // across events at whatever boundary the network chose.
 func streamChat(w io.Writer, flusher http.Flusher, r io.Reader, offset int64) error {
+	// noIDs is a whole-stream property, not a running number: several turns
+	// concatenated have no offset that means anything in any of them, so the
+	// events go out unnumbered rather than numbered from somewhere wrong.
+	numbered := offset != noIDs
+
 	sc := bufio.NewScanner(r)
 	// A turn's line is one JSON object and can hold a whole file the model wrote
 	// out; the default 64 KiB would end the stream partway through one.
@@ -246,11 +251,17 @@ func streamChat(w io.Writer, flusher http.Flusher, r io.Reader, offset int64) er
 		line := sc.Bytes()
 		// The scanner drops the newline, and the offset has to count it: it is a
 		// byte of the file, and a resume that forgot it would start mid-line.
-		offset += int64(len(line)) + 1
+		if numbered {
+			offset += int64(len(line)) + 1
+		}
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
 		}
-		fmt.Fprintf(w, "id: %d\ndata: %s\n\n", offset, line)
+		if numbered {
+			fmt.Fprintf(w, "id: %d\ndata: %s\n\n", offset, line)
+		} else {
+			fmt.Fprintf(w, "data: %s\n\n", line)
+		}
 		flusher.Flush()
 	}
 	return sc.Err()
