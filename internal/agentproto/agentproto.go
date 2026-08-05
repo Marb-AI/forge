@@ -62,6 +62,18 @@ type Workspace struct {
 	// client allocates blocks by taking the lowest one nobody holds, and a zero
 	// block would read as a workspace holding the bottom of the range.
 	PortBlock *PortBlock `json:"port_block,omitempty"`
+	// Ours is whether this host records the workspace as Forge's.
+	//
+	// The host's directory holds every account under /home/workspaces, including
+	// ones Forge never made — a colleague's, or one made by hand — and until this
+	// existed nothing on the machine could tell them apart. Which is why the list
+	// of workspaces has had to come from whichever laptop created them, and why a
+	// second device sees an empty Forge.
+	//
+	// False on a host that has never been told, which is every host that predates
+	// the record: the client's own config is still the answer there, and
+	// `workspace-adopt` is how the host is told.
+	Ours bool `json:"ours,omitempty"`
 }
 
 // ListResult is returned by `forge-agent workspace-list`.
