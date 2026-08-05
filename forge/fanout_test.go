@@ -57,7 +57,7 @@ func TestEveryHostIsAskedAtOnce(t *testing.T) {
 		close(release)
 	}()
 
-	got := askHosts(hosts, allOf(hosts), func(h *config.Host) (string, error) {
+	got := askHosts(hosts, allOf(hosts), func(_ string, h *config.Host) (string, error) {
 		started <- struct{}{}
 		<-release
 		return h.Addr, nil
@@ -80,7 +80,7 @@ func TestEveryHostIsAskedAtOnce(t *testing.T) {
 func TestAHostThatDoesNotAnswerIsSimplyAbsent(t *testing.T) {
 	hosts := threeHosts()
 
-	got := askHosts(hosts, allOf(hosts), func(h *config.Host) (string, error) {
+	got := askHosts(hosts, allOf(hosts), func(_ string, h *config.Host) (string, error) {
 		if h.Addr == "10.0.0.2" {
 			return "", errors.New("connection refused")
 		}
@@ -107,7 +107,7 @@ func TestAHostTheConfigNoLongerHasIsSkipped(t *testing.T) {
 
 	var asked int32
 	var mu sync.Mutex
-	got := askHosts(hosts, want, func(h *config.Host) (string, error) {
+	got := askHosts(hosts, want, func(_ string, h *config.Host) (string, error) {
 		mu.Lock()
 		asked++
 		mu.Unlock()
@@ -129,7 +129,7 @@ func TestCollectingTheAnswersIsSafe(t *testing.T) {
 	for _, alias := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
 		hosts[alias] = &config.Host{Addr: alias, User: "root"}
 	}
-	got := askHosts(hosts, allOf(hosts), func(h *config.Host) (int, error) {
+	got := askHosts(hosts, allOf(hosts), func(_ string, h *config.Host) (int, error) {
 		return len(h.Addr), nil
 	})
 	if len(got) != len(hosts) {

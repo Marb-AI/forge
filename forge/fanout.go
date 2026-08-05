@@ -34,6 +34,10 @@ import (
 // askHosts puts the same question to every named host at the same time and
 // returns what came back, keyed by alias.
 //
+// The alias is handed to the callback as well as the host: a caller that needs
+// to look something up per host has it, and looking a *config.Host back up by
+// pointer identity is the kind of thing that works until a config is reloaded.
+//
 // A host that fails is absent from the result rather than an error: every caller
 // here treats an unreachable server as one that said nothing this round, because
 // the alternative — one server down, the whole panel empty — is worse than stale
@@ -43,7 +47,7 @@ import (
 // the shape of the result is a map: with one writer per key and the caller
 // waiting for all of them, a mutex is the smaller thing to read.
 func askHosts[T any](hosts map[string]*config.Host, want map[string]bool,
-	ask func(*config.Host) (T, error)) map[string]T {
+	ask func(alias string, host *config.Host) (T, error)) map[string]T {
 
 	out := map[string]T{}
 	var mu sync.Mutex
@@ -59,7 +63,7 @@ func askHosts[T any](hosts map[string]*config.Host, want map[string]bool,
 		wg.Add(1)
 		go func(alias string, host *config.Host) {
 			defer wg.Done()
-			v, err := ask(host)
+			v, err := ask(alias, host)
 			if err != nil {
 				return
 			}
@@ -70,6 +74,18 @@ func askHosts[T any](hosts map[string]*config.Host, want map[string]bool,
 	}
 	wg.Wait()
 	return out
+}
+
+// everyHost is every registered server. The question "which workspaces are
+// yours" goes to all of them, because a host that keeps its own record knows
+// about workspaces this device has never heard of — which is what every device
+// but the one that created them is.
+func everyHost(cfg *config.Config) map[string]bool {
+	every := map[string]bool{}
+	for alias := range cfg.Hosts {
+		every[alias] = true
+	}
+	return every
 }
 
 // hostsWithWorkspaces is the set of servers worth asking anything about

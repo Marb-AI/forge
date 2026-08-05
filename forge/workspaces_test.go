@@ -24,11 +24,22 @@ func TestListShowsOnlyOurOwnWorkspaces(t *testing.T) {
 		},
 	}
 
-	got := mergeWorkspaceStatus(mine, onTheHost)
+	got := mergeWorkspaceStatus(mine, fromOldHosts(onTheHost))
 	want := []WorkspaceInfo{{Name: "mine", Host: "box", Status: agentproto.StatusRunning}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("listing must be ours alone.\n got: %+v\nwant: %+v", got, want)
 	}
+}
+
+// fromOldHosts turns "here is what each host reported" into an answer from a
+// server that keeps no record of its own — which is every server that predates
+// one, and the case where this client's config is still the authority.
+func fromOldHosts(sessions map[string]map[string]string) map[string]hostWorkspaces {
+	out := map[string]hostWorkspaces{}
+	for alias, byName := range sessions {
+		out[alias] = hostWorkspaces{sessions: byName, ours: map[string]bool{}}
+	}
+	return out
 }
 
 // The other direction: our config claims a workspace the host doesn't have. It was
@@ -37,7 +48,7 @@ func TestListShowsOnlyOurOwnWorkspaces(t *testing.T) {
 func TestWorkspaceDeletedElsewhereIsMissing(t *testing.T) {
 	got := mergeWorkspaceStatus(
 		map[string]string{"gone": "box"},
-		map[string]map[string]string{"box": {}}, // the host answered, and doesn't have it
+		fromOldHosts(map[string]map[string]string{"box": {}}), // answered, and doesn't have it
 	)
 	if len(got) != 1 || got[0].Status != agentproto.StatusMissing {
 		t.Errorf("a workspace the host no longer has must read as missing, got %+v", got)
@@ -50,7 +61,7 @@ func TestWorkspaceDeletedElsewhereIsMissing(t *testing.T) {
 func TestUnreachableHostIsNotStopped(t *testing.T) {
 	got := mergeWorkspaceStatus(
 		map[string]string{"ws": "box"},
-		map[string]map[string]string{}, // nobody answered
+		fromOldHosts(nil), // nobody answered
 	)
 	if len(got) != 1 || got[0].Status != agentproto.StatusUnreachable {
 		t.Errorf("a workspace on an unreachable host must say so, got %+v", got)
@@ -60,10 +71,10 @@ func TestUnreachableHostIsNotStopped(t *testing.T) {
 func TestListIsSortedAndKeepsItsHost(t *testing.T) {
 	got := mergeWorkspaceStatus(
 		map[string]string{"zeta": "b", "alpha": "a"},
-		map[string]map[string]string{
+		fromOldHosts(map[string]map[string]string{
 			"a": {"alpha": agentproto.StatusRunning},
 			"b": {"zeta": agentproto.StatusStopped},
-		},
+		}),
 	)
 	want := []WorkspaceInfo{
 		{Name: "alpha", Host: "a", Status: agentproto.StatusRunning},
@@ -159,5 +170,116 @@ func TestAnUnreadableExtraKeyNamesThePathUnambiguously(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `"`) {
 		t.Errorf("err = %v, want the path quoted so its ends are visible", err)
+	}
+}
+
+// A host that keeps its own record is the authority on its own workspaces.
+//
+// This is the whole of what makes a second device possible: the phone has never
+// heard of these names, and there is nowhere for it to have heard them from
+// except the machine they are on.
+func TestAHostThatKeepsARecordIsBelievedOverThisDevice(t *testing.T) {
+	// A device that knows nothing — a phone, or a laptop restored from nothing.
+	got := mergeWorkspaceStatus(map[string]string{}, map[string]hostWorkspaces{
+		"box": {
+			recorded: true,
+			ours:     map[string]bool{"api": true, "web": true},
+			sessions: map[string]string{
+				"api":           agentproto.StatusRunning,
+				"web":           agentproto.StatusStopped,
+				"made-by-hand":  agentproto.StatusRunning, // never went through forge
+				"someone-elses": agentproto.StatusStopped,
+			},
+		},
+	})
+
+	want := []WorkspaceInfo{
+		{Name: "api", Host: "box", Status: agentproto.StatusRunning},
+		{Name: "web", Host: "box", Status: agentproto.StatusStopped},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a device with an empty config saw:\n %+v\nwant the host's own two:\n %+v",
+			got, want)
+	}
+}
+
+// And it is believed the other way too: a workspace this config still claims,
+// which the host says is not Forge's, has been deleted from another device.
+// Keeping it would mean every device that ever saw a workspace shows it forever.
+func TestAHostWithARecordAlsoSettlesWhatIsGone(t *testing.T) {
+	got := mergeWorkspaceStatus(
+		map[string]string{"old": "box", "still-here": "box"},
+		map[string]hostWorkspaces{
+			"box": {
+				recorded: true,
+				ours:     map[string]bool{"still-here": true},
+				sessions: map[string]string{"still-here": agentproto.StatusRunning},
+			},
+		})
+
+	if len(got) != 1 || got[0].Name != "still-here" {
+		t.Errorf("got %+v, want only the one the host still claims", got)
+	}
+}
+
+// A server from before the record is not a server that owns nothing.
+//
+// It answers with nothing claimed, which on the wire is what a host with a
+// record and no workspaces looks like. Reading them alike would take a working
+// laptop and empty it — every workspace on every server not yet updated.
+func TestAnOldHostLeavesThisDeviceAsTheAuthority(t *testing.T) {
+	got := mergeWorkspaceStatus(
+		map[string]string{"mine": "box"},
+		map[string]hostWorkspaces{
+			"box": {
+				recorded: false, // an agent that never heard of the record
+				ours:     map[string]bool{},
+				sessions: map[string]string{"mine": agentproto.StatusRunning},
+			},
+		})
+
+	want := []WorkspaceInfo{{Name: "mine", Host: "box", Status: agentproto.StatusRunning}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("an old host emptied the list:\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// A host that is off says nothing at all, which is not the same as saying no.
+// Its workspaces stay listed, as unreachable — a server being down must not make
+// work disappear from the screen.
+func TestAHostThatIsOffKeepsItsWorkspacesListed(t *testing.T) {
+	got := mergeWorkspaceStatus(
+		map[string]string{"mine": "box"},
+		map[string]hostWorkspaces{}, // nobody answered
+	)
+	if len(got) != 1 || got[0].Status != agentproto.StatusUnreachable {
+		t.Errorf("got %+v, want the workspace listed as unreachable", got)
+	}
+}
+
+// Two servers, one of each kind, in one listing: the updated host answers for
+// itself and the old one leaves this config to answer for it.
+func TestOneUpdatedHostAndOneOldOneInTheSameList(t *testing.T) {
+	got := mergeWorkspaceStatus(
+		map[string]string{"legacy": "old"},
+		map[string]hostWorkspaces{
+			"new": {
+				recorded: true,
+				ours:     map[string]bool{"fresh": true},
+				sessions: map[string]string{"fresh": agentproto.StatusRunning},
+			},
+			"old": {
+				recorded: false,
+				ours:     map[string]bool{},
+				sessions: map[string]string{"legacy": agentproto.StatusStopped},
+			},
+		})
+
+	want := []WorkspaceInfo{
+		{Name: "fresh", Host: "new", Status: agentproto.StatusRunning},
+		{Name: "legacy", Host: "old", Status: agentproto.StatusStopped},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
 	}
 }

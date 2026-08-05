@@ -114,24 +114,35 @@ func ListWorkspaces() ([]WorkspaceInfo, error) {
 		return nil, err
 	}
 
-	// Every host at once, and only the ones we have workspaces on: a host with
-	// none has nothing to tell us, and each of these is an SSH round trip whose
-	// cost is almost entirely the handshake. Unreachable hosts are absent from
-	// the result and their workspaces are reported as such below.
-	sessions := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
-		func(host *config.Host) (map[string]string, error) {
+	// Every host at once, and every registered one — not only those this config
+	// has workspaces on. That is new, and it is the point: a host that keeps its
+	// own record knows about workspaces this device has never heard of, which is
+	// exactly what a second device is. Skipping it would mean a phone could only
+	// ever see what the laptop had already told it.
+	//
+	// Unreachable hosts are absent from the result, and whatever this config knows
+	// about them is reported as unreachable below.
+	answers := askHosts(cfg.Hosts, everyHost(cfg),
+		func(_ string, host *config.Host) (hostWorkspaces, error) {
 			var res agentproto.ListResult
 			if err := callAgent(host, &res, "workspace-list"); err != nil {
-				return nil, err
+				return hostWorkspaces{}, err
 			}
-			byName := map[string]string{}
+			a := hostWorkspaces{
+				sessions: map[string]string{},
+				ours:     map[string]bool{},
+				recorded: res.Recorded,
+			}
 			for _, ws := range res.Workspaces {
-				byName[ws.Name] = ws.Status
+				a.sessions[ws.Name] = ws.Status
+				if ws.Ours {
+					a.ours[ws.Name] = true
+				}
 			}
-			return byName, nil
+			return a, nil
 		})
 
-	out := mergeWorkspaceStatus(cfg.Workspaces, sessions)
+	out := mergeWorkspaceStatus(cfg.Workspaces, answers)
 	// Fill in each workspace's host login user from the config already in hand —
 	// mergeWorkspaceStatus works off the name→alias map alone (so it stays unit-
 	// testable), and only here do we still hold cfg.Hosts to resolve the user.
@@ -154,7 +165,7 @@ func WorkspaceActivity() (map[string]Activity, error) {
 		return nil, err
 	}
 	answers := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
-		func(host *config.Host) (agentproto.ActivityResult, error) {
+		func(_ string, host *config.Host) (agentproto.ActivityResult, error) {
 			var res agentproto.ActivityResult
 			err := callAgent(host, &res, "workspace-activity") // unreachable: its tabs stay dim
 			return res, err
@@ -181,7 +192,7 @@ func WorkspaceTrack() (map[string]Track, error) {
 		return nil, err
 	}
 	answers := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
-		func(host *config.Host) (agentproto.TrackResult, error) {
+		func(_ string, host *config.Host) (agentproto.TrackResult, error) {
 			var res agentproto.TrackResult
 			err := callAgent(host, &res, "workspace-track") // unreachable: clocks don't move this round
 			return res, err
@@ -217,7 +228,7 @@ func WorkspaceUsage() (map[string]Usage, error) {
 		return nil, err
 	}
 	answers := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
-		func(host *config.Host) (agentproto.UsageResult, error) {
+		func(_ string, host *config.Host) (agentproto.UsageResult, error) {
 			var res agentproto.UsageResult
 			err := callAgent(host, &res, "workspace-usage") // unreachable, or an agent too old for the op
 			return res, err
@@ -264,29 +275,125 @@ func usage(u agentproto.Usage) Usage {
 //
 // Only ours. A workspace the host has but our config doesn't is somebody else's, or
 // was made by hand — and every operation refuses to touch it anyway.
-func mergeWorkspaceStatus(mine map[string]string, sessions map[string]map[string]string) []WorkspaceInfo {
-	names := make([]string, 0, len(mine))
-	for name := range mine {
-		names = append(names, name)
+func mergeWorkspaceStatus(mine map[string]string, answers map[string]hostWorkspaces) []WorkspaceInfo {
+	// Whose list this is, per host. A host that keeps a record is the authority on
+	// its own workspaces: it is the only answer that is the same from every
+	// device, which is the entire reason the record exists. A host that keeps
+	// none, or did not answer, leaves this client's own config as the answer for
+	// that host — which is what it has always been, and what an old server or a
+	// server that is off must keep being.
+	names := map[string]string{} // workspace -> host alias
+	for name, alias := range mine {
+		if a, ok := answers[alias]; ok && a.recorded {
+			continue // the host will say; see below
+		}
+		names[name] = alias
 	}
-	sort.Strings(names)
+	for alias, a := range answers {
+		if !a.recorded {
+			continue
+		}
+		for name := range a.ours {
+			names[name] = alias
+		}
+	}
 
-	out := make([]WorkspaceInfo, 0, len(names))
-	for _, name := range names {
-		alias := mine[name]
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+
+	out := make([]WorkspaceInfo, 0, len(sorted))
+	for _, name := range sorted {
+		alias := names[name]
 		status := agentproto.StatusUnreachable
-		if byName, answered := sessions[alias]; answered {
+		if a, answered := answers[alias]; answered {
 			// The host answered and doesn't have it: it is gone — deleted from another
 			// machine, most likely. Reporting "stopped" would be a lie you could act
 			// on (there is nothing left to start).
 			status = agentproto.StatusMissing
-			if s, ok := byName[name]; ok {
+			if s, ok := a.sessions[name]; ok {
 				status = s
 			}
 		}
 		out = append(out, WorkspaceInfo{Name: name, Host: alias, Status: status})
 	}
 	return out
+}
+
+// hostWorkspaces is one host's answer: the session status of everything it has,
+// which of those it says are Forge's, and whether it keeps that record at all.
+//
+// The last one is what makes the second safe to read. An agent from before the
+// record claims nothing, which is identical on the wire to a host that keeps one
+// and owns none — and reading those alike would look at an old server and hide
+// every workspace on it.
+type hostWorkspaces struct {
+	sessions map[string]string
+	ours     map[string]bool
+	recorded bool
+}
+
+// AdoptWorkspaces tells a host which of its accounts are Forge's, from what this
+// client already believes, and reports how many it named.
+//
+// The migration, and the only way a record can be filled in for workspaces older
+// than it: the host cannot tell its own accounts apart, so the device that made
+// them has to say. Idempotent, so running it twice is running it once, and safe
+// on a host that already keeps a record — it can only ever add names this client
+// was already acting on.
+//
+// alias empty means every host this client has workspaces on. A host too old to
+// know the command is reported rather than skipped silently: it is the one thing
+// standing between that server and a second device, and it wants `host update`.
+func AdoptWorkspaces(alias string) (map[string]int, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	want := hostsWithWorkspaces(cfg)
+	if alias != "" {
+		if cfg.Hosts[alias] == nil {
+			return nil, fmt.Errorf("no such host %q (see: forge host list)", alias)
+		}
+		if !want[alias] {
+			return map[string]int{}, nil // known host, nothing of ours on it
+		}
+		want = map[string]bool{alias: true}
+	}
+
+	// Sequential per host and parallel across them, like every other sweep: the
+	// names on one host go into one file, and the agent's lock would serialise
+	// them anyway.
+	byName := map[string][]string{}
+	for name, a := range cfg.Workspaces {
+		byName[a] = append(byName[a], name)
+	}
+	type result struct {
+		named int
+		err   error
+	}
+	answers := askHosts(cfg.Hosts, want, func(alias string, host *config.Host) (result, error) {
+		var r result
+		for _, name := range byName[alias] {
+			if err := callAgent(host, nil, "workspace-adopt", "-name", name); err != nil {
+				return result{}, err
+			}
+			r.named++
+		}
+		return r, nil
+	})
+
+	out := map[string]int{}
+	for a := range want {
+		if r, ok := answers[a]; ok {
+			out[a] = r.named
+		} else {
+			out[a] = -1 // did not answer, or an agent too old to know the command
+		}
+	}
+	return out, nil
 }
 
 // CreateWorkspace provisions a workspace on a registered host and records it
