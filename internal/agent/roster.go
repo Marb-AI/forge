@@ -77,8 +77,10 @@ func withRosterLock(fn func() error) error {
 type roster struct {
 	Workspaces []string `json:"workspaces"`
 	// PortRange is the span of this machine's ports Forge may hand out, and how
-	// big a block each workspace gets. Zero means the host has not been told,
-	// which is not the same as a range of nothing — see readRosterIfAny.
+	// big a block each workspace gets. Nil means the host has not been told, which
+	// is not the same as a range of nothing — a pointer rather than zero values
+	// precisely so those two cannot be confused, here or by anything reading the
+	// JSON.
 	//
 	// It belongs here rather than on a device for the reason the range is a fact
 	// about a machine: which of its ports are free is a property of the machine,
@@ -226,7 +228,12 @@ func opPortRange(args []string) int {
 		return emitError("a port range needs all three of -start, -end and -block")
 	}
 	if given {
-		if *end <= *start {
+		// Ends *before* it begins, not at the same port: start == end is one port,
+		// which with a block of one is a legitimate if unusual range, and it is
+		// what config.PortRange.Blocks() already computes (p+block-1 <= end). An
+		// agent stricter than the arithmetic would refuse something the client
+		// would then happily allocate from.
+		if *end < *start {
 			return emitError("range %d-%d ends before it begins", *start, *end)
 		}
 		if *block > *end-*start+1 {

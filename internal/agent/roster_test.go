@@ -348,6 +348,24 @@ func TestAPortRangeIsRefusedUnlessItIsOne(t *testing.T) {
 	}
 }
 
+// One port, one block of one, is a range — unusual, and what the client's own
+// arithmetic already computes. An agent stricter than that would refuse
+// something the client would then allocate from.
+func TestASinglePortIsARange(t *testing.T) {
+	scratchHost(t)
+
+	out := captureStdout(t)
+	code := opPortRange([]string{"-start", "16000", "-end", "16000", "-block", "1"})
+	got := out()
+
+	if code != 0 {
+		t.Fatalf("a one-port range was refused: %s", got)
+	}
+	if !strings.Contains(got, `"start":16000`) || !strings.Contains(got, `"set":true`) {
+		t.Errorf("it was accepted and not recorded:\n%s", got)
+	}
+}
+
 // The range shares a file with the workspace list, so setting one while another
 // agent records a workspace is the read-modify-write that must not lose either.
 func TestSettingTheRangeDoesNotLoseWorkspaces(t *testing.T) {
