@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"syscall"
 
 	"github.com/Marb-AI/forge/internal/agentproto"
 )
@@ -36,6 +37,39 @@ import (
 // rosterPath is the file, under the directory `host prepare` already owns.
 func rosterPath() string { return filepath.Join(hostKeyDir, "workspaces.json") }
 
+// rosterLockPath is what serialises the read-modify-write, and it is a second
+// file rather than the record itself: the record is replaced by rename, so a
+// lock held on it would be a lock on an inode nobody is using by the time the
+// next writer looks.
+func rosterLockPath() string { return filepath.Join(hostKeyDir, "workspaces.lock") }
+
+// withRosterLock runs fn with this host's record held against every other agent
+// on the machine.
+//
+// Two agents run at once whenever two things happen at once — a workspace being
+// created from a laptop while another is deleted from the browser is two SSH
+// sessions and two processes — and each of them reads the record, changes its
+// copy and writes it back. Atomic replacement makes the loser's write whole; it
+// does not make it correct. Without this the workspace one of them recorded is
+// simply gone.
+func withRosterLock(fn func() error) error {
+	if err := os.MkdirAll(hostKeyDir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(rosterLockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	// Released by the close above as well, but said here because the order
+	// matters: fn's rename must land before anybody else reads.
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
 // roster is what that file holds: the names Forge created here, and nothing
 // else. A list rather than a map because it is a set of names and JSON has no
 // sets; sorted on the way out so the file is stable and a diff of it means
@@ -62,13 +96,25 @@ func readRoster() (roster, error) {
 	return r, nil
 }
 
-// writeRoster replaces the record, atomically.
+// readRosterIfAny is readRoster plus the one thing a client cannot infer from
+// its contents: whether this host keeps a record at all. An empty record and no
+// record read the same otherwise, and they mean opposite things.
+func readRosterIfAny() (roster, bool, error) {
+	r, err := readRoster()
+	if err != nil {
+		return r, false, err
+	}
+	_, statErr := os.Stat(rosterPath())
+	return r, statErr == nil, nil
+}
+
+// writeRoster replaces the record, atomically. Callers hold the lock.
 //
-// Atomically because two agents can run at once — a client creating a workspace
-// while another deletes one is two SSH sessions, and a read-modify-write torn
-// between them would lose whichever finished first. The rename is what makes the
-// last writer win a whole file rather than half of one; it does not make the two
-// agree, which is what the create path's own ordering is for.
+// The temporary file is named by the OS rather than fixed: a fixed one is shared
+// by every agent on the host, so two of them would write into the same file and
+// rename each other's half into place. The lock makes that unlikely; a unique
+// name makes it impossible, which is the difference worth having in the file
+// that decides what Forge owns.
 func writeRoster(r roster) error {
 	sort.Strings(r.Workspaces)
 	data, err := json.MarshalIndent(r, "", "  ")
@@ -78,13 +124,28 @@ func writeRoster(r roster) error {
 	if err := os.MkdirAll(hostKeyDir, 0o755); err != nil {
 		return err
 	}
-	tmp := rosterPath() + ".new"
-	// 0600: nothing but root has business reading which accounts Forge owns, and
-	// the directory is already root's.
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+	tmp, err := os.CreateTemp(hostKeyDir, "workspaces-*.json")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, rosterPath())
+	defer os.Remove(tmp.Name()) // a no-op once the rename below has taken it
+
+	// 0600: nothing but root has business reading which accounts Forge owns, and
+	// CreateTemp's own 0600 is not promised by anything but its documentation.
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	// Closed before the rename, not after: renaming a file still open for writing
+	// publishes it with whatever has not been flushed still missing.
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), rosterPath())
 }
 
 // recordWorkspace adds a name to the record if it is not already there.
@@ -93,31 +154,35 @@ func writeRoster(r roster) error {
 // can be retried after a failure further down, and adopting an existing
 // workspace is a client repeating what it already believes.
 func recordWorkspace(name string) error {
-	r, err := readRoster()
-	if err != nil {
-		return err
-	}
-	if slices.Contains(r.Workspaces, name) {
-		return nil
-	}
-	r.Workspaces = append(r.Workspaces, name)
-	return writeRoster(r)
+	return withRosterLock(func() error {
+		r, err := readRoster()
+		if err != nil {
+			return err
+		}
+		if slices.Contains(r.Workspaces, name) {
+			return nil
+		}
+		r.Workspaces = append(r.Workspaces, name)
+		return writeRoster(r)
+	})
 }
 
 // forgetWorkspace removes a name. Also idempotent: a delete of something never
 // recorded is a delete that has already happened, as far as this file is
 // concerned.
 func forgetWorkspace(name string) error {
-	r, err := readRoster()
-	if err != nil {
-		return err
-	}
-	i := slices.Index(r.Workspaces, name)
-	if i < 0 {
-		return nil
-	}
-	r.Workspaces = slices.Delete(r.Workspaces, i, i+1)
-	return writeRoster(r)
+	return withRosterLock(func() error {
+		r, err := readRoster()
+		if err != nil {
+			return err
+		}
+		i := slices.Index(r.Workspaces, name)
+		if i < 0 {
+			return nil
+		}
+		r.Workspaces = slices.Delete(r.Workspaces, i, i+1)
+		return writeRoster(r)
+	})
 }
 
 // opAdopt records a workspace this host already has.

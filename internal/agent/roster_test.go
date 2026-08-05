@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -179,5 +180,83 @@ func TestTheRecordIsReplacedWhole(t *testing.T) {
 	}
 	if len(r.Workspaces) != 2 || r.Workspaces[0] != "one" || r.Workspaces[1] != "two" {
 		t.Errorf("the record reads %v, want [one two] in order", r.Workspaces)
+	}
+}
+
+// A host with a record and nothing in it is not a host without one, and the two
+// mean opposite things: an empty record says "Forge owns nothing here", while no
+// record says "this host cannot answer — ask your own config, as you always
+// have". An old agent produces the second, and a client that read them alike
+// would look at a working server and hide every workspace on it.
+func TestAnEmptyRecordIsNotTheSameAsNoRecord(t *testing.T) {
+	scratchHost(t, "one")
+
+	out := captureStdout(t)
+	if code := opList(); code != 0 {
+		t.Fatalf("list exited %d", code)
+	}
+	if got := out(); !strings.Contains(got, `"recorded":false`) {
+		t.Errorf("a host that was never told says it keeps a record:\n%s", got)
+	}
+
+	// Recording and then forgetting leaves the file behind, empty — which is a
+	// host that keeps a record and owns nothing, and must say so.
+	if err := recordWorkspace("one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := forgetWorkspace("one"); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t)
+	if code := opList(); code != 0 {
+		t.Fatalf("list exited %d", code)
+	}
+	got := out()
+	if !strings.Contains(got, `"recorded":true`) {
+		t.Errorf("a host with an empty record says it has none:\n%s", got)
+	}
+	if strings.Contains(got, `"ours":true`) {
+		t.Errorf("it claims something after forgetting everything:\n%s", got)
+	}
+	// And "ours" is on the wire even when false, or "not ours" and "an agent that
+	// never heard of this" would look the same again.
+	if !strings.Contains(got, `"ours":false`) {
+		t.Errorf("a workspace that is not ours says nothing at all:\n%s", got)
+	}
+}
+
+// Two agents recording at the same time both survive. Nothing atomic about the
+// write makes that true — each reads, changes its copy and writes it back, so
+// without a lock across processes one of the two workspaces is simply gone.
+func TestTwoAgentsRecordingAtOnceDoNotLoseEachOther(t *testing.T) {
+	names := []string{"a", "b", "c", "d", "e", "f", "g", "h"}
+	scratchHost(t, names...)
+
+	var wg sync.WaitGroup
+	for _, name := range names {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if err := recordWorkspace(name); err != nil {
+				t.Errorf("recording %q: %v", name, err)
+			}
+		}(name)
+	}
+	wg.Wait()
+
+	r, err := readRoster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Workspaces) != len(names) {
+		t.Errorf("the record holds %d of %d workspaces: %v — writes were lost",
+			len(r.Workspaces), len(names), r.Workspaces)
+	}
+	// And nothing half-written was left where the next read would find it.
+	entries, _ := os.ReadDir(hostKeyDir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "workspaces-") {
+			t.Errorf("a temporary file survived: %s", e.Name())
+		}
 	}
 }

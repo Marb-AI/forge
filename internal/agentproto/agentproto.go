@@ -70,15 +70,30 @@ type Workspace struct {
 	// of workspaces has had to come from whichever laptop created them, and why a
 	// second device sees an empty Forge.
 	//
-	// False on a host that has never been told, which is every host that predates
-	// the record: the client's own config is still the answer there, and
-	// `workspace-adopt` is how the host is told.
-	Ours bool `json:"ours,omitempty"`
+	// Always emitted, never omitted: false is the interesting value here, and a
+	// field that vanishes when it is false cannot be told from one an old agent
+	// never knew about.
+	//
+	// Which is not the whole of that problem, and ListResult.Recorded is the rest
+	// of it — see there.
+	Ours bool `json:"ours"`
 }
 
 // ListResult is returned by `forge-agent workspace-list`.
 type ListResult struct {
 	Workspaces []Workspace `json:"workspaces"`
+	// Recorded is whether this host keeps a record of which workspaces are Forge's
+	// at all.
+	//
+	// It is what makes Ours safe to believe. An agent from before the record
+	// answers with no `ours` on anything, which unmarshals to false — identical to
+	// a host that keeps a record and does not claim these. A client that could not
+	// tell those apart would look at an old server, see nothing claimed, and hide
+	// every workspace on it.
+	//
+	// So the question a client asks is this one first: false means "ask your own
+	// config, as you always have", and true means the host is the answer.
+	Recorded bool `json:"recorded"`
 }
 
 // What is holding a port open. A container can be started and stopped, and says

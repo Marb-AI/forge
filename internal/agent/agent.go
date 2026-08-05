@@ -457,7 +457,7 @@ func opList() int {
 	}
 	// One read for the whole listing rather than one per entry: it is the same
 	// file every time and the answer cannot change underneath a single call.
-	r, err := readRoster()
+	r, recorded, err := readRosterIfAny()
 	if err != nil {
 		return emitError("read the workspace record: %v", err)
 	}
@@ -466,7 +466,7 @@ func opList() int {
 		ours[name] = true
 	}
 
-	list := agentproto.ListResult{Workspaces: []agentproto.Workspace{}}
+	list := agentproto.ListResult{Workspaces: []agentproto.Workspace{}, Recorded: recorded}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
