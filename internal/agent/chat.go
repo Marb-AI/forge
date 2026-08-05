@@ -156,9 +156,20 @@ func opChatSend(args []string) int {
 	if err := os.WriteFile(p.prompt, prompt, 0o600); err != nil {
 		return emitError("write prompt: %v", err)
 	}
-	// The workspace user owns its home and is who Claude runs as; the agent wrote
-	// these as root.
-	_, _ = run("chown", "-R", *name+":"+*name, p.dir)
+	// The agent is root and Claude is not, so everything just created has to be
+	// handed over — including ~/.claude itself, which MkdirAll will have made on a
+	// workspace that has never run Claude, and which the chat directory alone does
+	// not cover.
+	//
+	// Checked rather than attempted: a turn whose prompt Claude cannot read starts,
+	// writes nothing, and ends. The caller would have a turn id for it and would
+	// wait out a conversation that never happened, which is a worse answer than
+	// the failure.
+	owner := *name + ":" + *name
+	if out, err := run("chown", owner,
+		filepath.Dir(p.dir), p.dir, p.prompt); err != nil {
+		return emitError("hand the turn to %s: %v: %s", *name, err, out)
+	}
 
 	resume, _ := os.ReadFile(p.session)
 	cmd := turnCommand(p, strings.TrimSpace(string(resume)))
@@ -190,24 +201,41 @@ func opChatTail(args []string) int {
 	turn := fs.String("turn", "", "turn id")
 	offset := fs.Int64("offset", 0, "resume from this many bytes in")
 	if err := fs.Parse(args); err != nil {
-		return emitError("bad arguments")
+		return tailError("bad arguments")
 	}
 	if !nameRe.MatchString(*name) {
-		return emitError("invalid workspace name %q", *name)
+		return tailError("invalid workspace name %q", *name)
 	}
 	if !turnRe.MatchString(*turn) {
-		return emitError("invalid turn id %q", *turn)
+		return tailError("invalid turn id %q", *turn)
 	}
 	if *offset < 0 {
-		return emitError("offset %d is before the start", *offset)
+		return tailError("offset %d is before the start", *offset)
 	}
 
 	p := chatFiles(*name, *turn)
+	// The prompt is written before the turn id is ever handed out, so its absence
+	// means this turn was never started here — a name or an id that does not
+	// belong to this host. Worth one stat: without it the follower would wait for
+	// a stream that is not late but imaginary, and wait for as long as anyone let
+	// it, because a turn yet to write its first line looks exactly the same.
+	if !exists(p.prompt) {
+		return tailError("no turn %s in %q on this host", *turn, *name)
+	}
 	if err := followTurn(p, *offset, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 1
+		return tailError("%v", err)
 	}
 	return 0
+}
+
+// tailError is emitError for the one command whose stdout is not ours: it is
+// carrying Claude Code's stream verbatim, so a JSON object about a failure
+// printed there would arrive as one more line of the conversation. Stderr and
+// the exit status say it instead — the same arrangement the file browser's
+// remote snippets use.
+func tailError(format string, args ...any) int {
+	fmt.Fprintf(os.Stderr, "forge-agent: "+format+"\n", args...)
+	return 1
 }
 
 // chatPoll is how often a follower looks for more. Short enough that a sentence

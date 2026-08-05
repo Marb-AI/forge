@@ -380,15 +380,15 @@ const UsageFile = ".claude/forge-usage"
 // reasons: it is Claude's own account of its own session, and ~/.claude is
 // already hidden from the file tree.
 //
-// A turn is three files sharing a name — the prompt that started it, the stream
-// it produced, and a marker written when the process exited. Files rather than a
-// database because of what has to be true when a phone comes back after twenty
+// A turn is four files sharing a name — the prompt that started it, the stream
+// it produced, whatever it said on stderr, and a marker written when the process
+// exited. Files rather than a database because of what has to be true when a phone comes back after twenty
 // minutes on a train: the turn ran to the end without anyone watching, and what
 // it said is still there to be read from wherever the reader got to. An offset
 // into a file is the whole of that reader's state.
 const ChatDir = ".claude/forge-chat"
 
-// The three files of one turn, and the suffixes that name them. Sharing a stem
+// The four files of one turn, and the suffixes that name them. Sharing a stem
 // means a turn is one glob, which is what makes "clean up after turn X" and
 // "list the turns" the same shape of thing.
 const (

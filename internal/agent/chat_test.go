@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -295,5 +296,73 @@ func waitFor(t *testing.T, ok func() bool) {
 			t.Fatal("timed out waiting for the follower to catch up")
 		}
 		time.Sleep(chatPoll / 3)
+	}
+}
+
+// A turn that was never started here is said so, not waited for.
+//
+// A stream that does not exist is the ordinary state of a turn a moment old, so
+// the follower is right to wait through it — which means a wrong name or a wrong
+// id would be waited through too, for as long as anyone let it. The prompt is
+// what tells the two apart: it is written before the id is handed out, so a turn
+// with no prompt is a turn this host never ran.
+func TestTailingATurnThatWasNeverStarted(t *testing.T) {
+	writeTurn(t, "ws", aTurn)
+
+	done := make(chan int, 1)
+	go func() { done <- opChatTail([]string{"-name", "ws", "-turn", aTurn}) }()
+
+	select {
+	case code := <-done:
+		if code == 0 {
+			t.Error("tailing a turn that does not exist succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tailing a turn that was never started waited for it instead of " +
+			"saying so — and would have waited as long as anyone let it")
+	}
+}
+
+// This command's stdout carries Claude Code's stream verbatim, so nothing else
+// may be written there. A JSON object about a failure would arrive as one more
+// line of the conversation, and whatever is reading it has every reason to
+// believe it.
+func TestTheTailCommandKeepsItsComplaintsOffTheStream(t *testing.T) {
+	writeTurn(t, "ws", aTurn)
+
+	out := captureStdout(t)
+	code := opChatTail([]string{"-name", "ws", "-turn", "not-a-turn-id"})
+	if code == 0 {
+		t.Error("an invalid turn id was accepted")
+	}
+	if got := out(); got != "" {
+		t.Errorf("the tail command wrote %q to the stream; failures belong on stderr", got)
+	}
+}
+
+// captureStdout swaps os.Stdout for a pipe and hands back a function that
+// restores it and reports what was written.
+func captureStdout(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := os.Stdout
+	os.Stdout = w
+
+	read := make(chan string, 1)
+	go func() {
+		var b bytes.Buffer
+		_, _ = io.Copy(&b, r)
+		read <- b.String()
+	}()
+
+	return func() string {
+		os.Stdout = prev
+		_ = w.Close()
+		s := <-read
+		_ = r.Close()
+		return s
 	}
 }
