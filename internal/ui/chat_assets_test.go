@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,37 @@ func TestTheChatDoesNotTrackItsOwnOffset(t *testing.T) {
 	// reconnecting, and saying so would put a failure on screen for every tunnel.
 	if !strings.Contains(body, "es.onerror = () => {}") {
 		t.Error("a transient disconnect is reported to the reader as a failure")
+	}
+}
+
+// The server's failure event must not be called "error".
+//
+// EventSource dispatches its own transport trouble as an `error` event, so a
+// listener by that name hears every dropped connection as well as the one real
+// failure — and this page ends the turn on it, which closes the stream and stops
+// the browser reconnecting. That is the entire mechanism the ids exist for: the
+// first tunnel a phone drives through would end the conversation and report it
+// as Claude having stopped being readable.
+//
+// Both ends are checked here because they only work as a pair.
+func TestTheServersFailureIsNotCalledError(t *testing.T) {
+	js := withoutComments(embeddedAsset(t, "app.js"))
+
+	if strings.Contains(js, `es.addEventListener("error"`) {
+		t.Error("the chat listens for `error`, which is also every dropped connection: " +
+			"a tunnel would end the turn and stop the browser reconnecting")
+	}
+	if !strings.Contains(js, `es.addEventListener("failed"`) {
+		t.Fatal("nothing listens for the server's failure, so a turn that broke ends silently")
+	}
+
+	// And the server has to send that name, or the listener is deaf.
+	server, err := os.ReadFile("chat.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(server), `"event: failed\ndata:`) {
+		t.Error("the handler does not send `event: failed`, which is what the page waits for")
 	}
 }
 

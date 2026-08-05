@@ -134,7 +134,12 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	if readErr != nil && r.Context().Err() == nil {
 		// The turn is over either way; this says why, in the one place the page can
 		// tell the difference between "finished" and "stopped being readable".
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", sseData(readErr.Error()))
+		// "failed", not "error": EventSource dispatches its own transport trouble
+		// as an `error` event, so a server event by that name arrives through the
+		// same listener as every dropped connection — and a page that treated one
+		// as the other would end the turn on the first tunnel and stop the
+		// browser's reconnect, which is the whole mechanism the ids exist for.
+		fmt.Fprintf(w, "event: failed\ndata: %s\n\n", sseData(readErr.Error()))
 	} else {
 		fmt.Fprint(w, "event: done\ndata: {}\n\n")
 	}

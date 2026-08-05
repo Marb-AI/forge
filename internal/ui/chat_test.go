@@ -140,7 +140,7 @@ func TestATurnThatFailedSaysSoRatherThanEndingQuietly(t *testing.T) {
 
 	body := chatStream(t, s, "/api/chat/ws/"+aTurn+"/stream", nil)
 
-	if !strings.Contains(body, "event: error") {
+	if !strings.Contains(body, "event: failed") {
 		t.Errorf("a failed turn ended like a finished one:\n%s", body)
 	}
 	if strings.Contains(body, "event: done") {
@@ -286,7 +286,7 @@ func TestALinePastTheLimitEndsTheTurnRatherThanHangingIt(t *testing.T) {
 		t.Error("the tail's write was accepted whole, so this proves nothing about " +
 			"the line the framing could not carry")
 	}
-	if !strings.Contains(body, "event: error") {
+	if !strings.Contains(body, "event: failed") {
 		t.Errorf("a turn the page could not frame ended as though it had finished:\n%s",
 			firstBytes(body))
 	}

@@ -3268,13 +3268,17 @@ refreshPorts();
 // deliberate — the format is versioned by somebody else, and one place to be
 // wrong about it is better than four.
 const chat = {
-  // ws -> {log: [rendered nodes are in the DOM; this is what to repaint], turn,
-  //        es, live: the element text is streaming into}
+  // ws -> {turn: the id being read, or null; es: its stream; live: the element
+  //        partial text is accumulating into, or null}
+  //
+  // The transcript itself is not in here: it is the DOM, and one workspace's
+  // conversation is on screen at a time. What survives a tab switch is on the
+  // host, which is where a reload will get it from.
   byWs: {},
 };
 
 function chatFor(ws) {
-  if (!chat.byWs[ws]) chat.byWs[ws] = { turn: null, es: null, live: null, sent: false };
+  if (!chat.byWs[ws]) chat.byWs[ws] = { turn: null, es: null, live: null };
   return chat.byWs[ws];
 }
 
@@ -3358,14 +3362,21 @@ function chatOpenStream(ws, turn) {
     if (ws === state.active) chatRender(c, msg);
   };
   es.addEventListener("done", () => chatEndStream(ws));
-  es.addEventListener("error", (ev) => {
+  // "failed" rather than "error", and that is not a preference: EventSource
+  // dispatches its own transport trouble as an `error` event, so a listener by
+  // that name hears every dropped connection as well as the server's one real
+  // failure — and ending the turn on the first of those would close the stream
+  // and stop the browser reconnecting, which is the entire mechanism the ids
+  // exist for. A name of our own cannot be confused with the browser's.
+  es.addEventListener("failed", (ev) => {
     let why = "the turn stopped being readable";
     try { why = JSON.parse(ev.data) || why; } catch { /* keep the default */ }
     chatAppend(chatNode("chat-note bad", why));
     chatEndStream(ws);
   });
-  // onerror is the transport's, not the turn's: the browser reconnects by itself
-  // and carries the offset with it, so there is nothing to do and nothing to say.
+  // The transport's own errors are the browser's business: it reconnects by
+  // itself and carries the offset with it, so there is nothing to do and nothing
+  // to say. Saying something would put a failure on screen for every tunnel.
   es.onerror = () => {};
 }
 
@@ -3381,7 +3392,12 @@ function chatEndStream(ws) {
 function chatSetBusy(busy) {
   document.getElementById("chatsend").disabled = busy;
   document.getElementById("chatinput").disabled = busy;
-  if (!busy) document.getElementById("chatinput").focus();
+  // Only if the chat is what you are looking at. A turn that ends while you are
+  // typing in the terminal must not pull the caret into a textarea that is not
+  // even on screen — the answer arriving is not a request for your attention.
+  if (!busy && !document.getElementById("chatpanel").hidden) {
+    document.getElementById("chatinput").focus();
+  }
 }
 
 // chatRender turns one stream-json object into what it means on screen.
@@ -3403,7 +3419,10 @@ function chatRender(c, msg) {
       c.live = chatNode("chat-msg claude live", "");
       chatAppend(c.live);
     }
-    c.live.textContent += text;
+    // A node per delta rather than rewriting the element's text: += reserializes
+    // everything said so far on every fragment, which on a long reply is the
+    // whole message copied a few hundred times.
+    c.live.appendChild(document.createTextNode(text));
     const log = document.getElementById("chatlog");
     if (log.scrollHeight - log.scrollTop - log.clientHeight < 80) log.scrollTop = log.scrollHeight;
     return;
