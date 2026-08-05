@@ -1021,3 +1021,89 @@ button.big { padding: 10px 20px; font-size: 13px; }
   flex: none;
 }
 #chatsend:disabled { opacity: .45; }
+
+/* ---- narrow screens ------------------------------------------------------
+   A phone, and the browser on one. Everything below is the same page: no second
+   front end, no second template — the layout gives way and one mode goes.
+
+   The mode that goes is the terminal. Not to save room: a TUI on a phone is a
+   software keyboard over two thirds of the screen and a full redraw across a
+   mobile link every time the cursor moves, and no amount of CSS makes that worth
+   using. Chat is the answer there, which is why it exists. The shells go with it
+   for the same reason.
+
+   What stays is everything that answers "what is this workspace doing" — the
+   tree, the ports, the servers — moved out of the way rather than dropped, since
+   on a phone the answer matters more, not less. */
+
+/* The pane toggle only exists where the pane is off-canvas. */
+#panetoggle { display: none; flex: none; }
+
+@media (max-width: 720px) {
+  #panetoggle { display: inline-flex; align-items: center; justify-content: center; }
+
+  /* Off-canvas, over the stage, and pushed off by default. transform rather than
+     display so it animates and keeps its scroll position — a tree you scrolled
+     to find something is a tree you are still using. */
+  #filepane {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 30;
+    width: min(86vw, 340px);
+    max-width: none;
+    transform: translateX(-100%);
+    transition: transform .18s ease;
+    box-shadow: 2px 0 12px rgba(0, 0, 0, .28);
+  }
+  #app.pane-open #filepane { transform: none; }
+  #app.pane-open #panescrim {
+    position: absolute;
+    inset: 0;
+    z-index: 25;
+    background: rgba(0, 0, 0, .35);
+  }
+
+  /* The rail becomes a row along the bottom, where a thumb is. Its lower group
+     — host shell, local shell, settings — stops being "below the fold" because
+     there is no fold in a row; settings is the only one of the three that means
+     anything here. */
+  #rail {
+    position: absolute;
+    inset: auto 0 0 0;
+    width: auto;
+    flex-direction: row;
+    justify-content: space-evenly;
+    gap: 2px;
+    padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    z-index: 21;
+  }
+  #rail .rail-sep, #rail .rail-foot .rail-sep { display: none; }
+  #rail .rail-foot { display: contents; }
+
+  /* The terminal and the shells, gone. Not hidden as a tidying-up: they are the
+     desktop's way in, and leaving a dead button on a phone is worse than not
+     offering it. */
+  #terminal,
+  #sshpanel,
+  .rail-btn[data-action="ssh"],
+  .rail-btn[data-action="host"],
+  .rail-btn[data-action="local"] { display: none !important; }
+
+  /* Room for the rail along the bottom — and for the home indicator under it,
+     which the rail's own padding pushes it up by. A fixed number here would put
+     the last line of a conversation behind both. */
+  #stage { padding-bottom: calc(46px + env(safe-area-inset-bottom)); }
+
+  /* One thing at a time on a small screen, and it is the conversation. */
+  #chatpanel { border-radius: 0; }
+  #chatlog { padding: 10px 12px; }
+  .chat-msg { max-width: none; }
+
+  /* 16px or iOS zooms the page on focus, and never zooms back. */
+  #chatinput { font-size: 16px; }
+
+  /* Tabs scroll rather than shrinking to nothing. */
+  #tabs { overflow-x: auto; scrollbar-width: none; }
+  #tabs::-webkit-scrollbar { display: none; }
+}

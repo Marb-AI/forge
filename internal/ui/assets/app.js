@@ -40,6 +40,13 @@ const state = {
   activity: {},   // ws name -> {state, ts, topic, topic_ts}: what Claude's up to, polled
 };
 
+// NARROW matches the stylesheet's breakpoint, and lives up here rather than with
+// the rest of the narrow-screen code because `const` is not hoisted: read from
+// anything that runs during boot — which is hundreds of lines above where that
+// code sits — a declaration further down throws instead of answering.
+const NARROW = "(max-width: 720px)";
+function isNarrow() { return window.matchMedia(NARROW).matches; }
+
 // ---- theme ----------------------------------------------------------------
 function initTheme() {
   const saved = localStorage.getItem("forge-theme") || "dark";
@@ -1632,6 +1639,15 @@ function postResize(ws, kind, cols, rows) {
 function openTerminal(ws) {
   teardownTerminal();
   setStatus(null);
+  // Nothing attaches a terminal on a phone, whoever asked for one — selecting a
+  // workspace, a restart, a reconnect. The stylesheet hides it there, and a
+  // hidden terminal is not merely useless: it is an SSH session and a stream of
+  // bytes for a screen nobody can see. Guarding here rather than at each caller
+  // is what makes that true of all of them, including the ones added later.
+  if (isNarrow()) {
+    openChatOnNarrow();
+    return;
+  }
   state.claude = makeTerminal(ws, "claude", document.getElementById("terminal"), () => {
     // After a restart/checkpoint the old session is killed on purpose and a
     // fresh one is (being) started — reconnect to attach to it. Otherwise the
@@ -2999,6 +3015,7 @@ function hideFileView() {
 initTheme();
 initTabDrag();
 initChat();
+initNarrow();
 state.showHidden = localStorage.getItem("forge-show-hidden") === "1";
 applyShowHidden();
 applyServersCollapsed();
@@ -3571,4 +3588,65 @@ function initChat() {
     input.style.height = "auto";
     input.style.height = input.scrollHeight + "px";
   });
+}
+
+// ---- narrow screens --------------------------------------------------------
+//
+// The same page on a phone, with one mode gone. The terminal and the shells are
+// the desktop's way in — a TUI behind a software keyboard, redrawn across a
+// mobile link, is not a thing anyone would choose — so on a narrow screen the
+// chat is not one of two faces but the only one, and it is what opens.
+//
+// The CSS does the layout. What is here is the two things a stylesheet cannot
+// decide: which view a workspace opens in, and whether the off-canvas pane is
+// showing.
+
+function initNarrow() {
+  const app = document.getElementById("app");
+  const toggle = document.getElementById("panetoggle");
+  const scrim = document.getElementById("panescrim");
+
+  const setPane = (open) => {
+    app.classList.toggle("pane-open", open);
+    if (scrim) scrim.hidden = !open;
+    if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  if (toggle) toggle.addEventListener("click", () => setPane(!app.classList.contains("pane-open")));
+  if (scrim) scrim.addEventListener("click", () => setPane(false));
+  // Picking a file or a workspace is the reason the pane was opened, so it has
+  // done its job and should get out of the way.
+  document.getElementById("filetree").addEventListener("click", () => {
+    if (isNarrow()) setPane(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && app.classList.contains("pane-open")) setPane(false);
+  });
+
+  // A window dragged narrow — or a phone turned — has to end up in a state that
+  // exists: the pane is not off-canvas on a wide screen, and there is no
+  // terminal to go back to on a small one.
+  const mq = window.matchMedia(NARROW);
+  const apply = () => {
+    if (!mq.matches) {
+      setPane(false);
+      // A window dragged wide again is a window with a terminal, and there will
+      // be none: nothing attached one while it was narrow.
+      if (state.active && !state.claude && !state.stopped) openTerminal(state.active);
+      return;
+    }
+    openChatOnNarrow();
+  };
+  mq.addEventListener("change", apply);
+  apply();
+}
+
+// openChatOnNarrow makes the conversation the view, because on a phone it is the
+// only one. Called on load and whenever a window becomes narrow.
+function openChatOnNarrow() {
+  if (!isNarrow() || !state.active) return;
+  const panel = document.getElementById("chatpanel");
+  if (!panel.hidden) return;
+  panel.hidden = false;
+  setPanelActive("chat");
+  chatShow(state.active);
 }
