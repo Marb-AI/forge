@@ -352,6 +352,21 @@ type ChatTurn struct {
 	Turn string `json:"turn"`
 }
 
+// PortRangeResult is a host's answer about which of its ports Forge may hand
+// out.
+//
+// Set and Recorded are two different absences and both matter. Recorded false is
+// an agent that predates this — ask your own config, as always. Recorded true
+// with Set false is a host that keeps state and has never been told its range,
+// which is every host between the record arriving and a client filling it in.
+type PortRangeResult struct {
+	Start    int  `json:"start"`
+	End      int  `json:"end"`
+	Block    int  `json:"block"`
+	Set      bool `json:"set"`
+	Recorded bool `json:"recorded"`
+}
+
 // ErrorResult is printed (and the process exits non-zero) on failure.
 type ErrorResult struct {
 	Error string `json:"error"`
