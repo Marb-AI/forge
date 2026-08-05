@@ -117,11 +117,24 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		_ = pr.CloseWithError(r.Context().Err())
 	}()
 
-	streamChat(w, flusher, pr, offset)
-	if err := <-done; err != nil && r.Context().Err() == nil {
+	// The reader is closed with whatever stopped the framing, and always: a
+	// scanner that gave up — a line past the limit — stops reading the pipe, and
+	// the tail on the other end would then block on a write nobody will ever take,
+	// holding an SSH session open until the browser went away. Closing is what
+	// unwinds it.
+	readErr := streamChat(w, flusher, pr, offset)
+	_ = pr.CloseWithError(readErr)
+
+	tailErr := <-done
+	// The framing's own failure is the more specific of the two — the tail will
+	// only report the broken pipe that this caused — so it is the one to show.
+	if readErr == nil {
+		readErr = tailErr
+	}
+	if readErr != nil && r.Context().Err() == nil {
 		// The turn is over either way; this says why, in the one place the page can
 		// tell the difference between "finished" and "stopped being readable".
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", sseData(err.Error()))
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", sseData(readErr.Error()))
 	} else {
 		fmt.Fprint(w, "event: done\ndata: {}\n\n")
 	}
@@ -134,7 +147,7 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 // JSON object per line, SSE frames on newlines, and the two agree without
 // anything being encoded. Passing chunks through instead would split objects
 // across events at whatever boundary the network chose.
-func streamChat(w io.Writer, flusher http.Flusher, r io.Reader, offset int64) {
+func streamChat(w io.Writer, flusher http.Flusher, r io.Reader, offset int64) error {
 	sc := bufio.NewScanner(r)
 	// A turn's line is one JSON object and can hold a whole file the model wrote
 	// out; the default 64 KiB would end the stream partway through one.
@@ -151,6 +164,7 @@ func streamChat(w io.Writer, flusher http.Flusher, r io.Reader, offset int64) {
 		fmt.Fprintf(w, "id: %d\ndata: %s\n\n", offset, line)
 		flusher.Flush()
 	}
+	return sc.Err()
 }
 
 // chatLineLimit is the longest single stream-json object this will carry. One

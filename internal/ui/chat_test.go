@@ -257,3 +257,47 @@ func TestABadOffsetIsRefused(t *testing.T) {
 		t.Error("a bad offset reached the host")
 	}
 }
+
+// A line past the limit ends the turn, and does not hang it.
+//
+// The framing reads the tail through a pipe, so a scanner that gives up stops
+// reading it — and the tail on the other end blocks on a write nobody will ever
+// take, holding an SSH session open until the browser goes away. The reader is
+// closed with whatever stopped the framing, which is what unwinds it: the tail's
+// write returns an error instead of never returning at all.
+func TestALinePastTheLimitEndsTheTurnRatherThanHangingIt(t *testing.T) {
+	huge := "{\"text\":\"" + strings.Repeat("x", chatLineLimit+1) + "\"}\n"
+
+	wrote := make(chan error, 1)
+	s := &server{deps: Deps{
+		KnowsWorkspace: func(string) bool { return true },
+		ChatTail: func(ws, turn string, offset int64, w io.Writer) error {
+			_, err := io.WriteString(w, huge)
+			wrote <- err
+			return err
+		},
+	}}
+
+	// chatStream fails the test if the handler never returns, which is what this
+	// hangs as without the close.
+	body := chatStream(t, s, "/api/chat/ws/"+aTurn+"/stream", nil)
+
+	if err := <-wrote; err == nil {
+		t.Error("the tail's write was accepted whole, so this proves nothing about " +
+			"the line the framing could not carry")
+	}
+	if !strings.Contains(body, "event: error") {
+		t.Errorf("a turn the page could not frame ended as though it had finished:\n%s",
+			firstBytes(body))
+	}
+	if strings.Contains(body, "event: done") {
+		t.Error("it also reported success")
+	}
+}
+
+func firstBytes(s string) string {
+	if len(s) > 200 {
+		return s[:200] + "…"
+	}
+	return s
+}

@@ -3,7 +3,6 @@ package forge
 import (
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 
@@ -77,11 +76,65 @@ func ChatTail(workspace, turn string, offset int64, w io.Writer) error {
 	// arrives a paragraph at a time is a chat, and one that arrives when the turn
 	// ends is a form submission.
 	//
-	// The agent keeps its own complaints off stdout for exactly this reason, so
-	// stderr is where they are, and this process's is where they go — the same
-	// place every other remote failure is explained.
-	return sshx.AdminTarget(host).Pipe(nil, w, os.Stderr, remote...)
+	// Stderr is kept rather than let out to this process's, which is where every
+	// other remote failure is explained. It has to be: the agent's tail command
+	// carries Claude Code's stream on stdout and so says everything it has to say
+	// on stderr — "no turn X in this workspace" among it — and that is the one
+	// sentence worth putting in front of whoever is waiting for an answer. Left to
+	// the daemon's log it would reach nobody who could act on it.
+	var why boundedBuffer
+	return explain(sshx.AdminTarget(host).Pipe(nil, w, &why, remote...), &why)
 }
+
+// explain prefers the far end's own account of a failure to the transport's.
+//
+// "ssh exited 1" is true and useless; "no turn 20260805T142530.123456789 in
+// \"ws\" on this host" is what somebody can act on, and it is on stderr because
+// stdout is carrying the conversation. When the far end said nothing — a
+// connection that never got there — the transport's error is all there is, and
+// it is returned unchanged.
+//
+// Nothing is said about a success, however talkative it was: a warning is not a
+// failure, and a caller that turned one into an error would end a turn that went
+// perfectly well.
+func explain(err error, why *boundedBuffer) error {
+	if err == nil {
+		return nil
+	}
+	if said := strings.TrimSpace(why.String()); said != "" {
+		return fmt.Errorf("%s", said)
+	}
+	return err
+}
+
+// boundedBuffer keeps the first of what it is given and silently drops the rest.
+//
+// What it holds is an explanation destined for a browser, and the far end is a
+// remote process that can be made to say anything at any length. A sentence is
+// what this is for.
+type boundedBuffer struct {
+	b strings.Builder
+}
+
+// chatWhyLimit is how much of a failure's explanation survives. Long enough for
+// the agent's own sentences and a shell's complaint under them, short enough
+// that nothing is being stored.
+const chatWhyLimit = 4 << 10
+
+func (s *boundedBuffer) Write(p []byte) (int, error) {
+	if room := chatWhyLimit - s.b.Len(); room > 0 {
+		if len(p) > room {
+			p = p[:room]
+		}
+		s.b.Write(p)
+	}
+	// The whole write is reported as taken: the far end is not being asked to
+	// resend anything, and a short write would end the stream it belongs to.
+	return len(p), nil
+}
+
+func (s *boundedBuffer) Len() int       { return s.b.Len() }
+func (s *boundedBuffer) String() string { return s.b.String() }
 
 // chatHost is the server a workspace lives on. Same refusal as everywhere else
 // that takes a workspace name: Forge acts on what its own config records, so a
