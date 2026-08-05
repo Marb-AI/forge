@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -364,5 +365,110 @@ func captureStdout(t *testing.T) func() string {
 		s := <-read
 		_ = r.Close()
 		return s
+	}
+}
+
+// A conversation comes back in the order it happened, with the questions.
+//
+// The prompts are the half Claude Code never writes down — they go in on stdin —
+// so a transcript without them is a page of answers to questions nobody can see.
+// And the order is the ids': they are timestamps precisely so that the newest n
+// is the tail of a sorted listing, with no file read to find out when anything
+// ran.
+func TestAConversationComesBackOldestFirstWithItsPrompts(t *testing.T) {
+	p := writeTurn(t, "ws", aTurn)
+
+	// Written out of order on purpose: the directory does not promise one.
+	for _, turn := range []struct{ id, prompt, reply string }{
+		{"20260805T142530.000000002", "second question", `{"type":"result","n":2}`},
+		{"20260805T142530.000000001", "first question", `{"type":"result","n":1}`},
+		{"20260805T142530.000000003", "third question", `{"type":"result","n":3}`},
+	} {
+		f := chatFiles("ws", turn.id)
+		if err := os.WriteFile(f.prompt, []byte(turn.prompt), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f.stream, []byte(turn.reply+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A stray file that is not a turn — the session id lives in this directory
+	// too, and so will anything added later.
+	if err := os.WriteFile(filepath.Join(p.dir, "session"), []byte("s-1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t)
+	if code := opChatHistory([]string{"-name", "ws", "-turns", "10"}); code != 0 {
+		t.Fatalf("history exited %d", code)
+	}
+	got := out()
+
+	for i, want := range []string{"first question", `"n":1`, "second question", `"n":2`,
+		"third question", `"n":3`} {
+		j := strings.Index(got, want)
+		if j < 0 {
+			t.Fatalf("the transcript is missing %q:\n%s", want, got)
+		}
+		if i > 0 && j < strings.Index(got, "first question") {
+			t.Errorf("%q came before the first question", want)
+		}
+	}
+	// Oldest first: the conversation reads downwards, like every other one.
+	if strings.Index(got, "first question") > strings.Index(got, "third question") {
+		t.Error("the conversation came back newest first")
+	}
+	if strings.Contains(got, "s-1") {
+		t.Error("the session file was read as a turn")
+	}
+}
+
+// Only the last few, because a conversation is unbounded and a page is not.
+func TestOnlyTheMostRecentTurnsComeBack(t *testing.T) {
+	writeTurn(t, "ws", aTurn)
+
+	for i := 1; i <= 5; i++ {
+		id := fmt.Sprintf("20260805T14253%d.000000000", i)
+		f := chatFiles("ws", id)
+		if err := os.WriteFile(f.prompt, []byte(fmt.Sprintf("q%d", i)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := captureStdout(t)
+	if code := opChatHistory([]string{"-name", "ws", "-turns", "2"}); code != 0 {
+		t.Fatalf("history exited %d", code)
+	}
+	got := out()
+
+	for _, gone := range []string{"q1", "q2", "q3"} {
+		if strings.Contains(got, `"`+gone+`"`) {
+			t.Errorf("asked for 2 turns and got %s as well", gone)
+		}
+	}
+	for _, want := range []string{"q4", "q5"} {
+		if !strings.Contains(got, `"`+want+`"`) {
+			t.Errorf("the last two turns are missing %s:\n%s", want, got)
+		}
+	}
+}
+
+// A workspace nobody has ever asked anything is an empty conversation, not a
+// failure: it is the ordinary state of a workspace that has only ever been used
+// through the terminal.
+func TestAWorkspaceWithNoConversationIsNotAnError(t *testing.T) {
+	prev := baseDir
+	baseDir = t.TempDir()
+	t.Cleanup(func() { baseDir = prev })
+
+	out := captureStdout(t)
+	code := opChatHistory([]string{"-name", "ws", "-turns", "10"})
+	got := out()
+
+	if code != 0 {
+		t.Errorf("a workspace with no chat exited %d", code)
+	}
+	if strings.TrimSpace(got) != "" {
+		t.Errorf("it wrote %q", got)
 	}
 }

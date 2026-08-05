@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -304,4 +306,85 @@ func copyFrom(path string, offset int64, w io.Writer) (int64, error) {
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// opChatHistory writes the last few turns of a conversation, oldest first.
+//
+// One command rather than a listing the caller then fetches turn by turn: a
+// reload is one round trip over SSH instead of twenty, and the transcript
+// arrives in the order it happened without the caller sorting anything.
+//
+// Each turn is introduced by a line of Forge's own — the only thing in this
+// stream that Claude Code did not write — carrying the id and the prompt that
+// started it. The prompt is nowhere in Claude Code's output: it went in on
+// stdin, and a transcript that showed the answers without the questions would be
+// half a conversation.
+func opChatHistory(args []string) int {
+	fs := flag.NewFlagSet("claude-chat-history", flag.ContinueOnError)
+	name := fs.String("name", "", "workspace name")
+	turns := fs.Int("turns", 20, "how many of the most recent turns to include")
+	if err := fs.Parse(args); err != nil {
+		return tailError("bad arguments")
+	}
+	if !nameRe.MatchString(*name) {
+		return tailError("invalid workspace name %q", *name)
+	}
+	if *turns <= 0 {
+		return tailError("asked for %d turns", *turns)
+	}
+
+	ids, err := recentTurns(*name, *turns)
+	if err != nil {
+		return tailError("read the conversation: %v", err)
+	}
+	for _, id := range ids {
+		p := chatFiles(*name, id)
+		prompt, _ := os.ReadFile(p.prompt)
+		head, err := json.Marshal(map[string]string{
+			"type":   agentproto.ChatTurnEvent,
+			"turn":   id,
+			"prompt": string(prompt),
+		})
+		if err != nil {
+			continue // a prompt that will not marshal is not worth losing the turn's reply over
+		}
+		fmt.Printf("%s\n", head)
+		// Whatever it wrote, from the beginning. A turn still running is included
+		// as far as it has got; the caller follows it from there by its id.
+		if _, err := copyFrom(p.stream, 0, os.Stdout); err != nil {
+			return tailError("read turn %s: %v", id, err)
+		}
+	}
+	return 0
+}
+
+// recentTurns is the ids of the last n turns, oldest first.
+//
+// The ids sort by when they ran, which is why they are timestamps: the newest n
+// is the tail of a sorted directory listing, with no file read to find out when
+// anything happened.
+func recentTurns(workspace string, n int) ([]string, error) {
+	dir := chatFiles(workspace, "unused").dir
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil, nil // nothing has ever been asked here
+	}
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, e := range entries {
+		id := strings.TrimSuffix(e.Name(), agentproto.ChatPromptSuffix)
+		// The prompt is what marks a turn as having existed — it is written before
+		// the id is handed out — so counting those counts turns exactly once
+		// however many of the other three files are there.
+		if id != e.Name() && turnRe.MatchString(id) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) > n {
+		ids = ids[len(ids)-n:]
+	}
+	return ids, nil
 }

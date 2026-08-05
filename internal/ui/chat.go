@@ -65,6 +65,76 @@ func (s *server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 // to a file on somebody's server.
 const chatPromptLimit = 1 << 20 // 1 MiB
 
+// handleChatHistory replays the conversation so far.
+//
+// The same framing as a live turn, with one difference: no ids. An id is a byte
+// offset into one turn's file, and this is several concatenated, so a number
+// from here handed back as Last-Event-ID would resume a turn at a place that
+// means nothing in it. History is finite and the page asks for it once, so there
+// is nothing to resume.
+func (s *server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
+	ws := r.PathValue("ws")
+	if !s.deps.KnowsWorkspace(ws) {
+		writeJSONError(w, http.StatusNotFound, fmt.Errorf("unknown workspace %q", ws))
+		return
+	}
+	if s.deps.ChatHistory == nil {
+		writeJSONError(w, http.StatusNotImplemented, errNoChat)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, fmt.Errorf("streaming unsupported"))
+		return
+	}
+	turns := chatTurns(r)
+
+	sseHeaders(w)
+	flusher.Flush()
+
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := s.deps.ChatHistory(ws, turns, pw)
+		_ = pw.CloseWithError(err)
+		done <- err
+	}()
+	go func() {
+		<-r.Context().Done()
+		_ = pr.CloseWithError(r.Context().Err())
+	}()
+
+	readErr := streamChat(w, flusher, pr, noIDs)
+	_ = pr.CloseWithError(readErr)
+	if err := <-done; readErr == nil {
+		readErr = err
+	}
+	chatEnd(w, flusher, readErr, r)
+}
+
+// chatTurns is how much of the conversation to bring back. Bounded, because the
+// number arrives from a browser and each one is a file read on somebody's
+// server; defaulted, because a page that asks for none wants the usual amount.
+func chatTurns(r *http.Request) int {
+	n, err := strconv.Atoi(r.URL.Query().Get("turns"))
+	if err != nil || n <= 0 {
+		return chatTurnsDefault
+	}
+	if n > chatTurnsMax {
+		return chatTurnsMax
+	}
+	return n
+}
+
+const (
+	chatTurnsDefault = 20
+	chatTurnsMax     = 200
+)
+
+// noIDs is the offset that means "do not number these events" — see
+// handleChatHistory for why several turns at once cannot be resumed by offset.
+const noIDs int64 = -1
+
 // handleChatStream replays a turn as it was written, and keeps going until it
 // ends.
 //
@@ -94,11 +164,7 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	sseHeaders(w)
 	flusher.Flush()
 
 	// The turn's bytes go through a pipe rather than a buffer, so the tail's own
@@ -131,15 +197,33 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	if readErr == nil {
 		readErr = tailErr
 	}
-	if readErr != nil && r.Context().Err() == nil {
-		// The turn is over either way; this says why, in the one place the page can
-		// tell the difference between "finished" and "stopped being readable".
-		// "failed", not "error": EventSource dispatches its own transport trouble
-		// as an `error` event, so a server event by that name arrives through the
-		// same listener as every dropped connection — and a page that treated one
-		// as the other would end the turn on the first tunnel and stop the
-		// browser's reconnect, which is the whole mechanism the ids exist for.
-		fmt.Fprintf(w, "event: failed\ndata: %s\n\n", sseData(readErr.Error()))
+	chatEnd(w, flusher, readErr, r)
+}
+
+// sseHeaders says what every stream here says. One place, because a stream that
+// disagreed about buffering would work locally and stall behind a proxy.
+func sseHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+}
+
+// chatEnd closes a stream by saying which way it ended. The page can then tell
+// "finished" from "stopped being readable", which it cannot otherwise: both are
+// a stream that stops.
+//
+// "failed", not "error": EventSource dispatches its own transport trouble as an
+// `error` event, so a server event by that name arrives through the same
+// listener as every dropped connection — and a page that treated one as the
+// other would end the turn on the first tunnel and stop the browser's
+// reconnect, which is the whole mechanism the ids exist for.
+//
+// A client that went away is told nothing, because there is nobody there.
+func chatEnd(w io.Writer, flusher http.Flusher, err error, r *http.Request) {
+	if err != nil && r.Context().Err() == nil {
+		fmt.Fprintf(w, "event: failed\ndata: %s\n\n", sseData(err.Error()))
 	} else {
 		fmt.Fprint(w, "event: done\ndata: {}\n\n")
 	}

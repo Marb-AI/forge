@@ -3269,7 +3269,8 @@ refreshPorts();
 // wrong about it is better than four.
 const chat = {
   // ws -> {turn: the id being read, or null; es: its stream; live: the element
-  //        partial text is accumulating into, or null}
+  //        partial text is accumulating into, or null; shown: whether the
+  //        conversation so far has been fetched into the DOM}
   //
   // The transcript itself is not in here: it is the DOM, and one workspace's
   // conversation is on screen at a time. What survives a tab switch is on the
@@ -3278,7 +3279,7 @@ const chat = {
 };
 
 function chatFor(ws) {
-  if (!chat.byWs[ws]) chat.byWs[ws] = { turn: null, es: null, live: null };
+  if (!chat.byWs[ws]) chat.byWs[ws] = { turn: null, es: null, live: null, shown: false };
   return chat.byWs[ws];
 }
 
@@ -3291,10 +3292,58 @@ function toggleChat() {
   panel.hidden = !open;
   setPanelActive(open ? "chat" : null);
   if (open) {
+    chatShow(state.active);
     document.getElementById("chatinput").focus();
   } else if (state.claude) {
     state.claude.term.focus();
   }
+}
+
+// chatShow puts a workspace's conversation on screen, fetching what came before
+// if this page has not seen it.
+//
+// The transcript lives on the host, which is what makes a reload — or a second
+// window, or a phone picking up where the laptop left off — show the same
+// conversation rather than an empty box. What arrives is the same stream a live
+// turn produces, with a line of Forge's own introducing each turn, so there is
+// one renderer and not two.
+function chatShow(ws) {
+  const c = chatFor(ws);
+  if (c.shown) return;
+  c.shown = true;
+
+  const log = document.getElementById("chatlog");
+  const hint = document.getElementById("chat-empty");
+  const es = new EventSource(`/api/chat/${encodeURIComponent(ws)}/history`);
+  let any = false;
+
+  es.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (ws !== state.active) return;
+    any = true;
+    if (hint) hint.hidden = true;
+    chatRender(c, msg);
+  };
+  const stop = () => {
+    es.close();
+    // A conversation nobody has started yet is not a failure, and the invitation
+    // to start one should still be there.
+    if (!any && hint) hint.hidden = false;
+    if (c.live) { c.live.classList.remove("live"); c.live = null; }
+    log.scrollTop = log.scrollHeight;
+  };
+  es.addEventListener("done", stop);
+  es.addEventListener("failed", (ev) => {
+    let why = "the conversation could not be read";
+    try { why = JSON.parse(ev.data) || why; } catch { /* keep the default */ }
+    chatAppend(chatNode("chat-note bad", why));
+    stop();
+  });
+  // History is finite and asked for once. The browser would otherwise reconnect
+  // and replay the whole thing on every hiccup — and unlike a live turn there are
+  // no ids to resume from, because these are several files concatenated.
+  es.onerror = () => stop();
 }
 
 // chatAppend adds a node and keeps the view at the bottom, but only if it was
@@ -3408,6 +3457,16 @@ function chatSetBusy(busy) {
 // the one thing that came from it — never the conversation.
 function chatRender(c, msg) {
   const type = msg && msg.type;
+
+  // Forge's own line, and the only one in this stream nobody else wrote: the
+  // prompt that started a turn. Claude Code never echoes it — it went in on
+  // stdin — so without this a replayed conversation is a page of answers to
+  // questions that are not there.
+  if (type === "forge_turn") {
+    if (c.live) { c.live.remove(); c.live = null; }
+    if (msg.prompt) chatAppend(chatNode("chat-msg you", msg.prompt));
+    return;
+  }
 
   // A partial message: the text as it is being written. Kept in one node that is
   // replaced when the finished message arrives, so nothing is shown twice.
