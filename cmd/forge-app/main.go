@@ -57,6 +57,14 @@ func main() {
 		return
 	}
 
+	// Said, not dialogged: the window works, and what does not is the ports panel's
+	// links. A modal in front of a Forge that started fine would be the wrong size
+	// of complaint, and the panel says which tunnels are up anyway.
+	if inst.TunnelErr != nil {
+		fmt.Fprintf(os.Stderr, "forge-app: the ports panel's links need tunnels and "+
+			"they did not start: %v\n", inst.TunnelErr)
+	}
+
 	// The window is the whole app: when it goes, the core it was showing goes with
 	// it. Stopping the instance closes the terminals it opened and gives the port
 	// back — nothing else will, because an in-process UI has no signal handler and
