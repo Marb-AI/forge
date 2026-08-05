@@ -114,30 +114,22 @@ func ListWorkspaces() ([]WorkspaceInfo, error) {
 		return nil, err
 	}
 
-	// Ask only the hosts we actually have workspaces on, and each of them once. A
-	// host we have nothing on has nothing to tell us, and every one of these is an
-	// SSH round trip.
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
-
-	sessions := map[string]map[string]string{} // host alias -> workspace -> session status
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue // config names a host it no longer has; treated as unreachable
-		}
-		var res agentproto.ListResult
-		if err := callAgent(host, &res, "workspace-list"); err != nil {
-			continue // unreachable; its workspaces are reported as such below
-		}
-		byName := map[string]string{}
-		for _, ws := range res.Workspaces {
-			byName[ws.Name] = ws.Status
-		}
-		sessions[alias] = byName
-	}
+	// Every host at once, and only the ones we have workspaces on: a host with
+	// none has nothing to tell us, and each of these is an SSH round trip whose
+	// cost is almost entirely the handshake. Unreachable hosts are absent from
+	// the result and their workspaces are reported as such below.
+	sessions := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
+		func(host *config.Host) (map[string]string, error) {
+			var res agentproto.ListResult
+			if err := callAgent(host, &res, "workspace-list"); err != nil {
+				return nil, err
+			}
+			byName := map[string]string{}
+			for _, ws := range res.Workspaces {
+				byName[ws.Name] = ws.Status
+			}
+			return byName, nil
+		})
 
 	out := mergeWorkspaceStatus(cfg.Workspaces, sessions)
 	// Fill in each workspace's host login user from the config already in hand —
@@ -160,20 +152,14 @@ func WorkspaceActivity() (map[string]Activity, error) {
 	if err != nil {
 		return nil, err
 	}
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
+	answers := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
+		func(host *config.Host) (agentproto.ActivityResult, error) {
+			var res agentproto.ActivityResult
+			err := callAgent(host, &res, "workspace-activity") // unreachable: its tabs stay dim
+			return res, err
+		})
 	out := map[string]Activity{}
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue
-		}
-		var res agentproto.ActivityResult
-		if err := callAgent(host, &res, "workspace-activity"); err != nil {
-			continue // unreachable: its tabs just stay dim
-		}
+	for alias, res := range answers {
 		for name, a := range res.Activity {
 			if cfg.Workspaces[name] == alias { // ours, on this host
 				out[name] = Activity{State: a.State, TS: a.TS, Topic: a.Topic, TopicTS: a.TopicTS}
@@ -192,20 +178,14 @@ func WorkspaceTrack() (map[string]Track, error) {
 	if err != nil {
 		return nil, err
 	}
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
+	answers := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
+		func(host *config.Host) (agentproto.TrackResult, error) {
+			var res agentproto.TrackResult
+			err := callAgent(host, &res, "workspace-track") // unreachable: clocks don't move this round
+			return res, err
+		})
 	out := map[string]Track{}
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue
-		}
-		var res agentproto.TrackResult
-		if err := callAgent(host, &res, "workspace-track"); err != nil {
-			continue // unreachable: its clocks just don't update this round
-		}
+	for alias, res := range answers {
 		for name, t := range res.Sessions {
 			if cfg.Workspaces[name] == alias { // ours, on this host
 				out[name] = Track{SessionStart: t.SessionStart, ActiveSeconds: t.ActiveSeconds}
@@ -234,20 +214,14 @@ func WorkspaceUsage() (map[string]Usage, error) {
 	if err != nil {
 		return nil, err
 	}
-	needed := map[string]bool{}
-	for _, alias := range cfg.Workspaces {
-		needed[alias] = true
-	}
+	answers := askHosts(cfg.Hosts, hostsWithWorkspaces(cfg),
+		func(host *config.Host) (agentproto.UsageResult, error) {
+			var res agentproto.UsageResult
+			err := callAgent(host, &res, "workspace-usage") // unreachable, or an agent too old for the op
+			return res, err
+		})
 	out := map[string]Usage{}
-	for alias := range needed {
-		host := cfg.Hosts[alias]
-		if host == nil {
-			continue
-		}
-		var res agentproto.UsageResult
-		if err := callAgent(host, &res, "workspace-usage"); err != nil {
-			continue // unreachable, or an agent too old to know the op
-		}
+	for alias, res := range answers {
 		for name, u := range res.Usage {
 			if cfg.Workspaces[name] == alias { // ours, on this host
 				out[name] = usage(u)
