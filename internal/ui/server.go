@@ -120,6 +120,11 @@ type Deps struct {
 	// the one place that understands them, which is why they arrive unaltered.
 	// Optional, like ChatSend.
 	ChatTail func(ws, turn string, offset int64, w io.Writer) error
+	// ChatHistory writes the last n turns of a conversation to w, oldest first,
+	// and returns when it has. The same stream as a live turn, with a line of
+	// Forge's own introducing each turn — so a page coming back and a page joining
+	// one run the same code. Optional, like the other two.
+	ChatHistory func(ws string, turns int, w io.Writer) error
 	// KnowsWorkspace reports whether this client has a workspace by that name —
 	// what every per-workspace endpoint asks before doing anything, so an unknown
 	// name is a 404 rather than an attempt that fails.
@@ -282,6 +287,7 @@ func CoreDeps() Deps {
 		KnowsWorkspace:    forge.KnowsWorkspace,
 		ChatSend:          forge.ChatSend,
 		ChatTail:          forge.ChatTail,
+		ChatHistory:       forge.ChatHistory,
 		OpenTerminal:      forge.OpenTerminal,
 		ListDir:           forge.ListDir,
 		ReadFile:          forge.ReadFile,
@@ -476,6 +482,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /api/fs/{ws}/list", s.handleFsList)
 	mux.HandleFunc("GET /api/fs/{ws}/read", s.handleFsRead)
 	mux.HandleFunc("POST /api/chat/{ws}/send", s.handleChatSend)
+	mux.HandleFunc("GET /api/chat/{ws}/history", s.handleChatHistory)
 	mux.HandleFunc("GET /api/chat/{ws}/{turn}/stream", s.handleChatStream)
 	mux.HandleFunc("GET /api/ports/{ws}", s.handlePorts)
 	mux.HandleFunc("POST /api/ports/{ws}/container", s.handleContainerAction)

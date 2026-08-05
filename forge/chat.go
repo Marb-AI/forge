@@ -136,6 +136,33 @@ func (s *boundedBuffer) Write(p []byte) (int, error) {
 func (s *boundedBuffer) Len() int       { return s.b.Len() }
 func (s *boundedBuffer) String() string { return s.b.String() }
 
+// ChatHistory writes the last n turns of a workspace's conversation to w,
+// oldest first, and returns when it has.
+//
+// One call rather than a listing the caller then fetches turn by turn: a page
+// coming back is one round trip over SSH instead of twenty, and the transcript
+// arrives in the order it happened without anything here sorting it.
+//
+// It is the same stream as a live turn with one addition — a line of Forge's own
+// introducing each turn with the prompt that started it, which exists nowhere in
+// Claude Code's output because it went in on stdin. A reader can therefore treat
+// history and a turn in flight identically, which is the point: coming back to a
+// conversation and joining one are the same code.
+func ChatHistory(workspace string, turns int, w io.Writer) error {
+	host, err := chatHost(workspace)
+	if err != nil {
+		return err
+	}
+	if turns <= 0 {
+		return fmt.Errorf("asked for %d turns", turns)
+	}
+	remote := agentCommand(host, "claude-chat-history",
+		"-name", workspace, "-turns", strconv.Itoa(turns))
+
+	var why boundedBuffer
+	return explain(sshx.AdminTarget(host).Pipe(nil, w, &why, remote...), &why)
+}
+
 // chatHost is the server a workspace lives on. Same refusal as everywhere else
 // that takes a workspace name: Forge acts on what its own config records, so a
 // workspace this client did not create is unknown however plainly it exists.

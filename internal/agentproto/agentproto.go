@@ -398,6 +398,16 @@ const (
 	ChatErrSuffix    = ".err"    // stderr, kept apart so it cannot corrupt the stream
 )
 
+// ChatTurnEvent is the type of the one line in a chat stream that Claude Code
+// did not write: Forge's own, introducing a turn in a replayed conversation with
+// its id and the prompt that started it.
+//
+// The prompt is not in Claude Code's output at all — it went in on stdin — so a
+// transcript without this is a page of answers to questions nobody can see. The
+// name is Forge's on purpose: a reader that does not know it skips it, which is
+// exactly what a reader of a live turn should do.
+const ChatTurnEvent = "forge_turn"
+
 // ChatSessionFile records the Claude session the next turn resumes, relative to
 // the workspace home. One line, the id from the last turn's result.
 //

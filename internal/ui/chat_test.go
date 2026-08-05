@@ -301,3 +301,72 @@ func firstBytes(s string) string {
 	}
 	return s
 }
+
+// History carries no ids, and that is not cosmetic: an id is a byte offset into
+// one turn's file, and history is several concatenated. A number from here
+// handed back as Last-Event-ID would resume a turn somewhere that means nothing
+// in it — and EventSource sends the last id it saw back without being asked, so
+// emitting them at all is enough for it to happen.
+func TestHistoryIsNotNumbered(t *testing.T) {
+	lines := []string{
+		`{"type":"forge_turn","turn":"20260805T142530.000000001","prompt":"first"}`,
+		`{"type":"result","n":1}`,
+	}
+	s := &server{deps: Deps{
+		KnowsWorkspace: func(string) bool { return true },
+		ChatHistory: func(ws string, turns int, w io.Writer) error {
+			_, err := io.WriteString(w, strings.Join(lines, "\n")+"\n")
+			return err
+		},
+	}}
+
+	r := httptest.NewRequest("GET", "/api/chat/ws/history", nil)
+	r.SetPathValue("ws", "ws")
+	w := httptest.NewRecorder()
+	s.handleChatHistory(w, r)
+
+	body := w.Body.String()
+	if strings.Contains(body, "id:") {
+		t.Errorf("history is numbered, so a reconnect would resume a turn at an "+
+			"offset that means nothing in it:\n%s", body)
+	}
+	for _, line := range lines {
+		if !strings.Contains(body, "data: "+line+"\n\n") {
+			t.Errorf("the transcript is missing %q:\n%s", line, body)
+		}
+	}
+	if !strings.Contains(body, "event: done") {
+		t.Error("history did not say it had ended, so the page cannot close it")
+	}
+}
+
+// How much conversation comes back is bounded and defaulted: the number arrives
+// from a browser, and each turn is a file read on somebody's server.
+func TestHowMuchHistoryIsAskedForIsBounded(t *testing.T) {
+	var asked int
+	s := &server{deps: Deps{
+		KnowsWorkspace: func(string) bool { return true },
+		ChatHistory: func(ws string, turns int, w io.Writer) error {
+			asked = turns
+			return nil
+		},
+	}}
+	for _, c := range []struct {
+		query string
+		want  int
+	}{
+		{"", chatTurnsDefault},
+		{"?turns=0", chatTurnsDefault},
+		{"?turns=-3", chatTurnsDefault},
+		{"?turns=abc", chatTurnsDefault},
+		{"?turns=5", 5},
+		{"?turns=100000", chatTurnsMax},
+	} {
+		r := httptest.NewRequest("GET", "/api/chat/ws/history"+c.query, nil)
+		r.SetPathValue("ws", "ws")
+		s.handleChatHistory(httptest.NewRecorder(), r)
+		if asked != c.want {
+			t.Errorf("%q asked the host for %d turns, want %d", c.query, asked, c.want)
+		}
+	}
+}
