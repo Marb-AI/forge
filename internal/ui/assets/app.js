@@ -1844,6 +1844,12 @@ function setPanelHead(kind, ws) {
 // setPanelActive lights the rail button whose shell the panel is showing (none
 // when the panel is closed), so ssh and host can never both look open at once.
 function setPanelActive(kind) {
+  // Chat is not a shell, but it is the fourth thing that can be the thing you are
+  // looking at, and a rail that lit up for three of them would be lying about the
+  // fourth.
+  const chatBtn = document.querySelector('.rail-btn[data-action="chat"]');
+  if (chatBtn) chatBtn.classList.toggle("active", kind === "chat");
+  if (kind !== "chat") document.getElementById("chatpanel").hidden = true;
   for (const k of SHELL_KINDS) {
     const b = document.querySelector(`.rail-btn[data-action="${k}"]`);
     if (b) b.classList.toggle("active", k === kind);
@@ -2093,6 +2099,7 @@ document.getElementById("rail").addEventListener("click", (e) => {
   const btn = e.target.closest(".rail-btn");
   if (!btn) return;
   switch (btn.dataset.action) {
+    case "chat": toggleChat(); break;
     case "ssh": toggleShell("ssh"); break;
     case "host": toggleShell("host"); break;
     case "local": toggleShell("local"); break;
@@ -2991,6 +2998,7 @@ function hideFileView() {
 // ---- boot ------------------------------------------------------------------
 initTheme();
 initTabDrag();
+initChat();
 state.showHidden = localStorage.getItem("forge-show-hidden") === "1";
 applyShowHidden();
 applyServersCollapsed();
@@ -3246,3 +3254,257 @@ document.getElementById("ports-head").addEventListener("click", () =>
 applyPortsCollapsed();
 renderPorts();
 refreshPorts();
+
+// ---- chat -----------------------------------------------------------------
+//
+// The other way into the same Claude: a prompt goes to the workspace's own
+// session and stream-json comes back. It exists because a phone cannot usefully
+// render a TUI — the keyboard eats the screen and every redraw crosses the
+// network — so this is the face of a session that survives being small.
+//
+// Everything below reads the stream and nothing else knows how: the host writes
+// it to a file, the core pipes it, the server frames it one event per line, and
+// this is the one place that has an opinion about what the objects mean. That is
+// deliberate — the format is versioned by somebody else, and one place to be
+// wrong about it is better than four.
+const chat = {
+  // ws -> {turn: the id being read, or null; es: its stream; live: the element
+  //        partial text is accumulating into, or null}
+  //
+  // The transcript itself is not in here: it is the DOM, and one workspace's
+  // conversation is on screen at a time. What survives a tab switch is on the
+  // host, which is where a reload will get it from.
+  byWs: {},
+};
+
+function chatFor(ws) {
+  if (!chat.byWs[ws]) chat.byWs[ws] = { turn: null, es: null, live: null };
+  return chat.byWs[ws];
+}
+
+// toggleChat is what the rail button calls. Chat and the terminal are two faces
+// of one session, so this swaps which is showing rather than stacking anything.
+function toggleChat() {
+  if (!state.active) return;
+  const panel = document.getElementById("chatpanel");
+  const open = panel.hidden;
+  panel.hidden = !open;
+  setPanelActive(open ? "chat" : null);
+  if (open) {
+    document.getElementById("chatinput").focus();
+  } else if (state.claude) {
+    state.claude.term.focus();
+  }
+}
+
+// chatAppend adds a node and keeps the view at the bottom, but only if it was
+// already there: a reader scrolled up to something Claude said four tool calls
+// ago is reading it, and yanking them back down is the one thing a log must not
+// do.
+function chatAppend(node) {
+  const log = document.getElementById("chatlog");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  log.appendChild(node);
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function chatNode(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls;
+  if (text !== undefined) d.textContent = text;
+  return d;
+}
+
+// chatSend posts the prompt and opens the stream for the turn it starts.
+async function chatSend(text) {
+  const ws = state.active;
+  if (!ws || !text.trim()) return;
+  const c = chatFor(ws);
+  if (c.es) return; // a turn is already running; the composer is disabled anyway
+
+  const hint = document.getElementById("chat-empty");
+  if (hint) hint.hidden = true;
+  chatAppend(chatNode("chat-msg you", text));
+  chatSetBusy(true);
+
+  let turn;
+  try {
+    const res = await fetch(`/api/chat/${encodeURIComponent(ws)}/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: text }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `send failed (${res.status})`);
+    turn = body.turn;
+  } catch (e) {
+    chatAppend(chatNode("chat-note bad", String(e.message || e)));
+    chatSetBusy(false);
+    return;
+  }
+  c.turn = turn;
+  chatOpenStream(ws, turn);
+}
+
+// chatOpenStream follows a turn. The offset is not tracked here on purpose:
+// every event carries the byte after it as its SSE id, and EventSource sends the
+// last id it saw back as Last-Event-ID on its own reconnect — so a laptop that
+// slept, or a phone that spent the turn in a tunnel, resumes at the byte it
+// stopped on with nothing here to remember it.
+function chatOpenStream(ws, turn) {
+  const c = chatFor(ws);
+  const es = new EventSource(`/api/chat/${encodeURIComponent(ws)}/${encodeURIComponent(turn)}/stream`);
+  c.es = es;
+
+  es.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (ws === state.active) chatRender(c, msg);
+  };
+  es.addEventListener("done", () => chatEndStream(ws));
+  // "failed" rather than "error", and that is not a preference: EventSource
+  // dispatches its own transport trouble as an `error` event, so a listener by
+  // that name hears every dropped connection as well as the server's one real
+  // failure — and ending the turn on the first of those would close the stream
+  // and stop the browser reconnecting, which is the entire mechanism the ids
+  // exist for. A name of our own cannot be confused with the browser's.
+  es.addEventListener("failed", (ev) => {
+    let why = "the turn stopped being readable";
+    try { why = JSON.parse(ev.data) || why; } catch { /* keep the default */ }
+    chatAppend(chatNode("chat-note bad", why));
+    chatEndStream(ws);
+  });
+  // The transport's own errors are the browser's business: it reconnects by
+  // itself and carries the offset with it, so there is nothing to do and nothing
+  // to say. Saying something would put a failure on screen for every tunnel.
+  es.onerror = () => {};
+}
+
+function chatEndStream(ws) {
+  const c = chatFor(ws);
+  if (c.es) c.es.close();
+  c.es = null;
+  c.turn = null;
+  if (c.live) { c.live.classList.remove("live"); c.live = null; }
+  if (ws === state.active) chatSetBusy(false);
+}
+
+function chatSetBusy(busy) {
+  document.getElementById("chatsend").disabled = busy;
+  document.getElementById("chatinput").disabled = busy;
+  // Only if the chat is what you are looking at. A turn that ends while you are
+  // typing in the terminal must not pull the caret into a textarea that is not
+  // even on screen — the answer arriving is not a request for your attention.
+  if (!busy && !document.getElementById("chatpanel").hidden) {
+    document.getElementById("chatinput").focus();
+  }
+}
+
+// chatRender turns one stream-json object into what it means on screen.
+//
+// Every branch is independent and every read is defensive, for the same reason
+// the workspace's status-line script is: this runs against a format Claude Code
+// versions on its own schedule, and a field that is renamed or missing must cost
+// the one thing that came from it — never the conversation.
+function chatRender(c, msg) {
+  const type = msg && msg.type;
+
+  // A partial message: the text as it is being written. Kept in one node that is
+  // replaced when the finished message arrives, so nothing is shown twice.
+  if (type === "stream_event") {
+    const delta = (msg.event && msg.event.delta) || {};
+    const text = typeof delta.text === "string" ? delta.text : "";
+    if (!text) return;
+    if (!c.live) {
+      c.live = chatNode("chat-msg claude live", "");
+      chatAppend(c.live);
+    }
+    // A node per delta rather than rewriting the element's text: += reserializes
+    // everything said so far on every fragment, which on a long reply is the
+    // whole message copied a few hundred times.
+    c.live.appendChild(document.createTextNode(text));
+    const log = document.getElementById("chatlog");
+    if (log.scrollHeight - log.scrollTop - log.clientHeight < 80) log.scrollTop = log.scrollHeight;
+    return;
+  }
+
+  if (type === "assistant") {
+    // The finished message replaces whatever streamed: the deltas were a preview
+    // of exactly this, and appending both would say everything twice.
+    if (c.live) { c.live.remove(); c.live = null; }
+    for (const block of chatBlocks(msg)) {
+      if (block.type === "text" && block.text) {
+        chatAppend(chatNode("chat-msg claude", block.text));
+      } else if (block.type === "tool_use") {
+        chatAppend(chatToolNode(block));
+      }
+    }
+    return;
+  }
+
+  if (type === "result") {
+    const cost = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : null;
+    const bits = [];
+    if (msg.is_error) bits.push("ended with an error");
+    if (cost !== null) bits.push(`$${cost.toFixed(4)}`);
+    if (typeof msg.num_turns === "number") bits.push(`${msg.num_turns} turns`);
+    if (bits.length) chatAppend(chatNode("chat-note", bits.join(" · ")));
+  }
+}
+
+// chatBlocks digs the content out of an assistant message without assuming much
+// about the wrapper: it has been message.content and content over the life of
+// this format, and either is one array of blocks.
+function chatBlocks(msg) {
+  const content = (msg.message && msg.message.content) || msg.content;
+  return Array.isArray(content) ? content : [];
+}
+
+// chatToolNode is one line for one thing Claude did. What it did to, not how:
+// the argument that names a file or a command is the whole of what a reader
+// wants at a glance, and the rest is in the terminal for anyone who needs it.
+function chatToolNode(block) {
+  const d = chatNode("chat-tool");
+  const name = chatNode("name", String(block.name || "tool"));
+  d.appendChild(name);
+  const arg = chatToolArg(block.input);
+  if (arg) d.appendChild(chatNode("arg", arg));
+  return d;
+}
+
+function chatToolArg(input) {
+  if (!input || typeof input !== "object") return "";
+  for (const key of ["file_path", "path", "command", "pattern", "url", "prompt"]) {
+    const v = input[key];
+    if (typeof v === "string" && v) return v.length > 120 ? v.slice(0, 119) + "…" : v;
+  }
+  return "";
+}
+
+function initChat() {
+  const form = document.getElementById("chatform");
+  const input = document.getElementById("chatinput");
+  if (!form || !input) return;
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value;
+    input.value = "";
+    input.style.height = "auto";
+    chatSend(text);
+  });
+
+  // Enter sends and Shift+Enter breaks the line, which is what every chat does
+  // and therefore what fingers expect. The composer grows with the text instead
+  // of scrolling inside four fixed rows, up to the height the CSS allows.
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = input.scrollHeight + "px";
+  });
+}
