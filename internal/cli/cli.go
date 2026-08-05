@@ -31,6 +31,7 @@ Hosts:
   forge host add <ssh-target> --alias=<alias>   register an already-prepared server
                                                 [--jump=<[user@]host[:port],...>]
   forge host update [alias]                     put this client's agent on the host(s)
+  forge host adopt [alias]                      tell the host(s) which workspaces are Forge's
   forge host gh-login <alias>                   authenticate gh once for the whole host
   forge host list
   forge host remove <alias>

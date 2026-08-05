@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"text/tabwriter"
 
 	"github.com/Marb-AI/forge/forge"
@@ -11,7 +12,7 @@ import (
 
 func hostCmd(args []string) int {
 	if len(args) == 0 {
-		return fail("usage: forge host <add|prepare|update|gh-login|list|remove>")
+		return fail("usage: forge host <add|prepare|update|adopt|gh-login|list|remove>")
 	}
 	switch args[0] {
 	case "add":
@@ -20,6 +21,8 @@ func hostCmd(args []string) int {
 		return hostPrepare(args[1:])
 	case "update":
 		return hostUpdate(args[1:])
+	case "adopt":
+		return hostAdopt(args[1:])
 	case "gh-login":
 		return hostGhLogin(args[1:])
 	case "list", "ls":
@@ -29,6 +32,64 @@ func hostCmd(args []string) int {
 	default:
 		return fail("unknown host command %q", args[0])
 	}
+}
+
+// hostAdopt tells a server which of its accounts are Forge's, from what this
+// client already believes.
+//
+// It exists because the host cannot work that out for itself: its directory
+// holds every account under /home/workspaces, and until a device says otherwise
+// nothing on the machine distinguishes a workspace Forge made from one somebody
+// created by hand. Once it has been told, the server is the answer for every
+// device — which is what a second one needs, since it has nothing of its own to
+// go on.
+//
+// Run once per server, after `forge host update`. Running it again changes
+// nothing.
+func hostAdopt(args []string) int {
+	if len(args) > 1 {
+		return fail("usage: forge host adopt [alias]")
+	}
+	alias := ""
+	if len(args) == 1 {
+		alias = args[0]
+	}
+	named, err := forge.AdoptWorkspaces(alias)
+	if err != nil {
+		return fail("%v", err)
+	}
+	if len(named) == 0 {
+		fmt.Println("forge: no workspaces to hand over")
+		return 0
+	}
+	aliases := make([]string, 0, len(named))
+	for a := range named {
+		aliases = append(aliases, a)
+	}
+	sort.Strings(aliases)
+
+	bad := false
+	for _, a := range aliases {
+		r := named[a]
+		switch {
+		case r.Err == nil:
+			fmt.Printf("  %-14s %d workspace(s)\n", a, r.Named)
+		case r.TooOld():
+			// Named rather than skipped quietly: this is the one thing between that
+			// server and a second device, and the fix is a command.
+			fmt.Printf("  %-14s its agent is too old — run: forge host update %s\n", a, a)
+			bad = true
+		default:
+			// Whatever else went wrong, in its own words. A server that is simply off
+			// wants nothing done about it but being switched on.
+			fmt.Printf("  %-14s %v\n", a, r.Err)
+			bad = true
+		}
+	}
+	if bad {
+		return 1
+	}
+	return 0
 }
 
 // hostPrepare reads the flags of `forge host prepare` and hands the provisioning
