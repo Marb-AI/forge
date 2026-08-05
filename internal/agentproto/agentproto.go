@@ -320,6 +320,11 @@ type VersionResult struct {
 	Version string `json:"version"`
 }
 
+// ChatTurn is what starting a turn answers with: the id to read it back by.
+type ChatTurn struct {
+	Turn string `json:"turn"`
+}
+
 // ErrorResult is printed (and the process exits non-zero) on failure.
 type ErrorResult struct {
 	Error string `json:"error"`
@@ -369,6 +374,45 @@ const TopicFile = ".claude/forge-topic"
 // forge-topic for the same reasons: it is Claude's own account of its own session,
 // and that directory is already hidden from the file tree.
 const UsageFile = ".claude/forge-usage"
+
+// ChatDir holds the chat transcripts, relative to the workspace home. One
+// directory beside forge-activity, forge-topic and forge-usage, for the same two
+// reasons: it is Claude's own account of its own session, and ~/.claude is
+// already hidden from the file tree.
+//
+// A turn is four files sharing a name — the prompt that started it, the stream
+// it produced, whatever it said on stderr, and a marker written when the process
+// exited. Files rather than a database because of what has to be true when a phone comes back after twenty
+// minutes on a train: the turn ran to the end without anyone watching, and what
+// it said is still there to be read from wherever the reader got to. An offset
+// into a file is the whole of that reader's state.
+const ChatDir = ".claude/forge-chat"
+
+// The four files of one turn, and the suffixes that name them. Sharing a stem
+// means a turn is one glob, which is what makes "clean up after turn X" and
+// "list the turns" the same shape of thing.
+const (
+	ChatPromptSuffix = ".prompt" // what was asked, as sent to claude -p on stdin
+	ChatStreamSuffix = ".jsonl"  // stream-json, exactly as it came out
+	ChatDoneSuffix   = ".done"   // the exit status, written when the turn ended
+	ChatErrSuffix    = ".err"    // stderr, kept apart so it cannot corrupt the stream
+)
+
+// ChatSessionFile records the Claude session the next turn resumes, relative to
+// the workspace home. One line, the id from the last turn's result.
+//
+// This is what makes a chat a conversation rather than a series of strangers:
+// Claude Code keeps the history itself, on this host, and --resume takes it. The
+// transcripts beside it are for the reader, not for Claude.
+const ChatSessionFile = ChatDir + "/session"
+
+// ChatTmuxSession is the tmux session a chat turn runs in — one per workspace,
+// not one per turn, so "is a turn already running" is a question tmux can answer
+// and two prompts cannot race into the same conversation.
+//
+// It is tmux for one reason, and it is not the terminal: a turn must survive the
+// phone that started it going into a tunnel. Nothing reads this session's screen.
+const ChatTmuxSession = "forge-chat"
 
 // AccountFile is where Claude Code keeps the signed-in account, relative to the
 // workspace home. Its `oauthAccount` object is the only record of which login a
