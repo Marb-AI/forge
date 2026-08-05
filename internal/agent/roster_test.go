@@ -260,3 +260,142 @@ func TestTwoAgentsRecordingAtOnceDoNotLoseEachOther(t *testing.T) {
 		}
 	}
 }
+
+// Which ports a machine hands out is a fact about the machine.
+//
+// A second device that guessed would hand out a block the first had already
+// given away — and the tunnel for it is -L port:localhost:port, so the two would
+// then fight over the same local number and one of them would simply not work.
+func TestTheHostRemembersItsPortRange(t *testing.T) {
+	scratchHost(t)
+
+	out := captureStdout(t)
+	if code := opPortRange([]string{"-start", "16000", "-end", "30000", "-block", "100"}); code != 0 {
+		t.Fatalf("setting the range exited %d", code)
+	}
+	if got := out(); !strings.Contains(got, `"start":16000`) || !strings.Contains(got, `"set":true`) {
+		t.Errorf("setting the range did not answer with it:\n%s", got)
+	}
+
+	// And it is there for whoever asks next, which is the point: a device that has
+	// never seen this machine.
+	out = captureStdout(t)
+	if code := opPortRange(nil); code != 0 {
+		t.Fatalf("reading the range exited %d", code)
+	}
+	got := out()
+	for _, want := range []string{`"start":16000`, `"end":30000`, `"block":100`, `"set":true`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the range came back without %s:\n%s", want, got)
+		}
+	}
+}
+
+// A host that keeps a record and has never been told its range is not a host
+// that hands out nothing. The two absences are different questions and a client
+// answers them differently: one says "ask your own config", the other says "this
+// machine is waiting to be told".
+func TestNotYetToldIsNotTheSameAsAnEmptyRange(t *testing.T) {
+	scratchHost(t)
+
+	// No record at all.
+	out := captureStdout(t)
+	opPortRange(nil)
+	got := out()
+	if !strings.Contains(got, `"recorded":false`) || !strings.Contains(got, `"set":false`) {
+		t.Errorf("a host that was never told says something else:\n%s", got)
+	}
+
+	// A record, and still no range: recording a workspace creates the file.
+	if err := recordWorkspace("ws"); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t)
+	opPortRange(nil)
+	got = out()
+	if !strings.Contains(got, `"recorded":true`) {
+		t.Errorf("a host with a record says it has none:\n%s", got)
+	}
+	if !strings.Contains(got, `"set":false`) {
+		t.Errorf("a host with no range says it has one:\n%s", got)
+	}
+}
+
+// A range with a zero in it is not a range: it would hand out blocks starting at
+// port 0. Half the flags is a caller that means one thing and typed another.
+func TestAPortRangeIsRefusedUnlessItIsOne(t *testing.T) {
+	for _, args := range [][]string{
+		{"-start", "16000"},                                   // and nothing else
+		{"-start", "16000", "-end", "30000"},                  // no block
+		{"-start", "16000", "-end", "15000", "-block", "100"}, // ends before it begins
+		{"-start", "16000", "-end", "16050", "-block", "100"}, // a block does not fit
+		{"-start", "-1", "-end", "30000", "-block", "100"},    // before the first port
+	} {
+		scratchHost(t)
+		out := captureStdout(t)
+		code := opPortRange(args)
+		said := out()
+
+		if code == 0 {
+			t.Errorf("%v was accepted as a port range", args)
+		}
+		if !strings.Contains(said, `"error"`) {
+			t.Errorf("%v was refused without saying why: %s", args, said)
+		}
+		if r, _ := readRoster(); r.PortRange != nil {
+			t.Errorf("%v was recorded anyway: %+v", args, r.PortRange)
+		}
+	}
+}
+
+// One port, one block of one, is a range — unusual, and what the client's own
+// arithmetic already computes. An agent stricter than that would refuse
+// something the client would then allocate from.
+func TestASinglePortIsARange(t *testing.T) {
+	scratchHost(t)
+
+	out := captureStdout(t)
+	code := opPortRange([]string{"-start", "16000", "-end", "16000", "-block", "1"})
+	got := out()
+
+	if code != 0 {
+		t.Fatalf("a one-port range was refused: %s", got)
+	}
+	if !strings.Contains(got, `"start":16000`) || !strings.Contains(got, `"set":true`) {
+		t.Errorf("it was accepted and not recorded:\n%s", got)
+	}
+}
+
+// The range shares a file with the workspace list, so setting one while another
+// agent records a workspace is the read-modify-write that must not lose either.
+func TestSettingTheRangeDoesNotLoseWorkspaces(t *testing.T) {
+	scratchHost(t, "a", "b", "c", "d")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		opPortRange([]string{"-start", "16000", "-end", "30000", "-block", "100"})
+	}()
+	for _, name := range []string{"a", "b", "c", "d"} {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if err := recordWorkspace(name); err != nil {
+				t.Errorf("recording %q: %v", name, err)
+			}
+		}(name)
+	}
+	wg.Wait()
+
+	r, err := readRoster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Workspaces) != 4 {
+		t.Errorf("the record holds %v, want all four", r.Workspaces)
+	}
+	if r.PortRange == nil || r.PortRange.Start != 16000 {
+		t.Errorf("the range is %+v, want the one that was set", r.PortRange)
+	}
+}

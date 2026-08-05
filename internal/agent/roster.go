@@ -76,6 +76,26 @@ func withRosterLock(fn func() error) error {
 // something.
 type roster struct {
 	Workspaces []string `json:"workspaces"`
+	// PortRange is the span of this machine's ports Forge may hand out, and how
+	// big a block each workspace gets. Nil means the host has not been told, which
+	// is not the same as a range of nothing — a pointer rather than zero values
+	// precisely so those two cannot be confused, here or by anything reading the
+	// JSON.
+	//
+	// It belongs here rather than on a device for the reason the range is a fact
+	// about a machine: which of its ports are free is a property of the machine,
+	// not of whoever is looking at it. A second device that guessed would hand out
+	// a block the first had already given away.
+	PortRange *portRange `json:"port_range,omitempty"`
+}
+
+// portRange mirrors config.PortRange on the wire without the agent importing it:
+// the agent is what runs on the server, and the client's config types are the
+// client's business.
+type portRange struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+	Block int `json:"block"`
 }
 
 // readRoster loads the record. A host that has never had one is not an error:
@@ -181,6 +201,71 @@ func forgetWorkspace(name string) error {
 			return nil
 		}
 		r.Workspaces = slices.Delete(r.Workspaces, i, i+1)
+		return writeRoster(r)
+	})
+}
+
+// opPortRange reads or writes this host's port range.
+//
+// Reading is how a client learns what a machine it has never seen hands out;
+// writing is how the first client to know tells it. Both are one op because they
+// are one fact, and a client that could set it without seeing it would be
+// guessing at what is already there.
+func opPortRange(args []string) int {
+	fs := flag.NewFlagSet("host-port-range", flag.ContinueOnError)
+	start := fs.Int("start", 0, "first port of the range")
+	end := fs.Int("end", 0, "last port of the range")
+	block := fs.Int("block", 0, "how many ports each workspace gets")
+	if err := fs.Parse(args); err != nil {
+		return emitError("bad arguments")
+	}
+
+	// No flags is a read. Every flag is a write. Some of them is a caller that
+	// means one thing and said another, and a range with a zero in it is not a
+	// range — it would hand out blocks starting at port 0.
+	given := *start != 0 || *end != 0 || *block != 0
+	if given && (*start <= 0 || *end <= 0 || *block <= 0) {
+		return emitError("a port range needs all three of -start, -end and -block")
+	}
+	if given {
+		// Ends *before* it begins, not at the same port: start == end is one port,
+		// which with a block of one is a legitimate if unusual range, and it is
+		// what config.PortRange.Blocks() already computes (p+block-1 <= end). An
+		// agent stricter than the arithmetic would refuse something the client
+		// would then happily allocate from.
+		if *end < *start {
+			return emitError("range %d-%d ends before it begins", *start, *end)
+		}
+		if *block > *end-*start+1 {
+			return emitError("blocks of %d do not fit in %d-%d", *block, *start, *end)
+		}
+		if err := setPortRange(portRange{Start: *start, End: *end, Block: *block}); err != nil {
+			return emitError("record the port range: %v", err)
+		}
+	}
+
+	r, recorded, err := readRosterIfAny()
+	if err != nil {
+		return emitError("read the port range: %v", err)
+	}
+	out := agentproto.PortRangeResult{Recorded: recorded}
+	if r.PortRange != nil {
+		out.Start, out.End, out.Block = r.PortRange.Start, r.PortRange.End, r.PortRange.Block
+		out.Set = true
+	}
+	return emit(out)
+}
+
+// setPortRange writes the range, under the same lock as everything else in this
+// file: it shares a file with the workspace list, so a client setting a range
+// while another creates a workspace is the read-modify-write this must not lose.
+func setPortRange(pr portRange) error {
+	return withRosterLock(func() error {
+		r, err := readRoster()
+		if err != nil {
+			return err
+		}
+		r.PortRange = &pr
 		return writeRoster(r)
 	})
 }
