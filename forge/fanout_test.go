@@ -28,28 +28,49 @@ func allOf(hosts map[string]*config.Host) map[string]bool {
 // The whole point: the servers are asked at the same time, so a sweep costs what
 // the slowest of them costs rather than the sum.
 //
-// The test measures rather than counts goroutines, because the property is about
-// elapsed time and nothing else — three hosts that each take 200ms must finish in
-// nearer 200 than 600.
+// Proved with a barrier rather than a stopwatch. A wall-clock threshold is a
+// guess about a loaded machine — it passes on a quiet one and fails on a busy
+// one without either saying anything about the code — whereas this cannot pass
+// unless every host was already being asked before any of them was allowed to
+// answer, which is the property itself.
 func TestEveryHostIsAskedAtOnce(t *testing.T) {
 	hosts := threeHosts()
-	const each = 200 * time.Millisecond
 
-	start := time.Now()
+	started := make(chan struct{}, len(hosts))
+	release := make(chan struct{})
+	together := make(chan struct{})
+
+	// Nobody may answer until everybody has been asked. Asked one after another,
+	// the first would wait here for a second that never comes — so the watcher
+	// gives up after a while and lets it finish, and the test fails on the fact
+	// rather than hanging until the package times out.
+	go func() {
+		for range hosts {
+			select {
+			case <-started:
+			case <-time.After(3 * time.Second):
+				close(release)
+				return
+			}
+		}
+		close(together)
+		close(release)
+	}()
+
 	got := askHosts(hosts, allOf(hosts), func(h *config.Host) (string, error) {
-		time.Sleep(each)
+		started <- struct{}{}
+		<-release
 		return h.Addr, nil
 	})
-	elapsed := time.Since(start)
 
-	if len(got) != 3 {
-		t.Fatalf("got %d answers, want 3: %v", len(got), got)
+	select {
+	case <-together:
+	default:
+		t.Error("the hosts were asked one after another: the first was answering " +
+			"before the last had been asked, which is the cost this exists to remove")
 	}
-	// Halfway between "at once" and "one after another" is the only threshold
-	// that says something on a loaded machine.
-	if elapsed > 3*each/2 {
-		t.Errorf("three hosts taking %v each took %v — they were asked one after "+
-			"another, which is the cost this exists to remove", each, elapsed)
+	if len(got) != len(hosts) {
+		t.Errorf("got %d answers, want %d: %v", len(got), len(hosts), got)
 	}
 }
 

@@ -143,10 +143,11 @@ func ListWorkspaces() ([]WorkspaceInfo, error) {
 	return out, nil
 }
 
-// WorkspaceActivity asks each host once for the Claude attention state of the
-// workspaces on it, and keeps only the ones this client owns (same rule as
-// ListWorkspaces — the host's directory may hold workspaces that aren't ours). A
-// host we can't reach simply contributes nothing.
+// WorkspaceActivity asks each host once — and all of them at the same time —
+// for the Claude attention state of the workspaces on it, and keeps only the
+// ones this client owns (same rule as ListWorkspaces — the host's directory may
+// hold workspaces that aren't ours). A host we can't reach simply contributes
+// nothing.
 func WorkspaceActivity() (map[string]Activity, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -169,10 +170,11 @@ func WorkspaceActivity() (map[string]Activity, error) {
 	return out, nil
 }
 
-// WorkspaceTrack asks each host once for the session tracking of the workspaces on
-// it — when the current Claude session began and how long the user has been present
-// at it — and keeps only the ones this client owns. Same host fan-out and ownership
-// filter as WorkspaceActivity; an unreachable host contributes nothing.
+// WorkspaceTrack asks each host once, and all of them at once, for the session
+// tracking of the workspaces on it — when the current Claude session began and
+// how long the user has been present at it — and keeps only the ones this
+// client owns. Same host fan-out and ownership filter as WorkspaceActivity; an
+// unreachable host contributes nothing.
 func WorkspaceTrack() (map[string]Track, error) {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -195,20 +197,20 @@ func WorkspaceTrack() (map[string]Track, error) {
 	return out, nil
 }
 
-// WorkspaceUsage asks each host once for the Claude usage of the workspaces on it —
-// the login each is signed in as, its context and cost, and where that login stands
-// against its rate limits — and keeps only the ones this client owns. Same host
-// fan-out and ownership filter as WorkspaceActivity.
+// WorkspaceUsage asks each host once, and all of them at once, for the Claude
+// usage of the workspaces on it — the login each is signed in as, its context
+// and cost, and where that login stands against its rate limits — and keeps
+// only the ones this client owns. Same host fan-out and ownership filter as
+// WorkspaceActivity.
 //
-// The hosts are asked one after another, like the other two sweeps and unlike
-// HostStats: those fan out because the servers panel asks every registered machine
-// including the empty ones, while this only ever visits hosts we actually keep
-// workspaces on. A host that cannot be reached contributes nothing and its logins
-// keep the reading they last gave, which is why the sample carries its own timestamp.
+// The hosts are asked at once, like every other sweep — see fanout.go for what
+// that is worth and what it deliberately is not. A host that cannot be reached
+// contributes nothing and its logins keep the reading they last gave, which is
+// why the sample carries its own timestamp.
 //
-// The rate-limit windows stay pointers through the conversion: a nil window is a
-// login that has not reported one, and flattening that to a zeroed struct would show
-// a full allowance where we have no reading at all.
+// The rate-limit windows stay pointers through the conversion: a nil window is
+// a login that has not reported one, and flattening that to a zeroed struct
+// would show a full allowance where we have no reading at all.
 func WorkspaceUsage() (map[string]Usage, error) {
 	cfg, err := loadConfig()
 	if err != nil {
