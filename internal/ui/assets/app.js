@@ -40,6 +40,13 @@ const state = {
   activity: {},   // ws name -> {state, ts, topic, topic_ts}: what Claude's up to, polled
 };
 
+// NARROW matches the stylesheet's breakpoint, and lives up here rather than with
+// the rest of the narrow-screen code because `const` is not hoisted: read from
+// anything that runs during boot — which is hundreds of lines above where that
+// code sits — a declaration further down throws instead of answering.
+const NARROW = "(max-width: 720px)";
+function isNarrow() { return window.matchMedia(NARROW).matches; }
+
 // ---- theme ----------------------------------------------------------------
 function initTheme() {
   const saved = localStorage.getItem("forge-theme") || "dark";
@@ -1632,6 +1639,15 @@ function postResize(ws, kind, cols, rows) {
 function openTerminal(ws) {
   teardownTerminal();
   setStatus(null);
+  // Nothing attaches a terminal on a phone, whoever asked for one — selecting a
+  // workspace, a restart, a reconnect. The stylesheet hides it there, and a
+  // hidden terminal is not merely useless: it is an SSH session and a stream of
+  // bytes for a screen nobody can see. Guarding here rather than at each caller
+  // is what makes that true of all of them, including the ones added later.
+  if (isNarrow()) {
+    openChatOnNarrow();
+    return;
+  }
   state.claude = makeTerminal(ws, "claude", document.getElementById("terminal"), () => {
     // After a restart/checkpoint the old session is killed on purpose and a
     // fresh one is (being) started — reconnect to attach to it. Otherwise the
@@ -3585,11 +3601,6 @@ function initChat() {
 // decide: which view a workspace opens in, and whether the off-canvas pane is
 // showing.
 
-// NARROW matches the stylesheet's breakpoint. Same number in both places is a
-// thing that can drift, so the test holds them together.
-const NARROW = "(max-width: 720px)";
-function isNarrow() { return window.matchMedia(NARROW).matches; }
-
 function initNarrow() {
   const app = document.getElementById("app");
   const toggle = document.getElementById("panetoggle");
@@ -3616,7 +3627,13 @@ function initNarrow() {
   // terminal to go back to on a small one.
   const mq = window.matchMedia(NARROW);
   const apply = () => {
-    if (!mq.matches) { setPane(false); return; }
+    if (!mq.matches) {
+      setPane(false);
+      // A window dragged wide again is a window with a terminal, and there will
+      // be none: nothing attached one while it was narrow.
+      if (state.active && !state.claude && !state.stopped) openTerminal(state.active);
+      return;
+    }
     openChatOnNarrow();
   };
   mq.addEventListener("change", apply);

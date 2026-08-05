@@ -1090,8 +1090,10 @@ button.big { padding: 10px 20px; font-size: 13px; }
   .rail-btn[data-action="host"],
   .rail-btn[data-action="local"] { display: none !important; }
 
-  /* Room for the rail along the bottom. */
-  #stage { padding-bottom: 46px; }
+  /* Room for the rail along the bottom — and for the home indicator under it,
+     which the rail's own padding pushes it up by. A fixed number here would put
+     the last line of a conversation behind both. */
+  #stage { padding-bottom: calc(46px + env(safe-area-inset-bottom)); }
 
   /* One thing at a time on a small screen, and it is the conversation. */
   #chatpanel { border-radius: 0; }

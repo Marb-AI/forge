@@ -108,3 +108,46 @@ func TestTheComposerDoesNotMakeIOSZoom(t *testing.T) {
 			"and nothing zooms it back")
 	}
 }
+
+// Nothing the boot block calls may read a const declared below it.
+//
+// `const` is not hoisted: read before its declaration has run, it throws rather
+// than answering undefined, and in one script executed top to bottom that means
+// the rest of boot never happens — a blank page from a line that parses
+// perfectly. `node --check` cannot see it, and neither can reading the function,
+// which looks right where it is written.
+//
+// This is the guard I wanted after shipping exactly that: initNarrow() was
+// called at boot and read a const declared six hundred lines further down.
+func TestBootCallsNothingThatReadsAConstDeclaredBelowIt(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+
+	boot := strings.Index(js, "// ---- boot ---")
+	if boot < 0 {
+		t.Fatal("app.js has no boot block")
+	}
+
+	// The module-level consts that do not exist yet when boot runs.
+	late := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^const ([A-Za-z_$][\w$]*)`).
+		FindAllStringSubmatchIndex(js, -1) {
+		if m[0] > boot {
+			late[js[m[2]:m[3]]] = true
+		}
+	}
+	if len(late) == 0 {
+		t.Skip("nothing is declared after boot, so there is nothing to get wrong")
+	}
+
+	for _, m := range regexp.MustCompile(`(?m)^(init[A-Za-z]*)\(\);`).
+		FindAllStringSubmatch(js[boot:], -1) {
+		name := m[1]
+		body := withoutComments(jsFunc(t, js, name))
+		for word := range late {
+			if regexp.MustCompile(`\b` + regexp.QuoteMeta(word) + `\b`).MatchString(body) {
+				t.Errorf("boot calls %s(), which reads %s — declared after the boot "+
+					"block, so it throws and the rest of boot never runs", name, word)
+			}
+		}
+	}
+}
