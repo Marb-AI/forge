@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -281,5 +282,26 @@ func TestOneUpdatedHostAndOneOldOneInTheSameList(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// A host that could not be reached and an agent too old to know the command both
+// name zero workspaces, and they want different things done about them: one
+// wants switching on, the other wants `forge host update`. A single count could
+// not tell them apart, which is why this is a struct.
+func TestAdoptingTellsAnOldAgentFromAnAbsentHost(t *testing.T) {
+	old := Adopted{Err: errors.New(`agent: unknown op "workspace-adopt"`)}
+	if !old.TooOld() {
+		t.Error("an agent that does not know the command is not recognised as old")
+	}
+
+	off := Adopted{Err: errors.New("ssh/forge-agent failed: dial tcp: connection refused")}
+	if off.TooOld() {
+		t.Error("a server that is off was reported as an old agent, which sends " +
+			"somebody to update a machine that is not answering")
+	}
+
+	if (Adopted{Named: 3}).TooOld() {
+		t.Error("a host that worked was reported as too old")
 	}
 }

@@ -70,13 +70,20 @@ func hostAdopt(args []string) int {
 
 	bad := false
 	for _, a := range aliases {
-		if n := named[a]; n < 0 {
+		r := named[a]
+		switch {
+		case r.Err == nil:
+			fmt.Printf("  %-14s %d workspace(s)\n", a, r.Named)
+		case r.TooOld():
 			// Named rather than skipped quietly: this is the one thing between that
 			// server and a second device, and the fix is a command.
-			fmt.Printf("  %-14s could not be told — run: forge host update %s\n", a, a)
+			fmt.Printf("  %-14s its agent is too old — run: forge host update %s\n", a, a)
 			bad = true
-		} else {
-			fmt.Printf("  %-14s %d workspace(s)\n", a, n)
+		default:
+			// Whatever else went wrong, in its own words. A server that is simply off
+			// wants nothing done about it but being switched on.
+			fmt.Printf("  %-14s %v\n", a, r.Err)
+			bad = true
 		}
 	}
 	if bad {
