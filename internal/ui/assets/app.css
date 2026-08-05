@@ -915,3 +915,109 @@ button.big { padding: 10px 20px; font-size: 13px; }
 .port-act.start:hover { color: #5fe08a; }
 .port-act.stop:hover { color: #ff6b5e; }
 .port-act[disabled] { opacity: 0.4; cursor: default; }
+
+/* ---- chat ---------------------------------------------------------------- */
+
+/* The other way into the same Claude. It fills the stage rather than floating
+   over it like the shell panel: a shell is something you glance at beside the
+   session, and this IS the session — one of its two faces. So it sits below the
+   shell's z-index, and opening a shell over a chat still works.
+
+   No terminal in here and nothing monospace by default: the whole reason this
+   exists is that a phone cannot usefully render a TUI. */
+#chatpanel {
+  position: absolute;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+#chatpanel[hidden] { display: none; }
+
+#chatlog {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* Long enough to read, short enough not to sweep the eye across a wide window. */
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.chat-hint { color: var(--muted); max-width: 46em; }
+
+/* Yours and its. Both are text; only one of them is indented, because a
+   conversation reads better when the two sides are not the same shape. */
+.chat-msg { max-width: 52em; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-msg.you {
+  align-self: flex-end;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 2px 10px;
+  padding: 7px 11px;
+}
+.chat-msg.claude { align-self: flex-start; }
+
+/* What Claude did, as opposed to what it said. One line each, quiet, because
+   the interesting one is the exception and scrolling past twenty of them is
+   the rule. */
+.chat-tool {
+  align-self: flex-start;
+  color: var(--muted);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+.chat-tool .name { color: var(--fg); }
+
+.chat-note { align-self: flex-start; color: var(--muted); font-size: 11.5px; }
+.chat-note.bad { color: var(--bad, #d9534f); }
+
+/* The cursor that says something is still coming. Not a spinner: a turn can be
+   two minutes of tool calls, and a spinner that long reads as a hang. */
+.chat-msg.claude.live::after {
+  content: "▍";
+  animation: chat-blink 1.1s steps(1) infinite;
+}
+@keyframes chat-blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .chat-msg.claude.live::after { animation: none; }
+}
+
+#chatform {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+#chatinput {
+  flex: 1;
+  resize: none;
+  max-height: 40vh;
+  padding: 8px 10px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+#chatinput:focus { outline: 2px solid var(--accent, #4a8); outline-offset: -1px; }
+#chatsend {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  flex: none;
+}
+#chatsend:disabled { opacity: .45; }
