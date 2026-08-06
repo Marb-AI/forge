@@ -32,6 +32,11 @@ Hosts:
                                                 [--jump=<[user@]host[:port],...>]
   forge host update [alias]                     put this client's agent on the host(s)
   forge host adopt [alias]                      tell the host(s) which workspaces are Forge's
+
+Another device:
+  forge setup                                    on the new device: its key
+  forge pair <its public key>                    on this one: let it in, print a pairing
+  forge pair --accept <pairing>                  on the new device: learn the servers
   forge host gh-login <alias>                   authenticate gh once for the whole host
   forge host list
   forge host remove <alias>
@@ -79,6 +84,8 @@ func Main(args []string) int {
 	switch args[0] {
 	case "setup":
 		return setupCmd(args[1:])
+	case "pair":
+		return pairCmd(args[1:])
 	case "host":
 		return hostCmd(args[1:])
 	case "workspace", "ws":
