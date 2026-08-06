@@ -152,3 +152,78 @@ func TestSetPortRangeKeepsWhatWasNotAskedAbout(t *testing.T) {
 		t.Error("a range too small for one block should be refused")
 	}
 }
+
+// A host that was told its range hands blocks out of it. That is the whole of
+// what makes a second device safe to allocate from: which of a machine's ports
+// are free is a fact about the machine, and a device that guessed would hand out
+// one the machine had already given away.
+func TestABlockComesFromTheHostsOwnRange(t *testing.T) {
+	cfg := &config.Config{
+		Hosts:      map[string]*config.Host{"a": {Addr: "10.0.0.1"}, "b": {Addr: "10.0.0.2"}},
+		PortRange:  config.PortRange{Start: 16000, End: 30000, Block: 100},
+		Workspaces: map[string]string{},
+	}
+	ranges := map[string]config.PortRange{
+		"a": {Start: 20000, End: 21000, Block: 50},
+	}
+
+	if got := rangeFor(ranges, cfg, "a"); got.Start != 20000 || got.Block != 50 {
+		t.Errorf("host a allocates from %+v, want its own 20000-21000/50", got)
+	}
+	// And a host nobody could ask keeps this client's range, which is what every
+	// host used before any of them kept one — so nothing moves under a setup that
+	// has not been migrated.
+	if got := rangeFor(ranges, cfg, "b"); got.Start != 16000 || got.Block != 100 {
+		t.Errorf("host b allocates from %+v, want the client's own", got)
+	}
+}
+
+// A range answered as zeros is not a range, and using it would step the
+// allocator by nothing. It falls back like a host that said nothing at all.
+func TestAnEmptyAnswerFallsBackRatherThanAllocatingFromNothing(t *testing.T) {
+	cfg := &config.Config{PortRange: config.PortRange{Start: 16000, End: 30000, Block: 100}}
+	ranges := map[string]config.PortRange{"a": {}}
+
+	got := rangeFor(ranges, cfg, "a")
+	if got.Block == 0 {
+		t.Fatal("the allocator was handed a range of nothing, which never terminates")
+	}
+	if got.Start != 16000 {
+		t.Errorf("fell back to %+v, want the client's own range", got)
+	}
+}
+
+// Only the machines being allocated on are asked.
+//
+// The fan-out is parallel, so the cost of asking one more is not a round trip —
+// it is the *slowest* answer, and a host that is switched off does not answer at
+// all until the connect timeout runs out. A server nobody is allocating on
+// holding up the ones they are is the whole of what this avoids.
+func TestOnlyTheHostsBeingAllocatedOnAreAsked(t *testing.T) {
+	held := []Holder{
+		{Workspace: "one", Host: "a"},
+		{Workspace: "two", Host: "a"},
+		{Workspace: "three", Host: "b"},
+	}
+	want := hostsOf(held)
+
+	if len(want) != 2 || !want["a"] || !want["b"] {
+		t.Errorf("would ask %v, want just the two hosts holding workspaces", want)
+	}
+	// Each machine once, however many workspaces are on it: "a" holds two.
+	if want["idle"] {
+		t.Error("a host holding nothing would be asked, and if it is off, waited for")
+	}
+}
+
+// And a set nobody is in asks nobody, which is what an allocation with nothing
+// to allocate should cost.
+func TestAskingAboutNoHostsAsksNobody(t *testing.T) {
+	cfg := &config.Config{
+		Hosts:     map[string]*config.Host{"a": {Addr: "10.0.0.1"}},
+		PortRange: config.PortRange{Start: 16000, End: 30000, Block: 100},
+	}
+	if got := hostRanges(cfg, map[string]bool{}); len(got) != 0 {
+		t.Errorf("asked about %v when nothing needed a range", got)
+	}
+}
