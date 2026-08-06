@@ -69,7 +69,7 @@ func opAuthorizeKey(args []string) int {
 	if err != nil {
 		return emitError("read the workspace record: %v", err)
 	}
-	var opened []string
+	opened := []string{}
 	for _, name := range r.Workspaces {
 		home := filepath.Join(baseDir, name)
 		if _, err := os.Stat(home); err != nil {
@@ -118,26 +118,46 @@ func authorizeIn(home, owner, key string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	for _, line := range strings.Split(string(existing), "\n") {
-		if strings.TrimSpace(line) == key {
-			return nil // already in; appending again would only grow the file
+
+	// Appended, and this is what appending means: O_APPEND, not a read followed by
+	// a write of the whole file. os.WriteFile truncates first, so a write that
+	// failed partway would leave this file shorter than it was — and this file is
+	// how everything else gets in, including the device running this command.
+	if !hasKey(string(existing), key) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return err
+		}
+		line := key + "\n"
+		// A file whose last line has no newline would otherwise gain a key glued to
+		// the end of the one before it, which authorises neither.
+		if body := string(existing); body != "" && !strings.HasSuffix(body, "\n") {
+			line = "\n" + line
+		}
+		if _, err := f.Write([]byte(line)); err != nil {
+			f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
 		}
 	}
 
-	// Appended, never rewritten: this file is how everything else gets in, and a
-	// rewrite that failed halfway would lock out whoever was already there —
-	// including the device running this command.
-	body := string(existing)
-	if body != "" && !strings.HasSuffix(body, "\n") {
-		body += "\n"
+	// Outside that, and always: a run that got as far as writing the key and no
+	// further left the file owned by root, and sshd refuses it. Re-running is how
+	// somebody fixes that, and it only fixes it if this happens whether or not
+	// there was anything to add.
+	return chownTo(owner, sshDir)
+}
+
+// hasKey reports whether this authorized_keys already holds the line.
+func hasKey(body, key string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == key {
+			return true
+		}
 	}
-	if err := os.WriteFile(path, []byte(body+key+"\n"), 0o600); err != nil {
-		return err
-	}
-	if err := chownTo(owner, sshDir); err != nil {
-		return err
-	}
-	return nil
+	return false
 }
 
 // chownTo hands a directory to an account, and is a variable so the tests can
@@ -166,11 +186,19 @@ var chownTo = func(owner, dir string) error {
 func adminAccount() (home, owner string, err error) {
 	name := os.Getenv("SUDO_USER")
 	if name == "" {
+		// os.UserHomeDir rather than user.Current().HomeDir: the first honours HOME
+		// and the second does not. Which matters here for the reason it always
+		// does — a process that ignores HOME writes wherever the passwd file says,
+		// and there is no arranging for it to write anywhere else.
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", fmt.Errorf("cannot tell where this account lives: %v", err)
+		}
 		u, err := user.Current()
 		if err != nil {
 			return "", "", fmt.Errorf("cannot tell which account this is: %v", err)
 		}
-		return u.HomeDir, u.Username + ":" + u.Username, nil
+		return home, u.Username + ":" + u.Username, nil
 	}
 	u, err := user.Lookup(name)
 	if err != nil {

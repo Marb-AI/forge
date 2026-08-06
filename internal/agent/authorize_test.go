@@ -48,9 +48,7 @@ func TestAuthorisingReachesTheWorkspacesToo(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	admin := t.TempDir()
-	t.Setenv("HOME", admin)
-	t.Setenv("SUDO_USER", "")
+	t.Setenv("HOME", t.TempDir()) // narrower still than the package's, per test
 	owners := noChown(t)
 
 	out := captureStdout(t)
@@ -97,7 +95,6 @@ func TestAuthorisingKeepsWhoeverWasAlreadyIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SUDO_USER", "")
 	noChown(t)
 
 	out := captureStdout(t)
@@ -121,7 +118,6 @@ func TestAuthorisingTwiceDoesNotGrowTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SUDO_USER", "")
 	noChown(t)
 
 	enc := base64.StdEncoding.EncodeToString([]byte(aKey))
@@ -152,7 +148,6 @@ func TestOnlyOneKeyOnOneLineIsAccepted(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Setenv("HOME", t.TempDir())
-		t.Setenv("SUDO_USER", "")
 
 		out := captureStdout(t)
 		code := opAuthorizeKey([]string{"-key", base64.StdEncoding.EncodeToString([]byte(bad))})
@@ -181,7 +176,6 @@ func TestARecordedWorkspaceThatIsGoneDoesNotStopTheRest(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SUDO_USER", "")
 	noChown(t)
 
 	out := captureStdout(t)
@@ -196,5 +190,72 @@ func TestARecordedWorkspaceThatIsGoneDoesNotStopTheRest(t *testing.T) {
 	}
 	if !strings.Contains(said, `"here"`) || strings.Contains(said, `"vanished"`) {
 		t.Errorf("the answer names the wrong workspaces: %s", said)
+	}
+}
+
+// The admin login is wherever HOME says, so a test can arrange for it — and so
+// can a server, which is the point: user.Current().HomeDir reads the passwd file
+// and cannot be pointed anywhere. The first version of this used it, and the
+// tests wrote a fabricated key into the real ~/.ssh of the machine running them.
+func TestTheAdminLoginIsWhereHomeSays(t *testing.T) {
+	scratchHost(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	noChown(t)
+
+	out := captureStdout(t)
+	if code := opAuthorizeKey([]string{"-key", base64.StdEncoding.EncodeToString([]byte(aKey))}); code != 0 {
+		t.Fatalf("authorising exited %d: %s", code, out())
+	}
+	out()
+
+	if got := authorized(t, home); !strings.Contains(got, aKey) {
+		t.Errorf("the key did not land in the home HOME names; it went somewhere else")
+	}
+}
+
+// Re-running repairs ownership even when there is nothing to add. A run that got
+// as far as writing the key and no further left the file owned by root, and sshd
+// refuses it — so running it again has to be how that is fixed.
+func TestRerunningRepairsOwnershipWithNothingToAdd(t *testing.T) {
+	scratchHost(t, "one")
+	if err := recordWorkspace("one"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	enc := base64.StdEncoding.EncodeToString([]byte(aKey))
+	noChown(t)
+	out := captureStdout(t)
+	opAuthorizeKey([]string{"-key", enc})
+	out()
+
+	// Second run: the key is already there, and the ownership still has to be set.
+	owners := noChown(t)
+	out = captureStdout(t)
+	if code := opAuthorizeKey([]string{"-key", enc}); code != 0 {
+		t.Fatalf("the second run exited %d: %s", code, out())
+	}
+	out()
+
+	dir := filepath.Join(baseDir, "one", ".ssh")
+	if got := (*owners)[dir]; got != "one:one" {
+		t.Errorf("the second run did not hand %s back to the workspace (got %q) — "+
+			"a file left owned by root is one sshd refuses", dir, got)
+	}
+}
+
+// An empty answer is an empty list, not null: every other result here says [].
+func TestNoWorkspacesIsAnEmptyList(t *testing.T) {
+	scratchHost(t)
+	t.Setenv("HOME", t.TempDir())
+	noChown(t)
+
+	out := captureStdout(t)
+	opAuthorizeKey([]string{"-key", base64.StdEncoding.EncodeToString([]byte(aKey))})
+	got := out()
+
+	if !strings.Contains(got, `"workspaces":[]`) {
+		t.Errorf("a host with no workspaces answered %s", got)
 	}
 }
