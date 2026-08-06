@@ -47,6 +47,17 @@ const state = {
 const NARROW = "(max-width: 720px)";
 function isNarrow() { return window.matchMedia(NARROW).matches; }
 
+// The app preview's state and the addresses it will open. Up here with NARROW
+// and for the same reason: `const` is not hoisted, so anything the boot block
+// reaches — directly or, as here, one closure away — has to exist by the time
+// boot runs. The functions that use these are at the bottom with the rest of the
+// preview; only the declarations come up.
+const preview = {
+  url: "",  // what is showing, or "" when nothing is
+  ws: null, // the workspace it belongs to
+};
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
 // ---- theme ----------------------------------------------------------------
 function initTheme() {
   const saved = localStorage.getItem("forge-theme") || "dark";
@@ -3015,6 +3026,7 @@ function hideFileView() {
 initTheme();
 initTabDrag();
 initChat();
+initPreview();
 initNarrow();
 state.showHidden = localStorage.getItem("forge-show-hidden") === "1";
 applyShowHidden();
@@ -3188,11 +3200,31 @@ function portRow(p) {
 function portTarget(p, st) {
   const text = `${p.name}:${p.port}`;
   if (st === "ok" && !NON_HTTP_PORTS.has(p.target)) {
+    const url = `http://127.0.0.1:${p.port}`;
+    // Inside Forge on a phone, without asking: the other option is a browser
+    // that puts this application in the background, and the tunnel goes with it
+    // — so "open in your browser" there means "open a page that cannot load".
+    if (isNarrow()) {
+      const b = document.createElement("button");
+      b.className = "plain";
+      b.textContent = text;
+      b.addEventListener("click", () => showPreview(url, state.active));
+      return b;
+    }
     const a = document.createElement("a");
-    a.href = `http://127.0.0.1:${p.port}`;
+    a.href = url;
     a.target = "_blank";
     a.rel = "noopener";
     a.textContent = text;
+    // On a desktop the link is the link, and Forge is the other choice rather
+    // than the only one: alt-click, and the arrow in the preview's own bar goes
+    // back out to the browser.
+    a.title = "Click to open in your browser · Alt-click to open here";
+    a.addEventListener("click", (e) => {
+      if (!e.altKey) return;
+      e.preventDefault();
+      showPreview(url, state.active);
+    });
     return a;
   }
   const b = document.createElement("button");
@@ -3649,4 +3681,100 @@ function openChatOnNarrow() {
   panel.hidden = false;
   setPanelActive("chat");
   chatShow(state.active);
+}
+
+// ---- app preview -----------------------------------------------------------
+//
+// What a workspace publishes, shown inside Forge instead of in another window.
+//
+// On a phone it is not a preference: a tunnel lives in this application, so
+// switching to Safari to look at the thing you just built puts Forge in the
+// background and takes the tunnel with it — you arrive at a page that cannot
+// load. On a desktop it is a choice, and the reason to make it is that a preview
+// here is scoped to a workspace, so which initiative you are sitting on is
+// visible and so is what you are testing.
+//
+// It is an iframe, and that is safe in a browser for a reason worth writing
+// down: the session cookie is HttpOnly, so a page served from a tunnelled port
+// cannot read it, and the same-origin check on /api/ means it cannot use it
+// either. A native webview has no such guarantee and needs a data store of its
+// own — that is a condition of the desktop and phone shells, not of this.
+// showPreview opens a port inside Forge. The panel is one at a time, like the
+// shell: what a second one costs is a second live tunnel's worth of attention,
+// and what it buys is a comparison nobody has asked for yet.
+function showPreview(url, ws) {
+  preview.url = url;
+  preview.ws = ws || state.active;
+  document.getElementById("pv-url").value = url;
+  document.getElementById("pv-frame").src = url;
+  document.getElementById("preview").hidden = false;
+}
+
+// hidePreview is the ✕, and it hides. The frame keeps its page and its scroll
+// position, because the expensive thing is not the frame — it is the tunnel
+// under it and whatever state the app in it is holding.
+function hidePreview() {
+  document.getElementById("preview").hidden = true;
+  if (state.claude) state.claude.term.focus();
+}
+
+// closePreview is the one that actually ends it: the frame is emptied, so the
+// page stops running and stops asking for the port.
+function closePreview() {
+  preview.url = "";
+  preview.ws = null;
+  document.getElementById("pv-frame").src = "about:blank";
+  document.getElementById("pv-url").value = "";
+  document.getElementById("preview").hidden = true;
+}
+
+// previewURL is what an address bar may point at: a loopback address, and
+// nothing else.
+//
+// Not a validation of taste — the frame is a window into somebody's dev server,
+// and Forge is not going to be the thing that renders a page from the internet
+// inside its own origin's neighbourhood. A typed address that is not local is
+// refused rather than quietly turned into one.
+function previewURL(raw) {
+  let text = String(raw || "").trim();
+  if (!text) return null;
+  if (!/^https?:\/\//i.test(text)) text = "http://" + text;
+  let u;
+  try { u = new URL(text); } catch { return null; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  if (!LOOPBACK.has(u.hostname)) return null;
+  return u.href;
+}
+
+function initPreview() {
+  const frame = document.getElementById("pv-frame");
+  const bar = document.getElementById("pv-url");
+  if (!frame || !bar) return;
+
+  document.getElementById("pv-close").addEventListener("click", hidePreview);
+  document.getElementById("pv-reload").addEventListener("click", () => {
+    // Re-assigning src rather than reaching into the frame: its document belongs
+    // to another origin and asking it to reload is asking across that line.
+    if (preview.url) frame.src = preview.url;
+  });
+  document.getElementById("pv-back").addEventListener("click", () => {
+    // Same reason: history.back() inside a cross-origin frame is not ours to
+    // call, so back is back to where this preview started.
+    if (preview.url) frame.src = preview.url;
+  });
+  document.getElementById("pv-out").addEventListener("click", () => {
+    if (preview.url) window.open(preview.url, "_blank", "noopener");
+  });
+  bar.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const url = previewURL(bar.value);
+    if (!url) {
+      bar.value = preview.url; // put back what was working rather than clear it
+      return;
+    }
+    showPreview(url, preview.ws);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !document.getElementById("preview").hidden) hidePreview();
+  });
 }
