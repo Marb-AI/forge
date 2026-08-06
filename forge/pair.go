@@ -116,7 +116,8 @@ func (p Pairing) Encode() (string, error) {
 // AcceptPairing records the servers in a pairing and reports what it learned and
 // what it already had.
 //
-// A host this device already knows is left exactly as it is. The two may
+// A host this device already knows is left exactly as it is — where "knows"
+// means there is a record behind the name, not merely the name. The two may
 // disagree — a jump route added here, an address changed there — and this is not
 // the moment to decide which is right: pairing is how a device is told about
 // servers it has never heard of, and overwriting what somebody set on this
@@ -144,7 +145,12 @@ func AcceptPairing(encoded string) (added, known []string, err error) {
 			c.Hosts = map[string]*config.Host{}
 		}
 		for _, h := range p.Hosts {
-			if _, have := c.Hosts[h.Alias]; have {
+			// A key that is present with nothing behind it is not a server this
+			// device knows — it is one it cannot reach, and every other reader here
+			// already treats nil that way (hostList skips it, askHosts calls it
+			// unreachable). Calling it "known" would make pairing the one operation
+			// that could have healed it and did not.
+			if existing, have := c.Hosts[h.Alias]; have && existing != nil {
 				known = append(known, h.Alias)
 				continue
 			}

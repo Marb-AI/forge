@@ -145,3 +145,41 @@ func TestOnlyOneKeyIsEverLetIn(t *testing.T) {
 		}
 	}
 }
+
+// An alias with nothing behind it is not a server this device knows.
+//
+// A nil record is what a hand-edited config leaves, and every other reader here
+// already treats it as unreachable rather than present — hostList skips it,
+// askHosts counts it as not answering. Pairing is the one operation that could
+// fill it in, and calling it "already known" would be the one that does not.
+func TestPairingFillsInAnAliasWithNothingBehindIt(t *testing.T) {
+	dir := t.TempDir()
+	swapState(t, dir)
+
+	if err := updateConfig(func(c *config.Config) error {
+		c.Hosts = map[string]*config.Host{"box": nil}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	encoded, err := aPairing().Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, known, err := AcceptPairing(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(known) != 0 {
+		t.Errorf("an empty record counted as a server this device knows: %v", known)
+	}
+	if strings.Join(added, ",") != "behind,box" {
+		t.Errorf("added %v, want both — box had a name and nothing behind it", added)
+	}
+
+	cfg, _ := loadConfig()
+	if h := cfg.Hosts["box"]; h == nil || h.Addr != "10.0.0.1" {
+		t.Errorf("box is still %v — the one operation that could have healed it did not", h)
+	}
+}
