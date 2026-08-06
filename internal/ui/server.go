@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -528,6 +529,24 @@ func (s *server) guard(next http.Handler) http.Handler {
 			http.Error(w, "forbidden — open the URL that `forge ui` printed", http.StatusForbidden)
 			return
 		}
+		// The origin check used to apply only to state-changing methods, on the
+		// usual reasoning that a GET reads. Several of these do not: opening a
+		// terminal is a GET, and one of them opens a shell on this machine.
+		//
+		// The attacker this shuts out is a page on a port Forge itself tunnels — a
+		// dev server in a workspace, whose code Claude wrote. It cannot read the
+		// token: the cookie is HttpOnly. It cannot read a response either: no CORS
+		// headers, so what comes back is opaque to it. But the browser attaches the
+		// cookie to its request anyway, because SameSite is about *sites* and a
+		// different port on 127.0.0.1 is the same site — so without this it could
+		// make Forge start sessions it will never see, indefinitely.
+		//
+		// Scoped to /api/ so that opening the UI still works: a typed address is a
+		// navigation, which carries no Origin and is not one of these.
+		if strings.HasPrefix(r.URL.Path, "/api/") && !sameOriginRequest(r) {
+			http.Error(w, "bad origin", http.StatusForbidden)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !sameOrigin(r) {
 			http.Error(w, "bad origin", http.StatusForbidden)
 			return
@@ -812,6 +831,33 @@ func sameOrigin(r *http.Request) bool {
 		return false // malformed, another scheme, or the literal "null"
 	}
 	return u.Host == r.Host
+}
+
+// sameOriginRequest reports whether a request came from this page.
+//
+// Sec-Fetch-Site first, because it is the only header that answers this for a
+// same-origin GET: browsers routinely omit Origin on those, so an Origin-only
+// check reads "no header" and lets everything through — which is exactly what a
+// page on a tunnelled port produces if it is careful.
+//
+// "same-origin" and nothing weaker. "same-site" is the interesting case and the
+// one to refuse: a different port on 127.0.0.1 is the same site by every
+// definition a browser uses, which is the whole reason SameSite=Strict does not
+// help here.
+//
+// A request with neither header is allowed, and that is deliberate rather than a
+// gap: it is curl, or a client that is not a browser, and the session token
+// already gates those. What this closes is the browser being made to act for
+// somebody else, which only a browser can be.
+func sameOriginRequest(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "":
+		return sameOrigin(r) // no such header; fall back to Origin, if there is one
+	default:
+		return false // same-site, cross-site
+	}
 }
 
 func tokenEqual(a, b string) bool {
