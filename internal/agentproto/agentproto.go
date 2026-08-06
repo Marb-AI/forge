@@ -367,6 +367,13 @@ type PortRangeResult struct {
 	Recorded bool `json:"recorded"`
 }
 
+// AuthorizeResult is which workspaces a newly authorised key was let into. The
+// host login is not listed: it is not optional, and a failure there is an error
+// rather than a shorter list.
+type AuthorizeResult struct {
+	Workspaces []string `json:"workspaces"`
+}
+
 // ErrorResult is printed (and the process exits non-zero) on failure.
 type ErrorResult struct {
 	Error string `json:"error"`

@@ -196,6 +196,13 @@ func TestHomeIsResolvedOnlyWhereItIsExplained(t *testing.T) {
 	allowed := map[string]string{
 		"config/config.go":  "DefaultDir, the one place ~/.forge is spelled out",
 		"forge/terminal.go": "the local shell's working directory — the user's home, not Forge's",
+		// The agent, which runs on the server rather than on a device. The home it
+		// resolves is the login it is running as, so that a key can be put in that
+		// account's authorized_keys — a fact about the machine it is on, and
+		// nothing this client keeps. It reads HOME (os.UserHomeDir) rather than the
+		// passwd file precisely so it can be pointed somewhere, which is what the
+		// package's TestMain does.
+		"internal/agent/authorize.go": "the login account's own home, on the server",
 	}
 	for _, f := range grepRepo(t, "os.UserHomeDir(") {
 		if _, ok := allowed[f]; !ok {
