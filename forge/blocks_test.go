@@ -192,3 +192,38 @@ func TestAnEmptyAnswerFallsBackRatherThanAllocatingFromNothing(t *testing.T) {
 		t.Errorf("fell back to %+v, want the client's own range", got)
 	}
 }
+
+// Only the machines being allocated on are asked.
+//
+// The fan-out is parallel, so the cost of asking one more is not a round trip —
+// it is the *slowest* answer, and a host that is switched off does not answer at
+// all until the connect timeout runs out. A server nobody is allocating on
+// holding up the ones they are is the whole of what this avoids.
+func TestOnlyTheHostsBeingAllocatedOnAreAsked(t *testing.T) {
+	held := []Holder{
+		{Workspace: "one", Host: "a"},
+		{Workspace: "two", Host: "a"},
+		{Workspace: "three", Host: "b"},
+	}
+	want := hostsOf(held)
+
+	if len(want) != 2 || !want["a"] || !want["b"] {
+		t.Errorf("would ask %v, want just the two hosts holding workspaces", want)
+	}
+	// Each machine once, however many workspaces are on it: "a" holds two.
+	if want["idle"] {
+		t.Error("a host holding nothing would be asked, and if it is off, waited for")
+	}
+}
+
+// And a set nobody is in asks nobody, which is what an allocation with nothing
+// to allocate should cost.
+func TestAskingAboutNoHostsAsksNobody(t *testing.T) {
+	cfg := &config.Config{
+		Hosts:     map[string]*config.Host{"a": {Addr: "10.0.0.1"}},
+		PortRange: config.PortRange{Start: 16000, End: 30000, Block: 100},
+	}
+	if got := hostRanges(cfg, map[string]bool{}); len(got) != 0 {
+		t.Errorf("asked about %v when nothing needed a range", got)
+	}
+}

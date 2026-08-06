@@ -143,7 +143,9 @@ func AssignBlocks(only string) ([]Assignment, error) {
 	// same local port and one of them would silently not work. Across hosts whose
 	// ranges do not overlap it costs nothing, since a position taken in one range
 	// never appears in another.
-	ranges := hostRanges(cfg)
+	// Only the machines this is about to allocate on: the ones holding workspaces
+	// of ours, which is exactly what `held` was built from.
+	ranges := hostRanges(cfg, hostsOf(held))
 	var done []Assignment
 	for _, h := range held {
 		if h.Block != nil || (only != "" && h.Workspace != only) {
@@ -282,12 +284,18 @@ func portBlock(b *agentproto.PortBlock) *PortBlock {
 // be asked, falls back to this client's own range — which is what every host used
 // until now, so nothing moves under a setup that has not been migrated.
 //
+// want is the hosts worth asking, and it is the caller's to decide because it
+// differs: allocating for one workspace needs one machine's range, and a
+// backfill needs the ranges of the machines that hold workspaces. Asking every
+// registered host instead would cost a full connect timeout for each one that is
+// switched off — a server nobody is allocating on holding up the ones they are.
+//
 // Failures are not distinguished from silence here on purpose: the callers all
 // refuse to allocate against an unreachable host anyway, by name, before they
 // get this far.
-func hostRanges(cfg *config.Config) map[string]config.PortRange {
+func hostRanges(cfg *config.Config, want map[string]bool) map[string]config.PortRange {
 	fallback := cfg.PortRangeOr()
-	answers := askHosts(cfg.Hosts, everyHost(cfg),
+	answers := askHosts(cfg.Hosts, want,
 		func(_ string, host *config.Host) (config.PortRange, error) {
 			var res agentproto.PortRangeResult
 			if err := callAgent(host, &res, "host-port-range"); err != nil {
@@ -300,7 +308,7 @@ func hostRanges(cfg *config.Config) map[string]config.PortRange {
 		})
 
 	out := map[string]config.PortRange{}
-	for alias := range cfg.Hosts {
+	for alias := range want {
 		if r, ok := answers[alias]; ok {
 			out[alias] = r
 		} else {
@@ -308,6 +316,15 @@ func hostRanges(cfg *config.Config) map[string]config.PortRange {
 		}
 	}
 	return out
+}
+
+// hostsOf is the set of machines a list of holders sits on.
+func hostsOf(held []Holder) map[string]bool {
+	want := map[string]bool{}
+	for _, h := range held {
+		want[h.Host] = true
+	}
+	return want
 }
 
 // errHostHasNoRange is a host that has not been told its range, which is not a
@@ -371,7 +388,7 @@ func allocateBlock(cfg *config.Config, workspace, alias string) (*PortBlock, err
 			strings.Join(unreachable, ", "))
 	}
 
-	r := rangeFor(hostRanges(cfg), cfg, alias)
+	r := rangeFor(hostRanges(cfg, map[string]bool{alias: true}), cfg, alias)
 	var block *PortBlock
 	err := updateConfig(func(c *config.Config) error {
 		taken := takenBlocks(held, c.ActiveReservations(time.Now()))
