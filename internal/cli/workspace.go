@@ -86,11 +86,7 @@ func workspaceList() int {
 func workspaceAction(name, action string, rest []string) int {
 	switch action {
 	case "ssh":
-		// The local SSH agent is forwarded by default, so git operations in the
-		// workspace use your keys with no credential stored on the server. Opt out
-		// with --no-agent.
-		agent := !hasBoolFlag(rest, "--no-agent")
-		return interactive(func(out io.Writer) error { return forge.Shell(name, agent, out) })
+		return interactive(func(out io.Writer) error { return forge.Shell(name, out) })
 	case "claude":
 		return workspaceClaude(name, rest)
 	case "expose":
