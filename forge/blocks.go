@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -133,12 +134,22 @@ func AssignBlocks(only string) ([]Assignment, error) {
 	}
 
 	taken := takenBlocks(held, cfg.ActiveReservations(time.Now()))
-	r := cfg.PortRangeOr()
+	// One range per host, and one `taken` across all of them.
+	//
+	// The range is per host because it is a fact about that machine. The taken set
+	// is not, deliberately: a block position spoken for anywhere is left alone
+	// everywhere. Two hosts sharing a range would otherwise hand out the same
+	// number twice, and a tunnel is -L port:localhost:port — so both would want the
+	// same local port and one of them would silently not work. Across hosts whose
+	// ranges do not overlap it costs nothing, since a position taken in one range
+	// never appears in another.
+	ranges := hostRanges(cfg)
 	var done []Assignment
 	for _, h := range held {
 		if h.Block != nil || (only != "" && h.Workspace != only) {
 			continue
 		}
+		r := rangeFor(ranges, cfg, h.Host)
 		start, ok := nextFreeBlock(r, taken)
 		if !ok {
 			return done, fmt.Errorf("no free block left in %d-%d — widen it with: forge ports range", r.Start, r.End)
@@ -263,6 +274,55 @@ func portBlock(b *agentproto.PortBlock) *PortBlock {
 	return &PortBlock{Start: b.Start, Size: b.Size}
 }
 
+// hostRanges is the span each host hands blocks out of.
+//
+// A host that keeps its own range answers with it, and that is the point: which
+// of a machine's ports are free is a fact about the machine, and a second device
+// has nowhere else to learn it. A host that has not been told, or is too old to
+// be asked, falls back to this client's own range — which is what every host used
+// until now, so nothing moves under a setup that has not been migrated.
+//
+// Failures are not distinguished from silence here on purpose: the callers all
+// refuse to allocate against an unreachable host anyway, by name, before they
+// get this far.
+func hostRanges(cfg *config.Config) map[string]config.PortRange {
+	fallback := cfg.PortRangeOr()
+	answers := askHosts(cfg.Hosts, everyHost(cfg),
+		func(_ string, host *config.Host) (config.PortRange, error) {
+			var res agentproto.PortRangeResult
+			if err := callAgent(host, &res, "host-port-range"); err != nil {
+				return config.PortRange{}, err
+			}
+			if !res.Recorded || !res.Set {
+				return config.PortRange{}, errHostHasNoRange
+			}
+			return config.PortRange{Start: res.Start, End: res.End, Block: res.Block}, nil
+		})
+
+	out := map[string]config.PortRange{}
+	for alias := range cfg.Hosts {
+		if r, ok := answers[alias]; ok {
+			out[alias] = r
+		} else {
+			out[alias] = fallback
+		}
+	}
+	return out
+}
+
+// errHostHasNoRange is a host that has not been told its range, which is not a
+// failure — it is every host until a client fills one in.
+var errHostHasNoRange = errors.New("this host keeps no port range")
+
+// rangeFor is one host's span, with the client's own as the answer for a host
+// nobody asked about.
+func rangeFor(ranges map[string]config.PortRange, cfg *config.Config, alias string) config.PortRange {
+	if r, ok := ranges[alias]; ok && r.Block > 0 {
+		return r
+	}
+	return cfg.PortRangeOr()
+}
+
 // nextFreeBlock returns the lowest block position in r that nobody holds. Lowest
 // rather than next-after-the-highest, so a deleted workspace's block is reused and
 // the numbers stay small and memorable instead of drifting up forever.
@@ -311,7 +371,7 @@ func allocateBlock(cfg *config.Config, workspace, alias string) (*PortBlock, err
 			strings.Join(unreachable, ", "))
 	}
 
-	r := cfg.PortRangeOr()
+	r := rangeFor(hostRanges(cfg), cfg, alias)
 	var block *PortBlock
 	err := updateConfig(func(c *config.Config) error {
 		taken := takenBlocks(held, c.ActiveReservations(time.Now()))

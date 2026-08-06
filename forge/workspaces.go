@@ -376,6 +376,11 @@ func AdoptWorkspaces(alias string) (map[string]Adopted, error) {
 	// Sequential per host and parallel across them, like every other sweep: the
 	// names on one host go into one file, and the agent's lock would serialise
 	// them anyway.
+	//
+	// The host is also told its port range here, from this client's own. It is the
+	// same migration and the same moment — everything this device knows about that
+	// machine which the machine does not yet know itself — and a range set before
+	// any second device exists is a range the second device will agree with.
 	byName := map[string][]string{}
 	for name, a := range cfg.Workspaces {
 		byName[a] = append(byName[a], name)
@@ -392,8 +397,29 @@ func AdoptWorkspaces(alias string) (map[string]Adopted, error) {
 			}
 			r.Named++
 		}
+		if err := tellRange(host, cfg.PortRangeOr()); err != nil {
+			r.Err = err
+		}
 		return r, nil
 	}), nil
+}
+
+// tellRange gives a host its port range, once — the one it has been allocating
+// from all along, so nothing moves. A host that already has one keeps it: it may
+// have been set deliberately, and a block that moved would break every port
+// written into a repo under the old one.
+func tellRange(host *config.Host, r config.PortRange) error {
+	var cur agentproto.PortRangeResult
+	if err := callAgent(host, &cur, "host-port-range"); err != nil {
+		return err
+	}
+	if cur.Set {
+		return nil
+	}
+	return callAgent(host, nil, "host-port-range",
+		"-start", strconv.Itoa(r.Start),
+		"-end", strconv.Itoa(r.End),
+		"-block", strconv.Itoa(r.Block))
 }
 
 // Adopted is what one host made of being told which workspaces are Forge's.

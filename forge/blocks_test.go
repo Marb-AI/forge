@@ -152,3 +152,43 @@ func TestSetPortRangeKeepsWhatWasNotAskedAbout(t *testing.T) {
 		t.Error("a range too small for one block should be refused")
 	}
 }
+
+// A host that was told its range hands blocks out of it. That is the whole of
+// what makes a second device safe to allocate from: which of a machine's ports
+// are free is a fact about the machine, and a device that guessed would hand out
+// one the machine had already given away.
+func TestABlockComesFromTheHostsOwnRange(t *testing.T) {
+	cfg := &config.Config{
+		Hosts:      map[string]*config.Host{"a": {Addr: "10.0.0.1"}, "b": {Addr: "10.0.0.2"}},
+		PortRange:  config.PortRange{Start: 16000, End: 30000, Block: 100},
+		Workspaces: map[string]string{},
+	}
+	ranges := map[string]config.PortRange{
+		"a": {Start: 20000, End: 21000, Block: 50},
+	}
+
+	if got := rangeFor(ranges, cfg, "a"); got.Start != 20000 || got.Block != 50 {
+		t.Errorf("host a allocates from %+v, want its own 20000-21000/50", got)
+	}
+	// And a host nobody could ask keeps this client's range, which is what every
+	// host used before any of them kept one — so nothing moves under a setup that
+	// has not been migrated.
+	if got := rangeFor(ranges, cfg, "b"); got.Start != 16000 || got.Block != 100 {
+		t.Errorf("host b allocates from %+v, want the client's own", got)
+	}
+}
+
+// A range answered as zeros is not a range, and using it would step the
+// allocator by nothing. It falls back like a host that said nothing at all.
+func TestAnEmptyAnswerFallsBackRatherThanAllocatingFromNothing(t *testing.T) {
+	cfg := &config.Config{PortRange: config.PortRange{Start: 16000, End: 30000, Block: 100}}
+	ranges := map[string]config.PortRange{"a": {}}
+
+	got := rangeFor(ranges, cfg, "a")
+	if got.Block == 0 {
+		t.Fatal("the allocator was handed a range of nothing, which never terminates")
+	}
+	if got.Start != 16000 {
+		t.Errorf("fell back to %+v, want the client's own range", got)
+	}
+}
