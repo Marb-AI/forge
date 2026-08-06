@@ -180,6 +180,23 @@
             <div id="sshbody"><div id="sshterm"></div></div>
             <div id="ssh-note" class="muted pad" hidden></div>
           </aside>
+          <section id="preview" hidden aria-label="App preview">
+            <div class="pane-head">
+              <button id="pv-back" title="Back" aria-label="Back">‹</button>
+              <input id="pv-url" type="text" spellcheck="false" autocomplete="off"
+                     aria-label="Address">
+              <button id="pv-reload" title="Reload" aria-label="Reload">⟳</button>
+              <button id="pv-out" title="Open in your browser" aria-label="Open in your browser">↗</button>
+              <button id="pv-close" title="Hide (Esc) — it keeps running">✕</button>
+            </div>
+            <!-- sandbox, but with scripts and same-origin: a dev server is an
+                 application and has to run. What it does not get is top-level
+                 navigation, which is a page in a frame deciding what the whole
+                 window shows. -->
+            <iframe id="pv-frame" title="App preview"
+                    sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+                    referrerpolicy="no-referrer"></iframe>
+          </section>
           <section id="chatpanel" hidden aria-label="Chat with Claude">
             <div id="chatlog" role="log" aria-live="polite">
               <div id="chat-empty" class="chat-hint">

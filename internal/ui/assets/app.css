@@ -1107,3 +1107,58 @@ button.big { padding: 10px 20px; font-size: 13px; }
   #tabs { overflow-x: auto; scrollbar-width: none; }
   #tabs::-webkit-scrollbar { display: none; }
 }
+
+/* ---- app preview --------------------------------------------------------- */
+
+/* What a workspace publishes, inside Forge rather than in another window.
+   On a phone it is a necessity — a tunnel dies when the app goes to the
+   background, so switching to Safari kills the thing you switched to look at.
+   On a desktop it is a choice, and the reason to make it is that the preview is
+   then scoped to a workspace: which initiative you are sitting on is visible,
+   and so is what you are testing.
+
+   Over the stage, above the chat and below the shell, for the same reason the
+   chat sits under the shell: a shell is something you open BESIDE whatever you
+   are looking at, and it must still open over this. */
+#preview {
+  position: absolute;
+  inset: 0;
+  z-index: 18;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+#preview[hidden] { display: none; }
+#preview .pane-head { gap: 6px; align-items: center; }
+#preview .pane-head button { width: 24px; height: 24px; flex: none; font-size: 13px; }
+
+#pv-url {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+#pv-url:focus { outline: 1px solid var(--accent, #4a8); outline-offset: -1px; }
+
+/* No border of its own: the panel already has one, and two is a frame around a
+   frame. White ground, because a page that sets no background is white and a
+   dark one behind it shows through as stripes. */
+#pv-frame {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+
+@media (max-width: 720px) {
+  #preview { border-radius: 0; }
+  #pv-url { font-size: 16px; } /* or iOS zooms on focus and never zooms back */
+}
