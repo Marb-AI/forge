@@ -1162,3 +1162,36 @@ button.big { padding: 10px 20px; font-size: 13px; }
   #preview { border-radius: 0; }
   #pv-url { font-size: 16px; } /* or iOS zooms on focus and never zooms back */
 }
+
+/* Several previews, one showing. The rest keep their page, their scroll position
+   and whatever the app in them is holding — which is the expensive part, not the
+   frame. Same arrangement the shells use, for the same reason. */
+#pv-frames { flex: 1; min-height: 0; position: relative; }
+.pv-page { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+.pv-page[hidden] { display: none; }
+
+/* One rail entry per open preview: the way back to it, and the only way to end
+   it. The cross on the panel hides; this trash is what stops the page. */
+#rail-previews { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+#rail-previews:not(:empty) { margin: 4px 0; }
+.pv-item { position: relative; }
+.pv-item .rail-btn .cap { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.pv-kill {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.pv-item:hover .pv-kill, .pv-kill:focus-visible { opacity: 1; }
+@media (max-width: 720px) {
+  /* No hover on a phone, so the way to end a preview has to be there already. */
+  .pv-kill { opacity: 1; }
+  #rail-previews { flex-direction: row; }
+}

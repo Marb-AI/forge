@@ -53,26 +53,24 @@ func TestThePreviewOnlyOpensLoopback(t *testing.T) {
 // get is the ability to navigate the window it is in — a page in a frame
 // deciding what the whole of Forge shows.
 func TestThePreviewFrameRunsAppsButNotTheWindow(t *testing.T) {
-	index := embeddedAsset(t, "index.html")
+	// The frames are made in JS now, one per open preview, so this is where the
+	// sandbox is written down.
+	body := withoutComments(jsFunc(t, embeddedAsset(t, "app.js"), "showPreview"))
 
-	i := strings.Index(index, `id="pv-frame"`)
+	i := strings.Index(body, `setAttribute("sandbox"`)
 	if i < 0 {
-		t.Fatal("there is no preview frame")
-	}
-	frame := index[i:]
-	if j := strings.Index(frame, ">"); j > 0 {
-		frame = frame[:j]
-	}
-
-	if !strings.Contains(frame, "sandbox=") {
 		t.Fatal("the preview frame is not sandboxed at all")
 	}
+	rule := body[i:]
+	if j := strings.Index(rule, ")"); j > 0 {
+		rule = rule[:j]
+	}
 	for _, needed := range []string{"allow-scripts", "allow-same-origin"} {
-		if !strings.Contains(frame, needed) {
+		if !strings.Contains(rule, needed) {
 			t.Errorf("the frame is missing %s, so a dev server cannot run in it", needed)
 		}
 	}
-	if strings.Contains(frame, "allow-top-navigation") {
+	if strings.Contains(rule, "allow-top-navigation") {
 		t.Error("the framed page can navigate the whole window, which is Forge's window")
 	}
 }
@@ -86,16 +84,61 @@ func TestHidingAPreviewIsNotClosingIt(t *testing.T) {
 	js := embeddedAsset(t, "app.js")
 
 	hide := withoutComments(jsFunc(t, js, "hidePreview"))
-	if strings.Contains(hide, "src") {
-		t.Error("hiding the preview touches the frame's src, which throws the page away")
+	if strings.Contains(hide, "src") || strings.Contains(hide, "remove()") {
+		t.Error("hiding the preview throws its page away")
 	}
 	if !strings.Contains(hide, "hidden = true") {
 		t.Error("hiding the preview does not hide it")
 	}
 
-	close := withoutComments(jsFunc(t, js, "closePreview"))
-	if !strings.Contains(close, "about:blank") {
+	// And closing removes the frame, which is what stops the page running and
+	// stops it asking for the port.
+	closing := withoutComments(jsFunc(t, js, "closePreview"))
+	if !strings.Contains(closing, "frame.remove()") {
 		t.Error("closing the preview leaves the page running and the port in use")
+	}
+	if !strings.Contains(closing, "preview.open.delete") {
+		t.Error("a closed preview stays in the list, so the rail offers a way back to nothing")
+	}
+}
+
+// Several previews may be open and one is showing. The others keep their page,
+// their scroll position and whatever the app in them is holding — which is the
+// expensive part, not the frame, and the reason looking at something else does
+// not throw them away.
+func TestSeveralPreviewsStayAliveWhileOneShows(t *testing.T) {
+	body := withoutComments(jsFunc(t, embeddedAsset(t, "app.js"), "showPreview"))
+
+	if !strings.Contains(body, "other.frame.hidden = other !== pv") {
+		t.Error("showing one preview does not merely hide the others")
+	}
+	// Opening the same address twice is looking at it again, not a second copy:
+	// an address is what a preview is.
+	if !strings.Contains(body, "preview.open.get(url)") {
+		t.Error("the same address opens twice, which is two frames on one port")
+	}
+}
+
+// Every open preview has an entry in the rail, because the ✕ hides the panel and
+// the rail is the only way back — and the trash on that entry is the only way to
+// end one.
+func TestEveryPreviewHasAWayBackAndAWayOut(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	index := embeddedAsset(t, "index.html")
+
+	if !strings.Contains(index, `id="rail-previews"`) {
+		t.Fatal("the rail has nowhere to list open previews")
+	}
+	body := withoutComments(jsFunc(t, js, "renderPreviewRail"))
+	if !strings.Contains(body, "showPreview(pv.url") {
+		t.Error("a rail entry does not bring its preview back")
+	}
+	if !strings.Contains(body, "closePreview(pv.url)") {
+		t.Error("nothing ends a preview, so a page runs until the tab is reloaded")
+	}
+	// The kill is inside the entry, so it must not also trigger the entry.
+	if !strings.Contains(body, "stopPropagation()") {
+		t.Error("closing a preview also opens it")
 	}
 }
 
