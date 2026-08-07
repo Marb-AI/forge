@@ -3707,7 +3707,16 @@ function openChatOnNarrow() {
 // showPreview opens a port inside Forge, or brings an open one back to the
 // front. Opening the same address twice is looking at it again, not a second
 // copy of it — an address is what a preview *is*.
-function showPreview(url, ws) {
+//
+// Which only holds if two ways of writing one address are one key. They are not,
+// by default: the ports panel builds "http://127.0.0.1:16042" and a URL parsed
+// from the address bar comes back as ".../", so the same port opened both ways
+// would be two frames on one tunnel. Everything goes through previewURL, which
+// is also what stops anything but loopback getting in here — the check used to
+// be the address bar's alone, and the address bar is not the only door.
+function showPreview(raw, ws) {
+  const url = previewURL(raw);
+  if (!url) return;
   let pv = preview.open.get(url);
   if (!pv) {
     const frame = document.createElement("iframe");

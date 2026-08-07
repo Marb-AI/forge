@@ -161,3 +161,29 @@ func TestAPhoneOpensAPortInForge(t *testing.T) {
 		t.Error("the desktop lost its plain link to the port")
 	}
 }
+
+// One address is one preview, however it was written.
+//
+// The ports panel builds "http://127.0.0.1:16042" and a parsed URL comes back as
+// ".../" — the same port, two strings. Keyed by the raw text, opening it both
+// ways would be two frames on one tunnel, which is the thing this is supposed to
+// prevent.
+//
+// Normalising at the door also puts the loopback check on every way in. It used
+// to be the address bar's alone, and the address bar is not the only door.
+func TestOneAddressIsOnePreviewHoweverItWasWritten(t *testing.T) {
+	body := withoutComments(jsFunc(t, embeddedAsset(t, "app.js"), "showPreview"))
+
+	if !strings.Contains(body, "previewURL(raw)") {
+		t.Fatal("showPreview trusts the string it was handed, so two spellings of one " +
+			"address are two previews")
+	}
+	i := strings.Index(body, "previewURL(raw)")
+	j := strings.Index(body, "preview.open.get(")
+	if j < i {
+		t.Error("the address is looked up before it is normalised, which is the same bug")
+	}
+	if !strings.Contains(body[i:j], "if (!url) return") {
+		t.Error("an address previewURL refuses is opened anyway")
+	}
+}
