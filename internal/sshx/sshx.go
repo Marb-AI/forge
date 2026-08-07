@@ -53,6 +53,16 @@ func commonOpts(t Target) []string {
 		"-o", "PasswordAuthentication=no",
 		"-o", "KbdInteractiveAuthentication=no",
 		"-o", "BatchMode=no",
+		// Said rather than assumed. Dropping -A stops Forge asking for agent
+		// forwarding; it does not stop the user's own ~/.ssh/config turning it on
+		// for this host, and a `ForwardAgent yes` there would put the agent back
+		// on the far end without anything here mentioning it. The Go client cannot
+		// be configured into it at all, so this is the exec backend catching up to
+		// what the other one already guarantees.
+		//
+		// The reason is 2.2: git on the server runs under the identity host prepare
+		// put there, and an agent on top of it only obscures who is pushing.
+		"-o", "ForwardAgent=no",
 		// TOFU: record a new server's host key on first connect instead of
 		// refusing non-interactively (you own the servers Forge connects to).
 		// A *changed* key still fails loudly — that's a real warning. The
