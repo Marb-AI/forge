@@ -19,7 +19,8 @@ ifeq ($(shell uname -s),Darwin)
 APPENV := CGO_CFLAGS=-mmacosx-version-min=11.0 CGO_LDFLAGS=-mmacosx-version-min=11.0
 endif
 
-.PHONY: all build cli agent agent-linux app app-bundle app-zip release clean fmt vet test tidy
+.PHONY: all build cli agent agent-linux app app-bundle app-zip release clean fmt vet test tidy \
+	image image-android shell docker-test
 
 all: build
 
@@ -72,6 +73,44 @@ release: agent-linux
 	done
 	@rm -f $(AGENTBIN)/forge-agent-linux-amd64 $(AGENTBIN)/forge-agent-linux-arm64
 	@echo "release binaries in $(DIST)/"
+
+# ---- the container ---------------------------------------------------------
+#
+# Everything that runs, runs in here. A test that resolves a home directory the
+# wrong way finds the container's, and this repository has written to a real
+# ~/.ssh by getting that wrong once.
+#
+# Two things cannot come in and stay where they are: `make app`, which needs
+# codesign, lipo and iconutil, and anything iOS, which needs Xcode. Both are
+# macOS, and macOS does not containerise.
+
+IMAGE := forge-build
+DOCKER := docker
+
+# The host's own uid, so files the container writes into the mounted tree belong
+# to whoever ran make rather than to root.
+UID := $(shell id -u)
+GID := $(shell id -g)
+
+# A named volume for the module cache: without it every run downloads the world,
+# and a bind mount of ~/go would be the container reaching back onto the machine
+# this exists to stay off.
+RUN := $(DOCKER) run --rm -u $(UID):$(GID) 	-v "$(CURDIR)":/src -v forge-gomod:/go/pkg/mod -e GOFLAGS=-buildvcs=false 	-w /src
+
+image:
+	$(DOCKER) build --target test -t $(IMAGE) -f build/Dockerfile .
+
+image-android:
+	$(DOCKER) build --target android -t $(IMAGE)-android -f build/Dockerfile .
+
+# The suite, where it belongs. Same three -dev packages CI installs, so a pass
+# here means the same thing as a pass there.
+docker-test: image
+	$(RUN) $(IMAGE) go test ./... -count=1
+
+# A prompt inside it, for when something needs looking at rather than running.
+shell: image
+	$(DOCKER) run --rm -it -u $(UID):$(GID) 		-v "$(CURDIR)":/src -v forge-gomod:/go/pkg/mod -w /src $(IMAGE) bash
 
 fmt:
 	go fmt ./...
