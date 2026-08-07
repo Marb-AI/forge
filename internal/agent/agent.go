@@ -18,6 +18,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -116,8 +117,28 @@ func opCreate(args []string) int {
 	}
 
 	home := filepath.Join(baseDir, *name)
+	// A home that is already there is either somebody else's account or a create
+	// of ours that did not finish, and those want opposite answers.
+	//
+	// Creating a workspace is a dozen steps and the slowest of them installs
+	// Claude Code over the network. When one fails the account and its home are
+	// real, and refusing every later attempt made that permanent: the client
+	// never recorded the workspace, so `workspace delete` would not touch it
+	// either, and the only way out was userdel by hand on the server. That is
+	// what happened to a workspace on 2026-08-07.
+	//
+	// So: ours, and it is resumed. Not ours, and it is refused as it always was —
+	// an account somebody else made is not something to write into.
+	resuming := false
 	if _, err := os.Stat(home); err == nil {
-		return emitError("workspace %q already exists", *name)
+		r, err := readRoster()
+		if err != nil {
+			return emitError("read the workspace record: %v", err)
+		}
+		if !slices.Contains(r.Workspaces, *name) {
+			return emitError("workspace %q already exists", *name)
+		}
+		resuming = true
 	}
 	if block != nil {
 		if other := blockConflict(*name, *block); other != "" {
@@ -130,8 +151,17 @@ func opCreate(args []string) int {
 		return emitError("mkdir %s: %v", baseDir, err)
 	}
 	// Create the Linux user with its home under /home/workspaces.
-	if out, err := run("useradd", "-m", "-d", home, "-s", "/bin/bash", *name); err != nil {
-		return emitError("useradd: %v: %s", err, out)
+	if !resuming {
+		if out, err := run("useradd", "-m", "-d", home, "-s", "/bin/bash", *name); err != nil {
+			return emitError("useradd: %v: %s", err, out)
+		}
+		// Written down here, the moment the account exists, and not later: from now
+		// on everything can fail and leave a real account behind, and a record made
+		// only on success would call that account somebody else's — which is what
+		// made a failed create unrepeatable.
+		if err := recordWorkspace(*name); err != nil {
+			return emitError("record %q: %v", *name, err)
+		}
 	}
 	// Best-effort: let the workspace use docker (soft isolation, by design).
 	if out, err := run("usermod", "-aG", "docker", *name); err != nil {
@@ -172,15 +202,6 @@ func opCreate(args []string) int {
 	// Own everything by the workspace user.
 	if out, err := run("chown", "-R", *name+":"+*name, home); err != nil {
 		return emitError("chown: %v: %s", err, out)
-	}
-
-	// And write it down as Forge's, here rather than at the end: what follows is
-	// installing Claude Code over the network, which is the slowest and least
-	// reliable part of this and leaves a real workspace behind when it fails. A
-	// record written only on complete success would call that workspace somebody
-	// else's, and nothing afterwards would ever say otherwise.
-	if err := recordWorkspace(*name); err != nil {
-		return emitError("record %q: %v", *name, err)
 	}
 
 	// Install Claude Code as the workspace user — a workspace exists to run it.

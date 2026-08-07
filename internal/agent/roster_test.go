@@ -460,3 +460,48 @@ func TestHandingOverIsNotFooledByHowAPathIsWritten(t *testing.T) {
 		}
 	}
 }
+
+// A workspace whose creation failed can be created again.
+//
+// Creating one is a dozen steps and the slowest installs Claude Code over the
+// network. When a later step fails the account and its home are real, and
+// refusing every attempt after that made the failure permanent: the client never
+// recorded the workspace, so `workspace delete` would not touch it either, and
+// the only way out was userdel by hand on the server. That happened on
+// 2026-08-07.
+func TestAWorkspaceWhoseCreationFailedIsResumedNotRefused(t *testing.T) {
+	scratchHost(t, "half-made")
+	if err := recordWorkspace("half-made"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t)
+	code := opCreate([]string{"-name", "half-made", "-pubkey", "bm90LWEta2V5"})
+	said := out()
+
+	// It gets past the "already exists" refusal — what it fails at now is useradd
+	// or the network, which is a machine this test does not have. What must not
+	// appear is the refusal.
+	if strings.Contains(said, "already exists") {
+		t.Errorf("a workspace Forge made and did not finish was refused: %s", said)
+	}
+	_ = code
+}
+
+// And an account Forge did not make is still refused. Resuming into somebody
+// else's home would write keys and a git identity into an account that is not
+// ours to touch — a worse failure than the one being fixed.
+func TestAnAccountForgeDidNotMakeIsStillRefused(t *testing.T) {
+	scratchHost(t, "somebody-elses")
+
+	out := captureStdout(t)
+	code := opCreate([]string{"-name", "somebody-elses", "-pubkey", "bm90LWEta2V5"})
+	said := out()
+
+	if code == 0 {
+		t.Error("created into an account Forge does not own")
+	}
+	if !strings.Contains(said, "already exists") {
+		t.Errorf("it was refused for the wrong reason: %s", said)
+	}
+}
