@@ -193,9 +193,7 @@
                  application and has to run. What it does not get is top-level
                  navigation, which is a page in a frame deciding what the whole
                  window shows. -->
-            <iframe id="pv-frame" title="App preview"
-                    sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
-                    referrerpolicy="no-referrer"></iframe>
+            <div id="pv-frames"></div>
           </section>
           <section id="chatpanel" hidden aria-label="Chat with Claude">
             <div id="chatlog" role="log" aria-live="polite">
@@ -237,6 +235,11 @@
         <button class="rail-btn" data-action="ssh" title="Open a shell in this workspace, as the workspace user">
           <span class="ico"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2"></rect><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5"></path></svg></span><span class="cap">ssh</span>
         </button>
+        <!-- Open previews, between the workspace's actions and the things that
+             outlive it. Their own group because there can be several and there is
+             usually none: growing downwards from here pushes nothing about, and
+             leaves them plainly not part of either neighbour. -->
+        <div id="rail-previews"></div>
         <!-- Below the fold: the things that are NOT about the workspace you have
              open. A shell on the server, a shell on this machine, and the
              settings — all three outlive whichever tab is selected, so they sit

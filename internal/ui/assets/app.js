@@ -53,8 +53,13 @@ function isNarrow() { return window.matchMedia(NARROW).matches; }
 // boot runs. The functions that use these are at the bottom with the rest of the
 // preview; only the declarations come up.
 const preview = {
-  url: "",  // what is showing, or "" when nothing is
-  ws: null, // the workspace it belongs to
+  // url -> {url, ws, frame}. Several may be open; one is showing. The others
+  // keep their page, their scroll position and whatever the app in them holds —
+  // which is the expensive part, not the frame, and the reason they are not
+  // thrown away when you look at something else.
+  open: new Map(),
+  url: "", // which one is showing, or "" when none is
+  ws: null,
 };
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
@@ -3699,33 +3704,117 @@ function openChatOnNarrow() {
 // cannot read it, and the same-origin check on /api/ means it cannot use it
 // either. A native webview has no such guarantee and needs a data store of its
 // own — that is a condition of the desktop and phone shells, not of this.
-// showPreview opens a port inside Forge. The panel is one at a time, like the
-// shell: what a second one costs is a second live tunnel's worth of attention,
-// and what it buys is a comparison nobody has asked for yet.
-function showPreview(url, ws) {
+// showPreview opens a port inside Forge, or brings an open one back to the
+// front. Opening the same address twice is looking at it again, not a second
+// copy of it — an address is what a preview *is*.
+//
+// Which only holds if two ways of writing one address are one key. They are not,
+// by default: the ports panel builds "http://127.0.0.1:16042" and a URL parsed
+// from the address bar comes back as ".../", so the same port opened both ways
+// would be two frames on one tunnel. Everything goes through previewURL, which
+// is also what stops anything but loopback getting in here — the check used to
+// be the address bar's alone, and the address bar is not the only door.
+function showPreview(raw, ws) {
+  const url = previewURL(raw);
+  if (!url) return;
+  let pv = preview.open.get(url);
+  if (!pv) {
+    const frame = document.createElement("iframe");
+    frame.className = "pv-page";
+    frame.title = "App preview";
+    // Scripts and same-origin, because it is running somebody's application.
+    // Never allow-top-navigation: that is a page in a frame deciding what the
+    // whole of Forge shows.
+    frame.setAttribute("sandbox", "allow-scripts allow-forms allow-same-origin allow-popups");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.src = url;
+    document.getElementById("pv-frames").appendChild(frame);
+    pv = { url, ws: ws || state.active, frame };
+    preview.open.set(url, pv);
+  }
   preview.url = url;
-  preview.ws = ws || state.active;
+  preview.ws = pv.ws;
+  for (const other of preview.open.values()) other.frame.hidden = other !== pv;
   document.getElementById("pv-url").value = url;
-  document.getElementById("pv-frame").src = url;
   document.getElementById("preview").hidden = false;
+  renderPreviewRail();
 }
 
-// hidePreview is the ✕, and it hides. The frame keeps its page and its scroll
-// position, because the expensive thing is not the frame — it is the tunnel
-// under it and whatever state the app in it is holding.
+// hidePreview is the ✕, and it hides. Every open preview keeps running; the
+// panel is what goes away, and the rail is how you come back.
 function hidePreview() {
   document.getElementById("preview").hidden = true;
   if (state.claude) state.claude.term.focus();
 }
 
-// closePreview is the one that actually ends it: the frame is emptied, so the
-// page stops running and stops asking for the port.
-function closePreview() {
-  preview.url = "";
-  preview.ws = null;
-  document.getElementById("pv-frame").src = "about:blank";
-  document.getElementById("pv-url").value = "";
-  document.getElementById("preview").hidden = true;
+// closePreview is the trash on a rail entry, and the only thing that ends one:
+// the frame is removed, so the page stops running and stops asking for the port.
+function closePreview(url) {
+  const pv = preview.open.get(url);
+  if (!pv) return;
+  pv.frame.remove();
+  preview.open.delete(url);
+
+  if (preview.url === url) {
+    const next = preview.open.values().next().value;
+    if (next) {
+      showPreview(next.url, next.ws);
+      return;
+    }
+    preview.url = "";
+    preview.ws = null;
+    document.getElementById("pv-url").value = "";
+    document.getElementById("preview").hidden = true;
+  }
+  renderPreviewRail();
+}
+
+// renderPreviewRail puts one entry in the rail per open preview: the way back to
+// it, and the only way to end it.
+function renderPreviewRail() {
+  const rail = document.getElementById("rail-previews");
+  if (!rail) return;
+  rail.replaceChildren(...[...preview.open.values()].map((pv) => {
+    const item = document.createElement("div");
+    item.className = "pv-item";
+
+    const open = document.createElement("button");
+    open.className = "rail-btn" + (pv.url === preview.url &&
+      !document.getElementById("preview").hidden ? " active" : "");
+    open.title = pv.url + (pv.ws ? ` · ${pv.ws}` : "");
+    open.innerHTML = '<span class="ico">▣</span>';
+    const cap = document.createElement("span");
+    cap.className = "cap";
+    // The port, because that is what tells two of these apart at a glance: they
+    // are all 127.0.0.1 and the number is the whole of the difference.
+    cap.textContent = previewLabel(pv.url);
+    open.appendChild(cap);
+    open.addEventListener("click", () => showPreview(pv.url, pv.ws));
+
+    const kill = document.createElement("button");
+    kill.className = "pv-kill";
+    kill.title = "Close — stops the page";
+    kill.setAttribute("aria-label", "Close preview " + pv.url);
+    kill.textContent = "✕";
+    kill.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closePreview(pv.url);
+    });
+
+    item.append(open, kill);
+    return item;
+  }));
+}
+
+// previewLabel is what a rail entry says. They are all on 127.0.0.1, so the port
+// is the whole of what tells two of them apart.
+function previewLabel(url) {
+  try {
+    const u = new URL(url);
+    return u.port || u.hostname;
+  } catch {
+    return url;
+  }
 }
 
 // previewURL is what an address bar may point at: a loopback address, and
@@ -3747,20 +3836,22 @@ function previewURL(raw) {
 }
 
 function initPreview() {
-  const frame = document.getElementById("pv-frame");
   const bar = document.getElementById("pv-url");
-  if (!frame || !bar) return;
+  if (!bar || !document.getElementById("pv-frames")) return;
 
   document.getElementById("pv-close").addEventListener("click", hidePreview);
+  const showing = () => preview.open.get(preview.url);
   document.getElementById("pv-reload").addEventListener("click", () => {
     // Re-assigning src rather than reaching into the frame: its document belongs
     // to another origin and asking it to reload is asking across that line.
-    if (preview.url) frame.src = preview.url;
+    const pv = showing();
+    if (pv) pv.frame.src = pv.url;
   });
   document.getElementById("pv-back").addEventListener("click", () => {
     // Same reason: history.back() inside a cross-origin frame is not ours to
     // call, so back is back to where this preview started.
-    if (preview.url) frame.src = preview.url;
+    const pv = showing();
+    if (pv) pv.frame.src = pv.url;
   });
   document.getElementById("pv-out").addEventListener("click", () => {
     if (preview.url) window.open(preview.url, "_blank", "noopener");
