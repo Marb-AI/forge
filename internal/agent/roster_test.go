@@ -399,3 +399,50 @@ func TestSettingTheRangeDoesNotLoseWorkspaces(t *testing.T) {
 		t.Errorf("the range is %+v, want the one that was set", r.PortRange)
 	}
 }
+
+// Everything MkdirAll made is handed over, not just the last two levels.
+//
+// This is the bug a workspace hit in production: writeUsageCmd does MkdirAll on
+// <home>/.local/bin, which creates `.local` as well, and the chown that followed
+// named only the file and `.local/bin`. `.local` stayed root's, and the Claude
+// installer — running as the workspace — could not then make `.local/share`
+// inside it: EACCES, and a workspace created without Claude in it.
+//
+// It never showed on a fresh workspace, because these commands are seeded after
+// the install and the installer makes `.local` itself. It showed when the usage
+// sweep reached a workspace mid-creation and got there first.
+func TestSeedingACommandHandsOverEveryDirectoryItMade(t *testing.T) {
+	home := "/home/workspaces/ws"
+
+	got := ownedPaths(home, home+"/.local/bin/forge-usage")
+	want := []string{
+		home + "/.local/bin/forge-usage",
+		home + "/.local/bin",
+		home + "/.local", // the one that was missed
+	}
+	if len(got) != len(want) {
+		t.Fatalf("would chown %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chown[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// And it stops at the home. Walking past it would hand /home/workspaces — or /
+// — to one workspace, which is a far worse bug than the one being fixed.
+func TestHandingOverStopsAtTheWorkspacesOwnHome(t *testing.T) {
+	home := "/home/workspaces/ws"
+
+	for _, p := range ownedPaths(home, home+"/.claude/forge-topic") {
+		if !strings.HasPrefix(p, home+"/") {
+			t.Errorf("would chown %q, which is outside the workspace's home", p)
+		}
+	}
+	// A path that is the home itself hands over nothing: there is no level
+	// between them, and the home already belongs to the workspace.
+	if got := ownedPaths(home, home); len(got) != 0 {
+		t.Errorf("ownedPaths(home, home) = %v, want nothing", got)
+	}
+}

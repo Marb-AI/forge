@@ -1142,11 +1142,7 @@ func seedUsageCmd(home, name string) error {
 	if err := writeUsageCmd(home); err != nil {
 		return err
 	}
-	path := filepath.Join(home, usageCmdRelPath)
-	if out, err := run("chown", name+":"+name, path, filepath.Dir(path)); err != nil {
-		return fmt.Errorf("chown usage cmd: %v: %s", err, out)
-	}
-	return nil
+	return chownUnderHome(home, name, filepath.Join(home, usageCmdRelPath))
 }
 
 // writeUsageCmd writes the script and its directory; split out so it can be tested
@@ -1567,11 +1563,7 @@ func seedTopicCmd(home, name string) error {
 	if err := writeTopicCmd(home); err != nil {
 		return err
 	}
-	path := filepath.Join(home, topicCmdRelPath)
-	if out, err := run("chown", name+":"+name, path, filepath.Dir(path)); err != nil {
-		return fmt.Errorf("chown topic cmd: %v: %s", err, out)
-	}
-	return nil
+	return chownUnderHome(home, name, filepath.Join(home, topicCmdRelPath))
 }
 
 // writeTopicCmd writes the script and its directory; split out so it can be tested
@@ -1770,11 +1762,7 @@ func seedPortsCmd(home, name string) error {
 	if err := writePortsCmd(home); err != nil {
 		return err
 	}
-	path := filepath.Join(home, portsCmdRelPath)
-	if out, err := run("chown", name+":"+name, path, filepath.Dir(path)); err != nil {
-		return fmt.Errorf("chown ports cmd: %v: %s", err, out)
-	}
-	return nil
+	return chownUnderHome(home, name, filepath.Join(home, portsCmdRelPath))
 }
 
 // writePortsCmd writes the script and its directory; split out so it can be tested
@@ -1927,6 +1915,38 @@ func seedSSH(home, name string, pubkey []byte) error {
 // hostKeyDir holds the host-wide git identity created by `forge host prepare`.
 // hostGhDir holds the host-wide gh credential created by `forge host gh-login`.
 // Both are copied into each workspace at create. Kept in sync with internal/cli.
+
+// ownedPaths is a file inside a workspace's home, and every directory between
+// the two.
+//
+// It exists because os.MkdirAll creates every missing level and the chown that
+// followed it named only two: the file and its parent. `.local` was left owned
+// by root, and the Claude installer — running as the workspace — then could not
+// make `.local/share` inside it. On a fresh workspace that never showed, because
+// these commands are seeded after the install, which creates `.local` itself; it
+// showed when the usage sweep reached a workspace mid-creation and got there
+// first.
+//
+// Deepest first, which is only for the reading: chown does not care, and a
+// person looking at the argv should see the file it was about.
+func ownedPaths(home, path string) []string {
+	var out []string
+	for p := path; p != home && p != "/" && p != "."; p = filepath.Dir(p) {
+		out = append(out, p)
+	}
+	return out
+}
+
+// chownUnderHome hands a seeded command, and everything created to hold it, to
+// the workspace.
+func chownUnderHome(home, name, path string) error {
+	args := append([]string{name + ":" + name}, ownedPaths(home, path)...)
+	if out, err := run("chown", args...); err != nil {
+		return fmt.Errorf("chown %s: %v: %s", filepath.Base(path), err, out)
+	}
+	return nil
+}
+
 // hostKeyDir is a var rather than a const so the tests can point it somewhere
 // they may write — the same reason baseDir is one. Nothing changes it at runtime.
 //
