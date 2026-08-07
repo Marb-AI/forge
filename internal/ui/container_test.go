@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -34,16 +35,29 @@ func TestTheContainerAndCIInstallTheSamePackages(t *testing.T) {
 		}
 	}
 
-	// And neither may quietly grow one the other has not heard of.
+	// And CI's list is exactly this one, so adding a package there without adding
+	// it here fails. Without that the `want` list is a floor rather than the
+	// answer, and two files could drift together past a test that says they
+	// cannot.
+	//
+	// Only CI is held to the exact set: the Dockerfile legitimately installs more
+	// (a compiler, pkg-config, libc6-dev), which the workflow gets from the
+	// runner image.
 	dev := regexp.MustCompile(`lib[a-z0-9.-]+-dev`)
-	inDocker := set(dev.FindAllString(dockerfile, -1))
 	inCI := set(dev.FindAllString(workflow, -1))
-	for pkg := range inCI {
-		if !inDocker[pkg] {
-			t.Errorf("CI installs %s and the container does not — the container would "+
-				"pass what CI fails", pkg)
-		}
+	if len(inCI) != len(want) {
+		t.Errorf("CI installs %v; this test knows about %v — one of them has moved on",
+			keys(inCI), want)
 	}
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func set(items []string) map[string]bool {

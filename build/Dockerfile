@@ -37,6 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgtk-4-dev libwebkitgtk-6.0-dev libx11-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# The module cache is a volume mounted here, and the container runs as whatever
+# uid the host has. Docker seeds a fresh named volume from the image, so if this
+# does not exist and is not writable by an arbitrary uid, the first `go test`
+# cannot write a single downloaded module.
+#
+# 777 rather than a uid: there is no uid to name. The one that will run this is
+# the developer's, and it is not in this image's /etc/passwd.
+RUN mkdir -p /go/pkg/mod /go/bin && chmod -R 777 /go
+
 WORKDIR /src
 
 # ---- android ----------------------------------------------------------------

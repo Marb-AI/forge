@@ -95,7 +95,15 @@ GID := $(shell id -g)
 # A named volume for the module cache: without it every run downloads the world,
 # and a bind mount of ~/go would be the container reaching back onto the machine
 # this exists to stay off.
-RUN := $(DOCKER) run --rm -u $(UID):$(GID) 	-v "$(CURDIR)":/src -v forge-gomod:/go/pkg/mod -e GOFLAGS=-buildvcs=false 	-w /src
+# HOME is set because the uid this runs as is not in the image's /etc/passwd:
+# os.UserHomeDir would have nothing to answer with, and Go's own caches would go
+# looking for a home that is not there. Pointing them at /tmp is also the last
+# piece of what this container is for — nothing it runs can resolve a home that
+# belongs to anybody.
+DOCKERENV := -e HOME=/tmp -e GOCACHE=/tmp/go-build -e GOFLAGS=-buildvcs=false
+MOUNTS := -v "$(CURDIR)":/src -v forge-gomod:/go/pkg/mod -w /src
+
+RUN := $(DOCKER) run --rm -u $(UID):$(GID) $(MOUNTS) $(DOCKERENV)
 
 image:
 	$(DOCKER) build --target test -t $(IMAGE) -f build/Dockerfile .
@@ -110,7 +118,7 @@ docker-test: image
 
 # A prompt inside it, for when something needs looking at rather than running.
 shell: image
-	$(DOCKER) run --rm -it -u $(UID):$(GID) 		-v "$(CURDIR)":/src -v forge-gomod:/go/pkg/mod -w /src $(IMAGE) bash
+	$(DOCKER) run --rm -it -u $(UID):$(GID) $(MOUNTS) $(DOCKERENV) $(IMAGE) bash
 
 fmt:
 	go fmt ./...
