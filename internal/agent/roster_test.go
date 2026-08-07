@@ -446,3 +446,17 @@ func TestHandingOverStopsAtTheWorkspacesOwnHome(t *testing.T) {
 		t.Errorf("ownedPaths(home, home) = %v, want nothing", got)
 	}
 }
+
+// A path that is not under the home hands over nothing, and neither does a
+// trailing slash on either side. Both would walk past the stop and reach
+// /home/workspaces, which is one workspace being given every other one.
+func TestHandingOverIsNotFooledByHowAPathIsWritten(t *testing.T) {
+	if got := ownedPaths("/home/workspaces/ws/", "/home/workspaces/ws/.local/bin/x"); len(got) != 3 {
+		t.Errorf("a trailing slash on the home gave %v", got)
+	}
+	for _, outside := range []string{"/etc/passwd", "/home/workspaces/other/.local/bin/x", "/"} {
+		if got := ownedPaths("/home/workspaces/ws", outside); got != nil {
+			t.Errorf("a path outside the home (%s) would chown %v", outside, got)
+		}
+	}
+}

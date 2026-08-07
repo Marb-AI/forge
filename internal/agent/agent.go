@@ -1930,8 +1930,17 @@ func seedSSH(home, name string, pubkey []byte) error {
 // Deepest first, which is only for the reading: chown does not care, and a
 // person looking at the argv should see the file it was about.
 func ownedPaths(home, path string) []string {
+	// Cleaned first: a trailing slash on either would make the comparison below
+	// miss the home and walk past it, and what is past it is /home/workspaces.
+	home, path = filepath.Clean(home), filepath.Clean(path)
 	var out []string
-	for p := path; p != home && p != "/" && p != "."; p = filepath.Dir(p) {
+	for p := path; p != home; p = filepath.Dir(p) {
+		// The filesystem root is where Dir stops changing anything. Naming "/" and
+		// "." instead would be naming two of the shapes it can take rather than the
+		// condition, and a path that reached neither would loop.
+		if parent := filepath.Dir(p); parent == p {
+			return nil // path is not under home at all; hand over nothing
+		}
 		out = append(out, p)
 	}
 	return out
