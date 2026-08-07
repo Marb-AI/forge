@@ -41,7 +41,19 @@ your PATH (`forge-windows-amd64.exe` on Windows).
 
 ## Quick start
 
-Point Forge at a **bare** server — connect as **root** or a passwordless-sudo
+First, once per machine:
+
+```sh
+forge setup
+```
+
+That makes this device an Ed25519 key of its own and prints the one line that
+goes into a server's `authorized_keys` — into a new VPS's cloud-init, or appended
+by hand to one that already exists. Nothing else creates it: a key that appears
+as a side effect is one nobody decided to trust. Run it again whenever you add a
+server; it prints the same line and changes nothing.
+
+Then point Forge at a **bare** server — connect as **root** or a passwordless-sudo
 user, and it provisions everything, no cloud-console clicking:
 
 ```sh
@@ -127,6 +139,9 @@ reattach over SSH from your laptop. It's always right where you left it.
 | **Workspace** | an isolated Linux user on a host (`crm`), with its own home, git config, keys, and one Claude session |
 | **Claude session** | a background tmux session that keeps Claude alive across disconnects |
 | **Forwarding** | keeps your dev servers tunnelled to `localhost`, following what they publish and auto-reconnecting through blips and reboots |
+| **Device key** | the key this machine reaches your servers with, made by `forge setup` and kept in `~/.forge`. Not yours from `~/.ssh` — a phone has neither |
+| **Pairing** | how a second device gets in: it says its public key, this one puts it on every server and hands back the list of them. No account, no service in the middle |
+| **Chat** | the other way into a workspace's Claude, alongside the terminal. Same session, without a TUI — which is what makes it usable on a phone |
 
 ---
 
@@ -166,13 +181,14 @@ To keep tunnels alive across laptop reboots, add one line to your shell rc
 forge spawn >/dev/null 2>&1
 ```
 
-> **Why the workspace has its own key.** `forge workspace <name> ssh` also
-> forwards your local SSH agent, which is handy in an interactive shell. But a
-> forwarded agent cannot serve the Claude session: tmux outlives the SSH
-> connection that started it, so the forwarded socket is stale on reattach — and
-> gone entirely once your laptop sleeps, which is the case Forge exists for. The
-> key copied in at `workspace create` is on disk in the workspace, so Claude can
-> clone, pull and push with your laptop shut.
+> **Why the workspace has its own key.** Nothing of yours is lent to a shell
+> there, and nothing could usefully be: a forwarded agent cannot serve the Claude
+> session, because tmux outlives the SSH connection that started it — the socket
+> is stale on reattach and gone once your laptop sleeps, which is the case Forge
+> exists for. The key `host prepare` puts on the server is on disk there, so
+> Claude can clone, pull and push with your laptop shut, and everything from that
+> machine pushes under one identity rather than two depending on who opened the
+> shell.
 
 > **One key per host, not per workspace.** Every workspace on a host shares the
 > host's identity. That matches the boundary Forge actually draws: workspaces are
@@ -201,8 +217,20 @@ Hosts
        [--jump=<[user@]host[:port],...>]          reach it through these servers (both commands;
                                                   prepare keeps a recorded route when re-run
                                                   without it, and --jump= clears it)
+  forge host adopt [alias]                        tell the server(s) which workspaces are
+                                                  Forge's — run once per server, after
+                                                  `host update`, so a second device can
+                                                  see them
   forge host list
   forge host remove <alias>
+
+This device
+  forge setup                                     its key, and the line that lets it onto
+                                                  a server. Idempotent
+  forge pair <public key>                         let another device onto every server —
+                                                  its login and every workspace — and print
+                                                  a pairing
+  forge pair --accept <pairing>                   on that other device: learn the servers
 
 Workspaces
   forge workspace create <name> <host-alias>
@@ -210,7 +238,7 @@ Workspaces
   forge workspace list                            NAME  HOST  CLAUDE  (your workspaces; the
                                                   status is the Claude session's)
 
-  forge workspace <name> ssh [--no-agent]         shell as the workspace user (agent forwarded by default)
+  forge workspace <name> ssh                      shell as the workspace user
   forge workspace <name> claude                   open the Claude session (attach-or-create)
   forge workspace <name> claude renew             fresh session (reset context / save tokens)
   forge workspace <name> claude stop              stop the session
@@ -294,6 +322,15 @@ same code, not a reimplementation that quietly drifts.
   session `forge workspace <name> claude` attaches to, so closing the tab just
   detaches — Claude keeps working. Its clickable options work too: a mouse click
   is just more input, and it takes the same path as typing.
+- **Chat**, in the rail, is the other way into the same Claude: a prompt goes to
+  the workspace's own session and the answer streams back as it is written. It is
+  the same binary, the same login and the same conversation the terminal has —
+  headless rather than a second Claude. A turn runs in tmux on the server, so it
+  finishes whether or not you are watching, and reloading the page brings the
+  conversation back rather than an empty box.
+- **The preview**: alt-click a published port and it opens inside Forge instead
+  of in another window, with an address bar. On a phone that is the only way it
+  works — a tunnel lives in the app, so switching to a browser takes it with you.
 - **Checkpoint, restart, stop/start** on the right, wired to the commands of the
   same name. A stopped session doesn't quietly come back the moment you click its
   tab — it shows a **Start** button, and starting it is exactly

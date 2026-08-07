@@ -30,19 +30,23 @@ type ExitError struct{ Err error }
 func (e *ExitError) Error() string { return e.Err.Error() }
 func (e *ExitError) Unwrap() error { return e.Err }
 
-// Shell opens a login shell as the workspace user. With agent set, the local SSH
-// agent is forwarded, so git operations inside the workspace use your keys with
-// no credential ever stored on the server.
-func Shell(name string, agent bool, out io.Writer) error {
+// Shell opens a login shell as the workspace user, and lends it nothing.
+//
+// It used to forward the local SSH agent, so that git in the workspace used your
+// keys. The browser's version of this shell stopped doing that when Forge got a
+// key of its own, and this one did not — which meant the same repository was
+// pushed under two different identities depending on which of the two you
+// happened to open. That is the exact confusion the change was supposed to end.
+//
+// Nothing is lent now, either way: git on the server runs under the identity
+// `host prepare` put there, which is the one registered on GitHub, and forwarding
+// an agent on top of it only obscures who is pushing.
+func Shell(name string, out io.Writer) error {
 	target, err := workspaceTarget(name)
 	if err != nil {
 		return err
 	}
-	args := target.TTYArgs()
-	if agent {
-		args = append([]string{"-A"}, args...)
-	}
-	return interactive(out, args)
+	return interactive(out, target.TTYArgs())
 }
 
 // AttachClaude attaches to the workspace's Claude session, starting one if there

@@ -1,6 +1,7 @@
 package sshx
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -204,5 +205,34 @@ func TestNoIdentityFileMeansNoArgumentForIt(t *testing.T) {
 
 	if got := joined(Target{User: "u", Addr: "h"}.Args("id")); strings.Contains(got, "-i ") {
 		t.Errorf("argv names a key file this device does not have: %s", got)
+	}
+}
+
+// Dropping -A stops Forge asking for agent forwarding. It does not stop the
+// user's own ~/.ssh/config turning it on.
+//
+// `ForwardAgent yes` for a host in that file applies to every ssh to it,
+// including these, and the agent would be on the far end with nothing here
+// having mentioned it — while the Go client, which cannot be configured into it,
+// would not do the same. The two backends have to mean the same thing.
+//
+// The reason it matters is 2.2: git on the server runs under the identity `host
+// prepare` put there, and an agent on top of it only obscures who is pushing.
+func TestNoArgvAsksForAnAgentOrLetsOneBeConfiguredIn(t *testing.T) {
+	target := Target{User: "ws", Addr: "10.0.0.1"}
+
+	for name, args := range map[string][]string{
+		"Args":             target.Args("true"),
+		"TTYArgs":          target.TTYArgs(),
+		"LocalForwardArgs": target.LocalForwardArgs(16000, 16000),
+	} {
+		joined := strings.Join(args, " ")
+		if slices.Contains(args, "-A") {
+			t.Errorf("%s asks for agent forwarding: %s", name, joined)
+		}
+		if !strings.Contains(joined, "ForwardAgent=no") {
+			t.Errorf("%s leaves agent forwarding to ~/.ssh/config, which can turn it "+
+				"on for this host: %s", name, joined)
+		}
 	}
 }
