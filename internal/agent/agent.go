@@ -92,6 +92,36 @@ func Main(args []string) int {
 	}
 }
 
+// mayResume decides what an existing home means, which is the whole of what
+// makes a failed create repeatable.
+//
+// Creating a workspace is a dozen steps and the slowest of them installs Claude
+// Code over the network. When a later one fails the account and its home are
+// real, and refusing every attempt after that made the failure permanent: the
+// client never recorded the workspace, so `workspace delete` would not touch it
+// either, and the only way out was userdel by hand on the server.
+//
+// Ours is resumed. Not ours is refused, as it always was — resuming into an
+// account somebody else made would write keys and a git identity into a home
+// that is not ours to touch, which is worse than the failure being fixed.
+//
+// Separate from opCreate so it can be decided without running a single command:
+// what the answer turns on is two files, and the rest of that function is
+// useradd, chown and an installer.
+func mayResume(name, home string) (bool, error) {
+	if _, err := os.Stat(home); err != nil {
+		return false, nil // nothing there; an ordinary create
+	}
+	r, err := readRoster()
+	if err != nil {
+		return false, fmt.Errorf("read the workspace record: %v", err)
+	}
+	if !slices.Contains(r.Workspaces, name) {
+		return false, fmt.Errorf("workspace %q already exists", name)
+	}
+	return true, nil
+}
+
 func opCreate(args []string) int {
 	fs := flag.NewFlagSet("workspace-create", flag.ContinueOnError)
 	name := fs.String("name", "", "workspace name")
@@ -117,29 +147,11 @@ func opCreate(args []string) int {
 	}
 
 	home := filepath.Join(baseDir, *name)
-	// A home that is already there is either somebody else's account or a create
-	// of ours that did not finish, and those want opposite answers.
-	//
-	// Creating a workspace is a dozen steps and the slowest of them installs
-	// Claude Code over the network. When one fails the account and its home are
-	// real, and refusing every later attempt made that permanent: the client
-	// never recorded the workspace, so `workspace delete` would not touch it
-	// either, and the only way out was userdel by hand on the server. That is
-	// what happened to a workspace on 2026-08-07.
-	//
-	// So: ours, and it is resumed. Not ours, and it is refused as it always was —
-	// an account somebody else made is not something to write into.
-	resuming := false
-	if _, err := os.Stat(home); err == nil {
-		r, err := readRoster()
-		if err != nil {
-			return emitError("read the workspace record: %v", err)
-		}
-		if !slices.Contains(r.Workspaces, *name) {
-			return emitError("workspace %q already exists", *name)
-		}
-		resuming = true
+	resuming, err := mayResume(*name, home)
+	if err != nil {
+		return emitError("%v", err)
 	}
+
 	if block != nil {
 		if other := blockConflict(*name, *block); other != "" {
 			return emitError("ports %d-%d overlap workspace %q, which already holds them",
@@ -160,6 +172,11 @@ func opCreate(args []string) int {
 		// only on success would call that account somebody else's — which is what
 		// made a failed create unrepeatable.
 		if err := recordWorkspace(*name); err != nil {
+			// And if even that fails, the account goes back: leaving one behind
+			// unrecorded rebuilds the trap this whole change exists to remove, since
+			// the next attempt would find a home nothing claims. Best-effort, because
+			// there is nothing useful to say if the undo fails too.
+			_, _ = run("userdel", "-r", *name)
 			return emitError("record %q: %v", *name, err)
 		}
 	}
