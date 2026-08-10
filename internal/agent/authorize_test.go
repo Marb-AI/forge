@@ -10,14 +10,16 @@ import (
 
 const aKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIsecond forge@phone"
 
-// noChown stands in for the real one: these accounts do not exist on a machine
-// running tests, and what is being tested is which files are written, not that
-// the OS can chown to a user it has never heard of. It records what it was asked
-// for, so the *choice* of account is still checked.
-// noChown lets the chowns through and remembers them. The accounts do not exist
-// on a machine running tests, and what is being checked is which files are
-// written and to whom they would be handed — not that the OS can chown to a user
-// it has never heard of.
+// noChown watches the chowns instead of performing them, and answers who a
+// directory would have been handed to.
+//
+// The accounts do not exist on a machine running tests, and what is worth
+// checking is not that the OS can chown to a user it has never heard of — it is
+// which directories are handed over and to whom. Both are visible in the
+// arguments.
+//
+// The name is what it was when it stubbed a chownTo of its own; it stubs `run`
+// now, like everything else here.
 func noChown(t *testing.T) func(dir string) string {
 	t.Helper()
 	seen := stubRun(t, nil)
