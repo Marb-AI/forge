@@ -1,9 +1,27 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
+
+// stubRun stands in for the host for one test, and hands back what was asked of
+// it in the order it was asked.
+func stubRun(t *testing.T, fn func(name string, args ...string) (string, error)) *[][]string {
+	t.Helper()
+	var seen [][]string
+	prev := run
+	run = func(name string, args ...string) (string, error) {
+		seen = append(seen, append([]string{name}, args...))
+		if fn != nil {
+			return fn(name, args...)
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { run = prev })
+	return &seen
+}
 
 // TestMain points HOME at a throwaway directory for the whole package, before
 // any test runs.
@@ -21,7 +39,20 @@ import (
 // tests that remember, and the one that forgets writes to a real file on a real
 // machine. There is nothing to remember now — and the code under test honours
 // HOME, which is the other half of it.
+// It also takes the host away. Every command this package runs goes through
+// `run`, and here that becomes something which refuses and says which command
+// was attempted — so a test that reaches for useradd fails on the spot instead
+// of passing because the developer's machine happens not to have it.
+//
+// A test that genuinely needs to watch a command calls stubRun. Nothing can
+// touch the host by accident any more, which matters more now than it did:
+// these run in a container, on Linux, where every one of them would work.
 func TestMain(m *testing.M) {
+	run = func(name string, args ...string) (string, error) {
+		return "", fmt.Errorf("this test ran %q on the host; stub it with stubRun "+
+			"if the test needs to watch commands", name)
+	}
+
 	dir, err := os.MkdirTemp("", "forge-agent-test")
 	if err != nil {
 		panic(err)

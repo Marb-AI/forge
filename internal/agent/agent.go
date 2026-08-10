@@ -2331,7 +2331,21 @@ func migrateMetadata(name string) {
 }
 
 // run executes a command and returns combined output for error context.
-func run(name string, args ...string) (string, error) {
+// run executes a command on this host and returns what it said.
+//
+// A variable, so that a test which reaches one is a test that fails rather than
+// one that quietly passes. That distinction is not theoretical: tests here once
+// called opCreate, which runs useradd, usermod, chown and an installer. On the
+// developer's Mac those failed and the tests passed anyway, which hid what they
+// were reaching for — and the container this now builds in runs on a machine
+// where they would have worked.
+//
+// TestMain replaces this with something that refuses and says so. A test that
+// genuinely needs to watch a command stubs it deliberately; there is no way left
+// to touch the host by accident.
+var run = runHost
+
+func runHost(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
