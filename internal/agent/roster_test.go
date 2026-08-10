@@ -517,3 +517,41 @@ func TestANameNobodyHasTakenIsAnOrdinaryCreate(t *testing.T) {
 		t.Errorf("mayResume on a free name = (%v, %v), want (false, nil)", resume, err)
 	}
 }
+
+// A test that reaches the host fails, rather than passing because this machine
+// happens not to have the command.
+//
+// That is not theoretical: tests here once called opCreate, which runs useradd,
+// usermod, chown and an installer. On a Mac those fail and the test passed
+// anyway, which hid what it was reaching for — and these now run in a container,
+// on Linux, where every one of them would have worked.
+func TestReachingTheHostFromATestIsAnError(t *testing.T) {
+	// No stubRun here on purpose: this is the default a test starts in.
+	out, err := run("useradd", "-m", "victim")
+	if err == nil {
+		t.Fatalf("a test ran useradd on the host and it worked (%q)", out)
+	}
+	if !strings.Contains(err.Error(), "useradd") || !strings.Contains(err.Error(), "stubRun") {
+		t.Errorf("the refusal does not say what was run or what to do: %v", err)
+	}
+}
+
+// And a test that means to watch commands sees them, in order, with their
+// arguments — which is what makes the choice of account checkable without any
+// account existing.
+func TestATestThatMeansToWatchCommandsSeesThem(t *testing.T) {
+	seen := stubRun(t, nil)
+
+	_, _ = run("chown", "-R", "ws:ws", "/home/workspaces/ws/.ssh")
+	_, _ = run("userdel", "-r", "ws")
+
+	if len(*seen) != 2 {
+		t.Fatalf("saw %v, want both commands", *seen)
+	}
+	if (*seen)[0][0] != "chown" || (*seen)[0][2] != "ws:ws" {
+		t.Errorf("the first command came back as %v", (*seen)[0])
+	}
+	if (*seen)[1][0] != "userdel" {
+		t.Errorf("the second command came back as %v", (*seen)[1])
+	}
+}

@@ -10,20 +10,28 @@ import (
 
 const aKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIsecond forge@phone"
 
-// noChown stands in for the real one: these accounts do not exist on a machine
-// running tests, and what is being tested is which files are written, not that
-// the OS can chown to a user it has never heard of. It records what it was asked
-// for, so the *choice* of account is still checked.
-func noChown(t *testing.T) *map[string]string {
+// noChown watches the chowns instead of performing them, and answers who a
+// directory would have been handed to.
+//
+// The accounts do not exist on a machine running tests, and what is worth
+// checking is not that the OS can chown to a user it has never heard of — it is
+// which directories are handed over and to whom. Both are visible in the
+// arguments.
+//
+// The name is what it was when it stubbed a chownTo of its own; it stubs `run`
+// now, like everything else here.
+func noChown(t *testing.T) func(dir string) string {
 	t.Helper()
-	seen := map[string]string{}
-	prev := chownTo
-	chownTo = func(owner, dir string) error {
-		seen[dir] = owner
-		return nil
+	seen := stubRun(t, nil)
+	return func(dir string) string {
+		for _, cmd := range *seen {
+			// chown -R <owner> <dir>
+			if len(cmd) == 4 && cmd[0] == "chown" && cmd[3] == dir {
+				return cmd[2]
+			}
+		}
+		return ""
 	}
-	t.Cleanup(func() { chownTo = prev })
-	return &seen
 }
 
 func authorized(t *testing.T, home string) string {
@@ -49,7 +57,7 @@ func TestAuthorisingReachesTheWorkspacesToo(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", t.TempDir()) // narrower still than the package's, per test
-	owners := noChown(t)
+	ownerOf := noChown(t)
 
 	out := captureStdout(t)
 	if code := opAuthorizeKey([]string{"-key", base64.StdEncoding.EncodeToString([]byte(aKey))}); code != 0 {
@@ -72,7 +80,7 @@ func TestAuthorisingReachesTheWorkspacesToo(t *testing.T) {
 	// key that silently does not work.
 	for _, name := range []string{"one", "two"} {
 		dir := filepath.Join(baseDir, name, ".ssh")
-		if got := (*owners)[dir]; got != name+":"+name {
+		if got := ownerOf(dir); got != name+":"+name {
 			t.Errorf("%s would be owned by %q, want %q", dir, got, name+":"+name)
 		}
 	}
@@ -231,7 +239,7 @@ func TestRerunningRepairsOwnershipWithNothingToAdd(t *testing.T) {
 	out()
 
 	// Second run: the key is already there, and the ownership still has to be set.
-	owners := noChown(t)
+	ownerOf := noChown(t)
 	out = captureStdout(t)
 	if code := opAuthorizeKey([]string{"-key", enc}); code != 0 {
 		t.Fatalf("the second run exited %d: %s", code, out())
@@ -239,7 +247,7 @@ func TestRerunningRepairsOwnershipWithNothingToAdd(t *testing.T) {
 	out()
 
 	dir := filepath.Join(baseDir, "one", ".ssh")
-	if got := (*owners)[dir]; got != "one:one" {
+	if got := ownerOf(dir); got != "one:one" {
 		t.Errorf("the second run did not hand %s back to the workspace (got %q) — "+
 			"a file left owned by root is one sshd refuses", dir, got)
 	}
