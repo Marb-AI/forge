@@ -18,6 +18,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -91,6 +92,36 @@ func Main(args []string) int {
 	}
 }
 
+// mayResume decides what an existing home means, which is the whole of what
+// makes a failed create repeatable.
+//
+// Creating a workspace is a dozen steps and the slowest of them installs Claude
+// Code over the network. When a later one fails the account and its home are
+// real, and refusing every attempt after that made the failure permanent: the
+// client never recorded the workspace, so `workspace delete` would not touch it
+// either, and the only way out was userdel by hand on the server.
+//
+// Ours is resumed. Not ours is refused, as it always was — resuming into an
+// account somebody else made would write keys and a git identity into a home
+// that is not ours to touch, which is worse than the failure being fixed.
+//
+// Separate from opCreate so it can be decided without running a single command:
+// what the answer turns on is two files, and the rest of that function is
+// useradd, chown and an installer.
+func mayResume(name, home string) (bool, error) {
+	if _, err := os.Stat(home); err != nil {
+		return false, nil // nothing there; an ordinary create
+	}
+	r, err := readRoster()
+	if err != nil {
+		return false, fmt.Errorf("read the workspace record: %v", err)
+	}
+	if !slices.Contains(r.Workspaces, name) {
+		return false, fmt.Errorf("workspace %q already exists", name)
+	}
+	return true, nil
+}
+
 func opCreate(args []string) int {
 	fs := flag.NewFlagSet("workspace-create", flag.ContinueOnError)
 	name := fs.String("name", "", "workspace name")
@@ -116,9 +147,11 @@ func opCreate(args []string) int {
 	}
 
 	home := filepath.Join(baseDir, *name)
-	if _, err := os.Stat(home); err == nil {
-		return emitError("workspace %q already exists", *name)
+	resuming, err := mayResume(*name, home)
+	if err != nil {
+		return emitError("%v", err)
 	}
+
 	if block != nil {
 		if other := blockConflict(*name, *block); other != "" {
 			return emitError("ports %d-%d overlap workspace %q, which already holds them",
@@ -130,8 +163,22 @@ func opCreate(args []string) int {
 		return emitError("mkdir %s: %v", baseDir, err)
 	}
 	// Create the Linux user with its home under /home/workspaces.
-	if out, err := run("useradd", "-m", "-d", home, "-s", "/bin/bash", *name); err != nil {
-		return emitError("useradd: %v: %s", err, out)
+	if !resuming {
+		if out, err := run("useradd", "-m", "-d", home, "-s", "/bin/bash", *name); err != nil {
+			return emitError("useradd: %v: %s", err, out)
+		}
+		// Written down here, the moment the account exists, and not later: from now
+		// on everything can fail and leave a real account behind, and a record made
+		// only on success would call that account somebody else's — which is what
+		// made a failed create unrepeatable.
+		if err := recordWorkspace(*name); err != nil {
+			// And if even that fails, the account goes back: leaving one behind
+			// unrecorded rebuilds the trap this whole change exists to remove, since
+			// the next attempt would find a home nothing claims. Best-effort, because
+			// there is nothing useful to say if the undo fails too.
+			_, _ = run("userdel", "-r", *name)
+			return emitError("record %q: %v", *name, err)
+		}
 	}
 	// Best-effort: let the workspace use docker (soft isolation, by design).
 	if out, err := run("usermod", "-aG", "docker", *name); err != nil {
@@ -172,15 +219,6 @@ func opCreate(args []string) int {
 	// Own everything by the workspace user.
 	if out, err := run("chown", "-R", *name+":"+*name, home); err != nil {
 		return emitError("chown: %v: %s", err, out)
-	}
-
-	// And write it down as Forge's, here rather than at the end: what follows is
-	// installing Claude Code over the network, which is the slowest and least
-	// reliable part of this and leaves a real workspace behind when it fails. A
-	// record written only on complete success would call that workspace somebody
-	// else's, and nothing afterwards would ever say otherwise.
-	if err := recordWorkspace(*name); err != nil {
-		return emitError("record %q: %v", *name, err)
 	}
 
 	// Install Claude Code as the workspace user — a workspace exists to run it.

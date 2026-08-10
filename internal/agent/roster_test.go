@@ -460,3 +460,60 @@ func TestHandingOverIsNotFooledByHowAPathIsWritten(t *testing.T) {
 		}
 	}
 }
+
+// A workspace whose creation failed can be created again.
+//
+// Creating one is a dozen steps and the slowest installs Claude Code over the
+// network. When a later step fails the account and its home are real, and
+// refusing every attempt after that made the failure permanent: the client never
+// recorded the workspace, so `workspace delete` would not touch it either, and
+// the only way out was userdel by hand on the server. That happened on
+// 2026-08-07.
+//
+// The decision, not opCreate: running that would run useradd, usermod, chown and
+// an installer, which on a machine with the privilege to do them would create
+// real accounts — and this repository has already written to one real thing it
+// should not have.
+func TestAWorkspaceWhoseCreationFailedIsResumedNotRefused(t *testing.T) {
+	scratchHost(t, "half-made")
+	if err := recordWorkspace("half-made"); err != nil {
+		t.Fatal(err)
+	}
+
+	resume, err := mayResume("half-made", filepath.Join(baseDir, "half-made"))
+	if err != nil {
+		t.Fatalf("a workspace Forge made and did not finish was refused: %v", err)
+	}
+	if !resume {
+		t.Error("it would be created from scratch over an account that already exists")
+	}
+}
+
+// An account Forge did not make is still refused. Resuming into somebody else's
+// home would write keys and a git identity into an account that is not ours to
+// touch — worse than the failure being fixed.
+func TestAnAccountForgeDidNotMakeIsStillRefused(t *testing.T) {
+	scratchHost(t, "somebody-elses")
+
+	resume, err := mayResume("somebody-elses", filepath.Join(baseDir, "somebody-elses"))
+	if err == nil {
+		t.Fatal("an account Forge does not own was accepted")
+	}
+	if resume {
+		t.Error("it would be written into")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+}
+
+// And a name nothing has taken is an ordinary create, neither resumed nor
+// refused.
+func TestANameNobodyHasTakenIsAnOrdinaryCreate(t *testing.T) {
+	scratchHost(t)
+
+	resume, err := mayResume("fresh", filepath.Join(baseDir, "fresh"))
+	if err != nil || resume {
+		t.Errorf("mayResume on a free name = (%v, %v), want (false, nil)", resume, err)
+	}
+}
