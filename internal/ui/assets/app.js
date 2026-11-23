@@ -1134,9 +1134,13 @@ function windowSpan(label, w) {
   return el;
 }
 
+// A missing size is "not reported" and gives no number. A missing used is zero:
+// the wire omits zero values, and an empty context — a session that has not been
+// asked anything yet — is exactly when it is zero. Dividing the missing value
+// printed "NaN% context" on every fresh workspace.
 function contextPercent(u) {
   if (!u || !u.context_size) return null;
-  return Math.max(0, Math.min(100, (u.context_used / u.context_size) * 100));
+  return Math.max(0, Math.min(100, ((u.context_used || 0) / u.context_size) * 100));
 }
 
 // How old a reading may be before the row stops presenting it as current. These
