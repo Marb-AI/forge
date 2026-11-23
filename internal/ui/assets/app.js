@@ -160,6 +160,26 @@ async function loadWorkspaces({ maxAge = 0 } = {}) {
 // workspace happens to sort first. If the remembered one is gone — deleted, or
 // this is a first visit — fall back to the front of the list.
 const ACTIVE_KEY = "forge-active-tab";
+
+// Which face a workspace opens with on a wide screen — the chat or the terminal —
+// is the one you last picked for it by hand, per workspace: one is where you talk
+// to Claude, another is where you are watching a TUI do something long. Nothing
+// picked yet means the chat. See applyView for the one thing that overrides it.
+const VIEW_KEY = "forge-view";
+function savedViews() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}");
+    return v && typeof v === "object" ? v : {};
+  } catch {
+    return {};
+  }
+}
+function rememberView(ws, view) {
+  const v = savedViews();
+  v[ws] = view;
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify(v)); } catch { /* a preference, not state */ }
+}
+
 function initialWorkspace() {
   const saved = localStorage.getItem(ACTIVE_KEY);
   if (saved && state.workspaces.some((w) => w.name === saved)) return saved;
@@ -994,6 +1014,9 @@ async function pollUsage() {
       usage.loaded = true;
       renderLogins();
       renderIdent();
+      // A workspace opened before the first reading could not be told whether its
+      // Claude has a login; now it can.
+      if (state.viewPending && state.viewPending === state.active) applyView(state.active);
     }
   } catch {
     // A poll that didn't land leaves the last reading up, stamped with its own age.
@@ -1505,6 +1528,7 @@ function selectWs(name) {
   renderIdent();      // and where it runs
   renderTrackBanner(); // reflect the new workspace's clocks immediately
   pollTrack();         // and fetch its start/active without waiting for the interval
+  applyView(name);     // chat or terminal, whichever this workspace was left in
 }
 
 function hideSSHPanel() {
@@ -3324,33 +3348,87 @@ refreshPorts();
 const chat = {
   // ws -> {turn: the id being read, or null; es: its stream; live: the element
   //        partial text is accumulating into, or null; shown: whether the
-  //        conversation so far has been fetched into the DOM}
+  //        conversation so far has been fetched into the DOM; busy: a turn is
+  //        being sent or read; thread: this workspace's element in #chatlog;
+  //        hint: the invitation shown in it while it is empty}
   //
-  // The transcript itself is not in here: it is the DOM, and one workspace's
-  // conversation is on screen at a time. What survives a tab switch is on the
-  // host, which is where a reload will get it from.
+  // Every workspace has its own thread, and all of them sit in the one log with
+  // only the active one showing. One shared log was one conversation on screen
+  // and several being written into it: switching tabs appended the next
+  // workspace's history under the last one's, and an answer that arrived while
+  // you were looking elsewhere was dropped, because there was nowhere of its own
+  // to put it. What survives a reload is on the host.
   byWs: {},
 };
 
 function chatFor(ws) {
-  if (!chat.byWs[ws]) chat.byWs[ws] = { turn: null, es: null, live: null, shown: false };
-  return chat.byWs[ws];
+  let c = chat.byWs[ws];
+  if (c) return c;
+  const thread = document.createElement("div");
+  thread.className = "chat-thread";
+  thread.hidden = true;
+  const hint = document.getElementById("chat-hint").content.firstElementChild.cloneNode(true);
+  thread.appendChild(hint);
+  document.getElementById("chatlog").appendChild(thread);
+  c = { turn: null, es: null, live: null, shown: false, busy: false, thread, hint };
+  chat.byWs[ws] = c;
+  return c;
 }
 
 // toggleChat is what the rail button calls. Chat and the terminal are two faces
 // of one session, so this swaps which is showing rather than stacking anything.
+// A swap made by hand is what this workspace opens with next time — except on a
+// phone, where the chat is the only face and closing it says nothing about what
+// a wide window should show.
 function toggleChat() {
   if (!state.active) return;
-  const panel = document.getElementById("chatpanel");
-  const open = panel.hidden;
-  panel.hidden = !open;
-  setPanelActive(open ? "chat" : null);
-  if (open) {
-    chatShow(state.active);
-    document.getElementById("chatinput").focus();
-  } else if (state.claude) {
-    state.claude.term.focus();
+  const open = document.getElementById("chatpanel").hidden;
+  if (open) chatOpen(state.active, { focus: true });
+  else chatClose();
+  if (!isNarrow()) rememberView(state.active, open ? "chat" : "terminal");
+}
+
+function chatOpen(ws, { focus = false } = {}) {
+  document.getElementById("chatpanel").hidden = false;
+  setPanelActive("chat");
+  chatShow(ws);
+  if (focus) document.getElementById("chatinput").focus();
+}
+
+function chatClose() {
+  setPanelActive(null); // hides the chat panel too
+  if (state.claude) state.claude.term.focus();
+}
+
+// hasLogin says whether a workspace's Claude can answer a chat turn: true, false,
+// or null while no reading has come back from the hosts yet. Any way of paying
+// counts, not only a subscription — an API key or Bedrock answers a headless turn
+// just as well as a login does.
+function hasLogin(ws) {
+  if (!usage.loaded) return null;
+  const u = usage.data[ws];
+  return !!(u && (u.auth || (u.account && u.account.uuid)));
+}
+
+// applyView opens a workspace in the face it was last left in — the chat, unless
+// the terminal was picked for it. One thing overrides that: a Claude nobody has
+// signed in to. Signing in is an interactive prompt in the TUI, which the chat
+// cannot show or answer, so until there is a login the terminal is the only view
+// that leads anywhere. On a phone none of this applies; the chat is all there is.
+function applyView(ws) {
+  if (isNarrow() || !ws || ws !== state.active) return;
+  const login = hasLogin(ws);
+  // Unknown is not "no". Leave whatever is showing until the first reading
+  // lands; pollUsage comes back here when it does.
+  if (login === null) {
+    state.viewPending = ws;
+    return;
   }
+  state.viewPending = null;
+  const want = login ? savedViews()[ws] || "chat" : "terminal";
+  const showing = !document.getElementById("chatpanel").hidden;
+  if (want === "chat" && !showing) chatOpen(ws, { focus: true });
+  else if (want === "terminal" && showing) chatClose();
 }
 
 // chatShow puts a workspace's conversation on screen, fetching what came before
@@ -3363,20 +3441,28 @@ function toggleChat() {
 // one renderer and not two.
 function chatShow(ws) {
   const c = chatFor(ws);
+  for (const other of Object.values(chat.byWs)) other.thread.hidden = other !== c;
+  // The composer is shared, so it says what this workspace is doing, not what
+  // the one you left was.
+  chatComposer(c.busy);
+  const log = document.getElementById("chatlog");
+  log.scrollTop = log.scrollHeight;
   if (c.shown) return;
   c.shown = true;
 
-  const log = document.getElementById("chatlog");
-  const hint = document.getElementById("chat-empty");
+  // A read that failed earlier may have left part of a conversation behind.
+  // Starting from empty is what keeps a second read from saying it all twice.
+  for (const node of [...c.thread.children]) if (node !== c.hint) node.remove();
+  if (c.live) c.live = null;
+
   const es = new EventSource(`/api/chat/${encodeURIComponent(ws)}/history`);
   let any = false;
 
   es.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    if (ws !== state.active) return;
     any = true;
-    if (hint) hint.hidden = true;
+    c.hint.hidden = true;
     chatRender(c, msg);
   };
   // ok says whether the conversation actually arrived. A read that failed must
@@ -3388,15 +3474,15 @@ function chatShow(ws) {
     if (!ok) c.shown = false;
     // A conversation nobody has started yet is not a failure, and the invitation
     // to start one should still be there.
-    if (!any && hint) hint.hidden = false;
+    if (!any) c.hint.hidden = false;
     if (c.live) { c.live.classList.remove("live"); c.live = null; }
-    log.scrollTop = log.scrollHeight;
+    if (!c.thread.hidden) log.scrollTop = log.scrollHeight;
   };
   es.addEventListener("done", () => stop(true));
   es.addEventListener("failed", (ev) => {
     let why = "the conversation could not be read";
     try { why = JSON.parse(ev.data) || why; } catch { /* keep the default */ }
-    chatAppend(chatNode("chat-note bad", why));
+    chatAppend(c, chatNode("chat-note bad", why));
     stop(false);
   });
   // History is finite and asked for once. The browser would otherwise reconnect
@@ -3408,12 +3494,13 @@ function chatShow(ws) {
 // chatAppend adds a node and keeps the view at the bottom, but only if it was
 // already there: a reader scrolled up to something Claude said four tool calls
 // ago is reading it, and yanking them back down is the one thing a log must not
-// do.
-function chatAppend(node) {
+// do. A thread that is not showing is written to and left alone: scrolling the
+// log for it would move the conversation you are actually reading.
+function chatAppend(c, node) {
   const log = document.getElementById("chatlog");
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-  log.appendChild(node);
-  if (atBottom) log.scrollTop = log.scrollHeight;
+  c.thread.appendChild(node);
+  if (atBottom && !c.thread.hidden) log.scrollTop = log.scrollHeight;
 }
 
 function chatNode(cls, text) {
@@ -3428,11 +3515,11 @@ async function chatSend(text) {
   const ws = state.active;
   if (!ws || !text.trim()) return;
   const c = chatFor(ws);
-  if (c.es) return; // a turn is already running; the composer is disabled anyway
+  if (c.busy) return; // a turn is already running; the composer is disabled anyway
 
-  const hint = document.getElementById("chat-empty");
-  if (hint) hint.hidden = true;
-  chatAppend(chatNode("chat-msg you", text));
+  c.hint.hidden = true;
+  chatAppend(c, chatNode("chat-msg you", text));
+  c.busy = true;
   chatSetBusy(true);
 
   let turn;
@@ -3446,8 +3533,9 @@ async function chatSend(text) {
     if (!res.ok) throw new Error(body.error || `send failed (${res.status})`);
     turn = body.turn;
   } catch (e) {
-    chatAppend(chatNode("chat-note bad", String(e.message || e)));
-    chatSetBusy(false);
+    chatAppend(c, chatNode("chat-note bad", String(e.message || e)));
+    c.busy = false;
+    if (ws === state.active) chatSetBusy(false);
     return;
   }
   c.turn = turn;
@@ -3467,7 +3555,7 @@ function chatOpenStream(ws, turn) {
   es.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    if (ws === state.active) chatRender(c, msg);
+    chatRender(c, msg); // into this workspace's thread, looked at or not
   };
   es.addEventListener("done", () => chatEndStream(ws));
   // "failed" rather than "error", and that is not a preference: EventSource
@@ -3479,7 +3567,7 @@ function chatOpenStream(ws, turn) {
   es.addEventListener("failed", (ev) => {
     let why = "the turn stopped being readable";
     try { why = JSON.parse(ev.data) || why; } catch { /* keep the default */ }
-    chatAppend(chatNode("chat-note bad", why));
+    chatAppend(c, chatNode("chat-note bad", why));
     chatEndStream(ws);
   });
   // The transport's own errors are the browser's business: it reconnects by
@@ -3493,13 +3581,20 @@ function chatEndStream(ws) {
   if (c.es) c.es.close();
   c.es = null;
   c.turn = null;
+  c.busy = false;
   if (c.live) { c.live.classList.remove("live"); c.live = null; }
   if (ws === state.active) chatSetBusy(false);
 }
 
-function chatSetBusy(busy) {
+// chatComposer enables or disables the composer and nothing else — for showing
+// a workspace, which is not a moment to move the caret.
+function chatComposer(busy) {
   document.getElementById("chatsend").disabled = busy;
   document.getElementById("chatinput").disabled = busy;
+}
+
+function chatSetBusy(busy) {
+  chatComposer(busy);
   // Only if the chat is what you are looking at. A turn that ends while you are
   // typing in the terminal must not pull the caret into a textarea that is not
   // even on screen — the answer arriving is not a request for your attention.
@@ -3523,7 +3618,7 @@ function chatRender(c, msg) {
   // questions that are not there.
   if (type === "forge_turn") {
     if (c.live) { c.live.remove(); c.live = null; }
-    if (msg.prompt) chatAppend(chatNode("chat-msg you", msg.prompt));
+    if (msg.prompt) chatAppend(c, chatNode("chat-msg you", msg.prompt));
     return;
   }
 
@@ -3535,14 +3630,14 @@ function chatRender(c, msg) {
     if (!text) return;
     if (!c.live) {
       c.live = chatNode("chat-msg claude live", "");
-      chatAppend(c.live);
+      chatAppend(c, c.live);
     }
     // A node per delta rather than rewriting the element's text: += reserializes
     // everything said so far on every fragment, which on a long reply is the
     // whole message copied a few hundred times.
     c.live.appendChild(document.createTextNode(text));
     const log = document.getElementById("chatlog");
-    if (log.scrollHeight - log.scrollTop - log.clientHeight < 80) log.scrollTop = log.scrollHeight;
+    if (!c.thread.hidden && log.scrollHeight - log.scrollTop - log.clientHeight < 80) log.scrollTop = log.scrollHeight;
     return;
   }
 
@@ -3552,9 +3647,9 @@ function chatRender(c, msg) {
     if (c.live) { c.live.remove(); c.live = null; }
     for (const block of chatBlocks(msg)) {
       if (block.type === "text" && block.text) {
-        chatAppend(chatNode("chat-msg claude", block.text));
+        chatAppend(c, chatNode("chat-msg claude", block.text));
       } else if (block.type === "tool_use") {
-        chatAppend(chatToolNode(block));
+        chatAppend(c, chatToolNode(block));
       }
     }
     return;
@@ -3566,7 +3661,7 @@ function chatRender(c, msg) {
     if (msg.is_error) bits.push("ended with an error");
     if (cost !== null) bits.push(`$${cost.toFixed(4)}`);
     if (typeof msg.num_turns === "number") bits.push(`${msg.num_turns} turns`);
-    if (bits.length) chatAppend(chatNode("chat-note", bits.join(" · ")));
+    if (bits.length) chatAppend(c, chatNode("chat-note", bits.join(" · ")));
   }
 }
 

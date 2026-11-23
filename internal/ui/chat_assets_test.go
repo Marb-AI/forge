@@ -166,3 +166,69 @@ func TestTheChatButtonIsWiredBothWays(t *testing.T) {
 		t.Error("the rail does not light up for the chat")
 	}
 }
+
+// Every workspace writes into a thread of its own. With one shared log, switching
+// tabs appended the next workspace's history under the last one's, and an answer
+// that arrived while you were looking at another workspace was dropped — the
+// stream checked which tab was active and threw away anything that was not for
+// it, and the history was never fetched again because it counted as shown.
+func TestEachWorkspaceHasAChatThreadOfItsOwn(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	index := embeddedAsset(t, "index.html")
+
+	if !strings.Contains(jsFunc(t, js, "chatFor"), "thread") {
+		t.Error("chatFor makes no thread for the workspace")
+	}
+	if !strings.Contains(jsFunc(t, js, "chatAppend"), "c.thread.appendChild") {
+		t.Error("chatAppend writes somewhere other than the workspace's own thread")
+	}
+	for _, fn := range []string{"chatOpenStream", "chatShow"} {
+		if code := withoutComments(jsFunc(t, js, fn)); strings.Contains(code, "!== state.active") ||
+			strings.Contains(code, "=== state.active) chatRender") {
+			t.Errorf("%s drops what arrives for a workspace you are not looking at", fn)
+		}
+	}
+	if !strings.Contains(jsFunc(t, js, "chatShow"), "thread.hidden") {
+		t.Error("chatShow does not swap which thread is showing")
+	}
+	// The hint is per thread now; a single element with an id could only ever be
+	// in one of them.
+	if strings.Contains(index, `id="chat-empty"`) {
+		t.Error("index.html still has the one shared chat hint")
+	}
+	if !strings.Contains(index, `<template id="chat-hint">`) {
+		t.Error("index.html has no hint template for chatFor to copy")
+	}
+}
+
+// The face a workspace opens with is the one last picked for it, chat by
+// default — and the terminal whenever its Claude has no login, because signing
+// in is a prompt in the TUI that the chat cannot show.
+func TestAWorkspaceOpensInTheViewItWasLeftIn(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+
+	if !strings.Contains(jsFunc(t, js, "toggleChat"), "rememberView(") {
+		t.Error("a choice made with the rail button is not remembered")
+	}
+	if !strings.Contains(jsFunc(t, js, "selectWs"), "applyView(") {
+		t.Error("switching to a workspace does not open it in its remembered view")
+	}
+	apply := jsFunc(t, js, "applyView")
+	if !strings.Contains(apply, "hasLogin(") {
+		t.Error("applyView does not ask whether Claude is signed in")
+	}
+	if !strings.Contains(apply, `|| "chat"`) {
+		t.Error("a workspace with no remembered view does not default to the chat")
+	}
+	if !strings.Contains(apply, "isNarrow()") {
+		t.Error("applyView would take the chat away on a phone, where it is the only view")
+	}
+	// Not yet knowing is not the same as knowing there is no login; the first
+	// usage reading has to bring the decision back.
+	if !strings.Contains(jsFunc(t, js, "hasLogin"), "usage.loaded") {
+		t.Error("hasLogin answers before any usage has been read")
+	}
+	if !strings.Contains(jsFunc(t, js, "pollUsage"), "applyView(") {
+		t.Error("a view left undecided is never decided once usage arrives")
+	}
+}
