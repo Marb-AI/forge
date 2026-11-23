@@ -240,3 +240,16 @@ func TestLoginWithNoWindowsSpansTheWindowColumns(t *testing.T) {
 		}
 	}
 }
+
+// context_used is omitempty on the wire, so an empty context arrives as no field
+// at all. Dividing that printed "NaN% context" on every fresh workspace; a
+// missing used is zero, while a missing size still means "not reported".
+func TestAnEmptyContextIsZeroPercentNotNaN(t *testing.T) {
+	body := jsFunc(t, embeddedAsset(t, "app.js"), "contextPercent")
+	if !strings.Contains(body, "u.context_used || 0") {
+		t.Error("contextPercent divides context_used as it arrives — absent when zero, so NaN")
+	}
+	if !strings.Contains(body, "!u.context_size") {
+		t.Error("contextPercent no longer treats a missing size as not reported")
+	}
+}
