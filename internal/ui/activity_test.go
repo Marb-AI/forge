@@ -13,7 +13,7 @@ import (
 // handler rather than the guard.
 func authorized(h http.Handler, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("GET", "http://127.0.0.1:47615"+path, nil)
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec

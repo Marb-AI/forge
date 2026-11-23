@@ -38,7 +38,7 @@ func TestLocalTerminalHasWorkspaceLessRoutes(t *testing.T) {
 		{"POST", "/api/term/local/resize", `{"cols":80,"rows":24}`},
 	} {
 		req := httptest.NewRequest(c.method, "http://127.0.0.1:47615"+c.path, strings.NewReader(c.body))
-		req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+		req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 

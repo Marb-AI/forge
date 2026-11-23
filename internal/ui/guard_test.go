@@ -78,7 +78,7 @@ func TestGuardTokenInURLBecomesCookie(t *testing.T) {
 		t.Fatalf("expected one session cookie, got %d", len(cookies))
 	}
 	c := cookies[0]
-	if c.Name != cookieName || c.Value != "secret-token" {
+	if c.Name != "forge_ui_47615" || c.Value != "secret-token" {
 		t.Errorf("unexpected cookie %s=%s", c.Name, c.Value)
 	}
 	if !c.HttpOnly {
@@ -92,7 +92,7 @@ func TestGuardTokenInURLBecomesCookie(t *testing.T) {
 func TestGuardAcceptsCookie(t *testing.T) {
 	_, h := testServer(t)
 	req := httptest.NewRequest("GET", "http://127.0.0.1:47615/api/workspaces", nil)
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -106,7 +106,7 @@ func TestGuardRejectsForeignHostHeader(t *testing.T) {
 	_, h := testServer(t)
 	req := httptest.NewRequest("GET", "http://evil.example/api/workspaces", nil)
 	req.Host = "evil.example"
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -119,7 +119,7 @@ func TestGuardRejectsCrossOriginWrite(t *testing.T) {
 	_, h := testServer(t)
 	req := httptest.NewRequest("POST", "http://127.0.0.1:47615/api/ws/x/stop", nil)
 	req.Header.Set("Origin", "http://evil.example")
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -133,7 +133,7 @@ func TestGuardAllowsSameOriginWrite(t *testing.T) {
 	// past the guard, and that's what we're asserting.
 	req := httptest.NewRequest("POST", "http://127.0.0.1:47615/api/ws/x/stop", nil)
 	req.Header.Set("Origin", "http://127.0.0.1:47615")
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code == http.StatusForbidden {
@@ -181,5 +181,55 @@ func TestJobSupportsConcurrentFollowers(t *testing.T) {
 		if got != "first\nsecond\n" {
 			t.Errorf("follower %d saw %q, want the full output from the start", k, got)
 		}
+	}
+}
+
+// Two UIs on one machine must not sign each other out. A browser keys cookies by
+// host and not by port, so with one cookie name, opening a second Forge on
+// another port overwrote the first one's token and the UI you were working in
+// answered "forbidden". Each port's session lives under a name of its own.
+func TestTwoUIsOnOneHostKeepTheirOwnSessions(t *testing.T) {
+	_, h := testServer(t) // token "secret-token"
+
+	req := httptest.NewRequest("GET", "http://127.0.0.1:47615/api/workspaces", nil)
+	req.AddCookie(&http.Cookie{Name: "forge_ui_47625", Value: "the-other-ui"})
+	req.AddCookie(&http.Cookie{Name: "forge_ui_47615", Value: "secret-token"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("another port's cookie beside ours should change nothing, got %d", rec.Code)
+	}
+
+	// The other port's token is not ours, whatever it is called.
+	req = httptest.NewRequest("GET", "http://127.0.0.1:47615/api/workspaces", nil)
+	req.AddCookie(&http.Cookie{Name: "forge_ui_47625", Value: "secret-token"})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("a cookie named for another port must not let you in, got %d", rec.Code)
+	}
+}
+
+// An upgrade does not sign anybody out: a session from before the cookie carried
+// the port still works, and a stale one under the old shared name does not hide
+// a good one under the new name.
+func TestTheOldSharedCookieStillWorks(t *testing.T) {
+	_, h := testServer(t)
+
+	req := httptest.NewRequest("GET", "http://127.0.0.1:47615/api/workspaces", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("a session from before the upgrade should still work, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest("GET", "http://127.0.0.1:47615/api/workspaces", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: "another-ui-overwrote-this"})
+	req.AddCookie(&http.Cookie{Name: "forge_ui_47615", Value: "secret-token"})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("a stale shared cookie must not hide this port's good one, got %d", rec.Code)
 	}
 }

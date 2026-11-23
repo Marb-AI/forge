@@ -211,9 +211,35 @@ func (d Deps) validate() error {
 	return nil
 }
 
-// cookieName holds the session token in the browser after the one-time
-// token-in-URL bootstrap.
+// cookieName is what the session token was held in before it carried the port,
+// and is still read so an upgrade does not sign anybody out. Nothing sets it.
 const cookieName = "forge_ui"
+
+// cookieNameFor names the session cookie after the port the UI answers on.
+//
+// A browser keys cookies by host and ignores the port, so two Forge UIs on one
+// machine — a second install, a test instance beside the one you work in — are
+// one cookie jar. Under a single name, opening one overwrote the other's token,
+// and the one you were working in answered "forbidden" until its URL was opened
+// again. Which of them a given cookie belongs to is exactly the port.
+func cookieNameFor(host string) string {
+	if _, port, err := net.SplitHostPort(host); err == nil && port != "" {
+		return cookieName + "_" + port
+	}
+	return cookieName
+}
+
+// hasSession says whether the request carries this UI's token, under this
+// port's name or the name every UI used before. Either may be there holding
+// something stale — the old one was shared — so a miss in one is not the answer.
+func hasSession(r *http.Request, token string) bool {
+	for _, name := range []string{cookieNameFor(r.Host), cookieName} {
+		if c, err := r.Cookie(name); err == nil && tokenEqual(c.Value, token) {
+			return true
+		}
+	}
+	return false
+}
 
 type server struct {
 	token string
@@ -512,7 +538,7 @@ func (s *server) guard(next http.Handler) http.Handler {
 		if t := r.URL.Query().Get("t"); t != "" {
 			if tokenEqual(t, s.token) {
 				http.SetCookie(w, &http.Cookie{
-					Name: cookieName, Value: s.token, Path: "/",
+					Name: cookieNameFor(r.Host), Value: s.token, Path: "/",
 					HttpOnly: true, SameSite: http.SameSiteStrictMode,
 				})
 				u := *r.URL
@@ -525,7 +551,7 @@ func (s *server) guard(next http.Handler) http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if c, err := r.Cookie(cookieName); err != nil || !tokenEqual(c.Value, s.token) {
+		if !hasSession(r, s.token) {
 			http.Error(w, "forbidden — open the URL that `forge ui` printed", http.StatusForbidden)
 			return
 		}

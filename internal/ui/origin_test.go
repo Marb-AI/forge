@@ -22,7 +22,7 @@ func ask(t *testing.T, h http.Handler, method, path string, headers map[string]s
 	t.Helper()
 	r := httptest.NewRequest(method, path, nil)
 	r.Host = "127.0.0.1:8080"
-	r.AddCookie(&http.Cookie{Name: cookieName, Value: "t0ken"})
+	r.AddCookie(&http.Cookie{Name: cookieNameFor(r.Host), Value: "t0ken"})
 	for k, v := range headers {
 		r.Header.Set(k, v)
 	}

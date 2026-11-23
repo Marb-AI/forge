@@ -43,7 +43,7 @@ func TestTrackEndpointNilDep(t *testing.T) {
 func authorizedPost(h http.Handler, path, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", "http://127.0.0.1:47615"+path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
