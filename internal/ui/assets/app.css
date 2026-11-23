@@ -950,6 +950,10 @@ button.big { padding: 10px 20px; font-size: 13px; }
   font-size: 13.5px;
   line-height: 1.55;
 }
+/* One per workspace, only the active one showing. The log scrolls; a thread is
+   just the column the messages stack in, so it lays them out the same way. */
+.chat-thread { display: flex; flex-direction: column; gap: 12px; }
+.chat-thread[hidden] { display: none; }
 .chat-hint { color: var(--muted); max-width: 46em; }
 
 /* Yours and its. Both are text; only one of them is indented, because a

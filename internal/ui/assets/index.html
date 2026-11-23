@@ -196,12 +196,14 @@
             <div id="pv-frames"></div>
           </section>
           <section id="chatpanel" hidden aria-label="Chat with Claude">
-            <div id="chatlog" role="log" aria-live="polite">
-              <div id="chat-empty" class="chat-hint">
+            <div id="chatlog" role="log" aria-live="polite"></div>
+            <!-- Each workspace's thread gets its own copy (see chatFor). -->
+            <template id="chat-hint">
+              <div class="chat-hint">
                 Ask Claude something. This runs in the same workspace and the same
                 session as the terminal — it is the other way in, not another Claude.
               </div>
-            </div>
+            </template>
             <form id="chatform">
               <textarea id="chatinput" rows="1" placeholder="Ask Claude…"
                         autocomplete="off" spellcheck="false"></textarea>
