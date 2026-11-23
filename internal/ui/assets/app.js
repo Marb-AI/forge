@@ -1157,6 +1157,14 @@ function windowSpan(label, w) {
   return el;
 }
 
+// paysPerToken says whether a workspace's Claude bills by the token — an API key,
+// Bedrock or Vertex — as opposed to a subscription, where a turn's cost is only
+// what it would have been.
+function paysPerToken(ws) {
+  const u = ws && usage.data[ws];
+  return !!u && ["api", "bedrock", "vertex"].includes(u.auth);
+}
+
 // A missing size is "not reported" and gives no number. A missing used is zero:
 // the wire omits zero values, and an empty context — a session that has not been
 // asked anything yet — is exactly when it is zero. Dividing the missing value
@@ -3659,12 +3667,18 @@ function chatRender(c, msg) {
     return;
   }
 
+  // The end of a turn says something only when there is something to say: that
+  // it failed, or what it cost a workspace that pays per token. Claude Code
+  // reports a cost for every turn, but on a subscription it is what the same
+  // tokens would have cost on the API, not a bill — the usage panel leaves it out
+  // for that reason, and so does this. The turn count is the agent's internal
+  // loop, which nobody reading a conversation was asking about.
   if (type === "result") {
     const cost = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : null;
+    const ws = Object.keys(chat.byWs).find((k) => chat.byWs[k] === c);
     const bits = [];
     if (msg.is_error) bits.push("ended with an error");
-    if (cost !== null) bits.push(`$${cost.toFixed(4)}`);
-    if (typeof msg.num_turns === "number") bits.push(`${msg.num_turns} turns`);
+    if (cost !== null && paysPerToken(ws)) bits.push(`$${cost.toFixed(4)}`);
     if (bits.length) chatAppend(c, chatNode("chat-note", bits.join(" · ")));
   }
 }
