@@ -56,7 +56,7 @@ func postPrepare(t *testing.T, h http.Handler, body string) {
 	r := httptest.NewRequest("POST", "http://127.0.0.1:47615/api/hosts/prepare", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Origin", "http://127.0.0.1:47615")
-	r.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	r.AddCookie(&http.Cookie{Name: cookieNameFor(r.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
 	if rec.Code != http.StatusAccepted {
@@ -148,7 +148,7 @@ func TestPrepareRejectsImageSweepWithoutCleanup(t *testing.T) {
 		strings.NewReader(`{"target":"root@1.2.3.4","alias":"box","dockerPrune":false,"pruneImages":true}`))
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Origin", "http://127.0.0.1:47615")
-	r.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	r.AddCookie(&http.Cookie{Name: cookieNameFor(r.Host), Value: "secret-token"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)
 

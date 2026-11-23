@@ -172,7 +172,7 @@ func TestNoTerminalIsOpenedForAWorkspaceOrKindThatIsNot(t *testing.T) {
 		"/api/term/crm/sftp/stream",
 	} {
 		req := httptest.NewRequest("GET", "http://127.0.0.1:47615"+path, nil)
-		req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+		req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
@@ -251,7 +251,7 @@ func openStream(t *testing.T, url string) *http.Response {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("open %s: %v", url, err)
@@ -271,7 +271,7 @@ func post(t *testing.T, url, body string, want int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: "secret-token"})
+	req.AddCookie(&http.Cookie{Name: cookieNameFor(req.Host), Value: "secret-token"})
 	req.Header.Set("Content-Type", "text/plain")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
