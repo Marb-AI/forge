@@ -232,3 +232,21 @@ func TestAWorkspaceOpensInTheViewItWasLeftIn(t *testing.T) {
 		t.Error("a view left undecided is never decided once usage arrives")
 	}
 }
+
+// A subscription does not pay per token, so a turn's cost — which Claude Code
+// reports regardless, as what the API would have charged — is not shown there.
+// The usage panel already leaves it out for that reason; the chat printed it
+// under every answer.
+func TestAChatTurnShowsACostOnlyWhereThereIsABill(t *testing.T) {
+	js := embeddedAsset(t, "app.js")
+	render := jsFunc(t, js, "chatRender")
+	if !strings.Contains(render, "paysPerToken(") {
+		t.Error("a turn's cost is printed whatever the workspace pays with")
+	}
+	if strings.Contains(withoutComments(render), "num_turns") {
+		t.Error("the agent's internal turn count is back under every answer")
+	}
+	if strings.Contains(jsFunc(t, js, "paysPerToken"), "subscription") {
+		t.Error("paysPerToken counts a subscription as paying per token")
+	}
+}
